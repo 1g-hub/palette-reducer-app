@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Browser Palette Reducer</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="./styles.css?v=20260609-9">
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="panel controls">
+        <h1>Palette Reducer</h1>
+
+        <label class="field">
+          <span>Video</span>
+          <input id="videoFile" type="file" accept="video/*">
+        </label>
+
+        <div class="field-grid">
+          <label class="field">
+            <span>Analysis short side</span>
+            <input id="analysisShortSide" type="number" min="120" max="1080" step="30" value="540">
+          </label>
+          <label class="field">
+            <span>Preview short side</span>
+            <input id="previewShortSide" type="number" min="120" max="1080" step="30" value="360">
+          </label>
+        </div>
+
+        <div class="field-grid">
+          <label class="field">
+            <span>Max colors</span>
+            <input id="maxCandidates" type="number" min="100" max="1200" step="100" value="800">
+          </label>
+          <label class="field">
+            <span>Min rep distance</span>
+            <input id="minRepDistance" type="number" min="0" max="80" step="1" value="12">
+          </label>
+        </div>
+
+        <div class="field-grid">
+          <label class="field">
+            <span>Min K</span>
+            <input id="minClusters" type="number" min="2" max="20" step="1" value="4">
+          </label>
+          <label class="field">
+            <span>Max K</span>
+            <input id="maxClusters" type="number" min="4" max="60" step="1" value="40">
+          </label>
+        </div>
+
+        <label class="field">
+          <span>Threshold mode</span>
+          <select id="thresholdMode">
+            <option value="auto" selected>Auto</option>
+            <option value="fixed">Fixed</option>
+          </select>
+        </label>
+
+        <div class="field-grid">
+          <label class="field">
+            <span>Fixed threshold</span>
+            <input id="fixedThreshold" type="number" min="0" max="200" step="1" value="60">
+          </label>
+          <label class="field">
+            <span>Auto margin</span>
+            <input id="thresholdMargin" type="number" min="0" max="40" step="1" value="5">
+          </label>
+        </div>
+
+        <div class="button-row">
+          <button id="analyzeButton" type="button" disabled>Analyze</button>
+          <button id="stopButton" type="button" disabled>Stop</button>
+          <button id="previewButton" type="button" disabled>Preview</button>
+          <button id="recordButton" type="button" disabled>Export WebM</button>
+        </div>
+
+        <progress id="progressBar" value="0" max="1"></progress>
+        <p id="statusText" class="status">Select a video.</p>
+
+        <a id="downloadLink" class="download" hidden download="palette-reduced.webm">Download WebM</a>
+      </aside>
+
+      <section class="workspace">
+        <div class="video-grid">
+          <section class="panel viewer">
+            <header>Original</header>
+            <canvas id="sourceCanvas"></canvas>
+          </section>
+          <section class="panel viewer">
+            <header>Reduced</header>
+            <canvas id="processedCanvas"></canvas>
+          </section>
+          <section class="panel viewer">
+            <header>New-color mask</header>
+            <canvas id="maskCanvas"></canvas>
+          </section>
+        </div>
+
+        <section id="outputPanel" class="panel output-panel" hidden>
+          <header>Exported WebM</header>
+          <video id="outputVideo" class="output-video" controls playsinline></video>
+        </section>
+
+        <section class="panel palette-panel">
+          <header>Palette</header>
+          <div id="palette" class="palette"></div>
+        </section>
+
+        <section class="panel metrics-panel">
+          <header>Metrics</header>
+          <div id="metrics" class="metrics"></div>
+        </section>
+
+        <section class="panel table-panel">
+          <header>K candidates</header>
+          <div class="table-wrap">
+            <table id="candidateTable">
+              <thead>
+                <tr>
+                  <th>K</th>
+                  <th>Relative gap</th>
+                  <th>Min rep distance</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <video id="workVideo" muted playsinline preload="auto"></video>
+    <script src="./app.js?v=20260609-9"></script>
+  </body>
+</html>
