@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260618-5";
+const APP_VERSION = "20260618-6";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -58,12 +58,13 @@ const FULLRANGE_709 = ["-color_range", "pc", "-colorspace", "bt709", "-color_pri
 const VF_FULL = (pix) => ["-vf", `scale=in_range=full:out_range=full,format=${pix}`];
 
 // Save formats, ordered from most information-preserving to smallest. All video-only (no audio).
-// RGB-capable codecs (raw / FFV1) keep RGB with no color conversion → colors are bit-identical to
-// the preview. YUV codecs are tagged full-range BT.709 to match the preview as closely as possible.
+// RGB-capable codecs (raw / FFV1) avoid YUV chroma conversion. AVI raw video is stored as BGR24,
+// which decodes back to the same RGB colors in players/editors that handle raw AVI correctly.
+// YUV codecs are tagged full-range BT.709 to match the preview as closely as possible.
 const EXPORT_FORMATS = [
-  { id: "raw", label: "非圧縮 RGB（MKV・最高品質/最大）", ext: "mkv", mime: "video/x-matroska", via: "ffmpeg", enc: "rawvideo",
-    args: ["-c:v", "rawvideo", "-pix_fmt", "rgb24"],
-    desc: "情報量を一切落とさない無圧縮（RGBのまま保存するので色はプレビューと完全一致）。ファイルは極端に大きく、書き出しも最も重い。" },
+  { id: "raw", label: "非圧縮 RGB（AVI・最高品質/最大）", ext: "avi", mime: "video/x-msvideo", via: "ffmpeg", enc: "rawvideo",
+    args: ["-c:v", "rawvideo", "-pix_fmt", "bgr24"],
+    desc: "情報量を一切落とさない無圧縮。AVIの標準的なBGR24で保存し、再生時にRGBとして同じ色へ戻ります。ファイルは極端に大きく、書き出しも最も重い。" },
   { id: "ffv1", label: "FFV1 可逆圧縮・RGB（MKV）", ext: "mkv", mime: "video/x-matroska", via: "ffmpeg", enc: "ffv1",
     args: ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"],
     desc: "RGBのまま可逆圧縮するので色も画質も完全一致。無圧縮よりかなり小さい。保存・編集向け（再生対応プレイヤーは限られます）。" },
@@ -2049,4 +2050,3 @@ function esc(str) {
 }
 
 init();
-
