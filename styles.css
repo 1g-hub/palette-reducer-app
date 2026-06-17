@@ -18,6 +18,9 @@
 }
 
 * { box-sizing: border-box; }
+/* The [hidden] attribute must always win over class-based display rules
+   (.slider-field, .btn-primary, .vid-tabs, .toast, etc. set display). */
+[hidden] { display: none !important; }
 html, body { margin: 0; }
 body { background: var(--bg); min-height: 100vh; -webkit-font-smoothing: antialiased; }
 button, input, select { font: inherit; }
@@ -28,10 +31,12 @@ b { font-weight: 700; }
 @keyframes pop { 0% { transform: translate(-50%, 8px); opacity: 0; } 100% { transform: translate(-50%, 0); opacity: 1; } }
 
 /* ---------- layout ---------- */
-.page { padding: 40px 28px 60px; }
-.app-wrap { max-width: 1160px; margin: 0 auto; }
+.page { padding: 14px; }
+.app-wrap { max-width: none; margin: 0; }
+.app-card { display: flex; flex-direction: column; min-height: calc(100vh - 56px); }
+.app-body { flex: 1; }
 
-.frame-label { display: flex; align-items: center; gap: 8px; margin: 0 0 14px 4px; }
+.frame-label { display: flex; align-items: center; gap: 8px; margin: 0 0 10px 4px; }
 .frame-label .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .frame-label span:last-child { font-size: 12px; font-weight: 700; letter-spacing: .09em; color: #7a8090; }
 
@@ -328,7 +333,42 @@ input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 
 }
 .toast.success { background: var(--green); }
 .toast.error { background: var(--danger); }
+.toast[hidden] { display: none; }
 .toast-ic { width: 18px; height: 18px; border-radius: 50%; background: rgba(255, 255, 255, .25); display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
+
+/* ---------- custom tooltip ---------- */
+.tip {
+  position: fixed; z-index: 9999; max-width: 280px; background: #232832; color: #eef0f5;
+  font-size: 11.5px; font-weight: 500; line-height: 1.6; padding: 9px 12px; border-radius: 9px;
+  box-shadow: 0 10px 26px -10px rgba(0, 0, 0, .55); pointer-events: none; white-space: normal;
+}
+.tip[hidden] { display: none; }
+.info { cursor: help; }
+
+/* ---------- advanced live preview ---------- */
+.adv-preview { margin-bottom: 20px; padding: 14px; background: #f7f8fc; border: 1px solid #eaecf3; border-radius: 12px; }
+.adv-preview-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.adv-preview-title { font-size: 12.5px; font-weight: 700; color: var(--ink-2); }
+.adv-preview-note { font-size: 11px; color: var(--muted); }
+.adv-prev-tabs { display: flex; gap: 6px; margin-bottom: 11px; flex-wrap: wrap; }
+.adv-prev-tab { border: 2px solid transparent; border-radius: 8px; padding: 3px; background: #eef0f5; cursor: pointer; line-height: 0; }
+.adv-prev-tab.active { border-color: var(--accent); background: var(--accent-soft); }
+.adv-prev-tab img { width: 52px; height: 32px; border-radius: 5px; display: block; object-fit: cover; background: #222; }
+.adv-prev-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
+.adv-prev-label { font-size: 11px; color: #8a90a0; margin-bottom: 5px; }
+.adv-prev-label.accent { color: var(--accent-d); font-weight: 700; }
+.adv-prev-status { margin-left: 6px; font-size: 10.5px; color: var(--muted); font-weight: 500; }
+.adv-prev-canvas { width: 100%; aspect-ratio: 16 / 9; border-radius: 9px; border: 1px solid #e2e6ef; display: block; background: #222; }
+
+/* ---------- K stepper (step3) ---------- */
+.k-control { display: flex; align-items: center; gap: 10px; margin: 22px 0 0; }
+.k-ctrl-label { font-size: 14px; font-weight: 700; color: var(--ink); }
+.k-stepper { display: inline-flex; align-items: center; gap: 2px; background: #f1f3f8; border: 1px solid #e2e6ee; border-radius: 11px; padding: 3px; }
+.k-btn { width: 32px; height: 32px; border-radius: 8px; border: none; background: #fff; color: var(--accent-d); font-size: 18px; font-weight: 700; cursor: pointer; line-height: 1; box-shadow: 0 1px 3px rgba(20, 25, 45, .12); }
+.k-btn:hover { background: var(--accent); color: #fff; }
+.k-btn:disabled { background: transparent; color: #c4c9d2; cursor: default; box-shadow: none; }
+.k-value { min-width: 34px; text-align: center; font-size: 15px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+.k-range { font-size: 11.5px; color: var(--muted); }
 
 /* ---------- hidden work elements ---------- */
 #workVideo, .offscreen { position: fixed; left: -10000px; top: 0; opacity: 0; pointer-events: none; }

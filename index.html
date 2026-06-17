@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20260617-1">
+    <link rel="stylesheet" href="./styles.css?v=20260617-2">
   </head>
   <body>
     <div class="page">
@@ -118,12 +118,31 @@
                   </button>
                   <div id="advancedBody" class="accordion-body" hidden>
                     <div class="adv-scroll">
+
+                      <div class="adv-preview">
+                        <div class="adv-preview-head">
+                          <span class="adv-preview-title">最初のフレームでプレビュー</span>
+                          <span class="adv-preview-note">スライダーを動かすと右が更新されます</span>
+                        </div>
+                        <div id="advPrevTabs" class="adv-prev-tabs" hidden></div>
+                        <div class="adv-prev-grid">
+                          <div>
+                            <div class="adv-prev-label">元のフレーム — <span id="advPrevName">—</span></div>
+                            <canvas id="cvPrevOrig" class="adv-prev-canvas"></canvas>
+                          </div>
+                          <div>
+                            <div class="adv-prev-label accent">処理後（現在の設定）<span id="advPrevStatus" class="adv-prev-status"></span></div>
+                            <canvas id="cvPrevReduced" class="adv-prev-canvas"></canvas>
+                          </div>
+                        </div>
+                      </div>
+
                       <div class="group-title">精度と速度</div>
 
                       <div class="slider-field">
                         <div class="slider-top">
                           <span class="slider-name">分析の解像度（短辺）</span>
-                          <span class="info" title="分析時に縮小するサイズ。大きいほど精密ですが遅くなります（既定540）。英語名: Analysis short side">ⓘ</span>
+                          <span class="info" data-tip="分析時に縮小するサイズ。大きいほど精密ですが遅くなります（既定540）。英語名: Analysis short side">ⓘ</span>
                           <span class="slider-val"><span id="vAna">540</span>px</span>
                         </div>
                         <input id="sAna" type="range" min="240" max="1080" step="20" value="540">
@@ -132,7 +151,7 @@
                       <div class="slider-field">
                         <div class="slider-top">
                           <span class="slider-name">使う色の細かさ（候補数）</span>
-                          <span class="info" title="分析に使う色の数。多いほど高精度ですが遅くなります（既定800）。英語名: Max colors">ⓘ</span>
+                          <span class="info" data-tip="分析に使う色の数。多いほど高精度ですが遅くなります（既定800）。英語名: Max colors">ⓘ</span>
                           <span class="slider-val"><span id="vMaxc">800</span>色</span>
                         </div>
                         <input id="sMaxc" type="range" min="200" max="3000" step="50" value="800">
@@ -141,7 +160,7 @@
                       <div class="slider-field">
                         <div class="slider-top">
                           <span class="slider-name">プレビュー/書き出しの解像度</span>
-                          <span class="info" title="表示・保存する映像の大きさ（既定360）。英語名: Preview short side">ⓘ</span>
+                          <span class="info" data-tip="表示・保存する映像の大きさ（既定360）。英語名: Preview short side">ⓘ</span>
                           <span class="slider-val"><span id="vPrev">360</span>px</span>
                         </div>
                         <input id="sPrev" type="range" min="160" max="720" step="20" value="360">
@@ -152,7 +171,7 @@
                       <div class="slider-field">
                         <div class="slider-top">
                           <span class="slider-name">似た色をまとめる強さ</span>
-                          <span class="info" title="値が大きいほど、近い色どうしを1色にまとめます（既定12）。英語名: Min rep distance">ⓘ</span>
+                          <span class="info" data-tip="値が大きいほど、近い色どうしを1色にまとめます（既定12）。英語名: Min rep distance">ⓘ</span>
                           <span class="slider-val" id="vMindist">12</span>
                         </div>
                         <input id="sMindist" type="range" min="4" max="40" step="1" value="12">
@@ -185,7 +204,7 @@
                       <div id="fixedField" class="slider-field" hidden>
                         <div class="slider-top">
                           <span class="slider-name">手動のしきい値</span>
-                          <span class="info" title="手動時に使う基準値（既定60）。英語名: Fixed threshold">ⓘ</span>
+                          <span class="info" data-tip="手動時に使う基準値（既定60）。英語名: Fixed threshold">ⓘ</span>
                           <span class="slider-val" id="vFixed">60</span>
                         </div>
                         <input id="sFixed" type="range" min="10" max="150" step="1" value="60">
@@ -194,7 +213,7 @@
                       <div class="slider-field">
                         <div class="slider-top">
                           <span class="slider-name">自動判定の余裕</span>
-                          <span class="info" title="自動時の感度調整。大きいほど“はみ出し色”を少なく判定（既定5）。英語名: Auto margin">ⓘ</span>
+                          <span class="info" data-tip="自動時の感度調整。大きいほど“はみ出し色”を少なく判定（既定5）。英語名: Auto margin">ⓘ</span>
                           <span class="slider-val" id="vMargin">5</span>
                         </div>
                         <input id="sMargin" type="range" min="0" max="30" step="1" value="5">
@@ -247,23 +266,23 @@
 
                 <div class="preview-grid">
                   <div class="preview-cell">
-                    <div class="cell-head"><span>元の動画</span><span class="info" title="読み込んだそのままの映像です。英語名: Original">ⓘ</span></div>
+                    <div class="cell-head"><span>元の動画</span><span class="info" data-tip="読み込んだそのままの映像です。英語名: Original">ⓘ</span></div>
                     <canvas id="cvOrig" class="preview-canvas"></canvas>
                   </div>
                   <div class="preview-cell">
-                    <div class="cell-head"><span>色を減らした映像</span><span class="info" title="代表色だけで作り直した映像です。英語名: Reduced">ⓘ</span></div>
+                    <div class="cell-head"><span>色を減らした映像</span><span class="info" data-tip="代表色だけで作り直した映像です。英語名: Reduced">ⓘ</span></div>
                     <canvas id="cvReduced" class="preview-canvas"></canvas>
                   </div>
                 </div>
                 <div class="preview-cell half">
-                  <div class="cell-head"><span>はみ出し色マップ</span><span class="info" title="パレットに無い色（マゼンタで表示）がどこにあるかを示します。英語名: New-color mask">ⓘ</span></div>
+                  <div class="cell-head"><span>はみ出し色マップ</span><span class="info" data-tip="パレットに無い色（マゼンタで表示）がどこにあるかを示します。英語名: New-color mask">ⓘ</span></div>
                   <canvas id="cvMask" class="preview-canvas dark"></canvas>
                 </div>
 
                 <div class="threshold-panel">
                   <div class="slider-top">
                     <span class="slider-name strong">色のしきい値を調整する</span>
-                    <span class="info" title="代表色（クラスタ中心）から、この距離までを『その代表色とみなす』範囲です。小さくすると、はみ出し色（マゼンタ）が増え、大きくすると減ります。">ⓘ</span>
+                    <span class="info" data-tip="代表色（クラスタ中心）から、この距離までを『その代表色とみなす』範囲です。小さくすると、はみ出し色（マゼンタ）が増え、大きくすると減ります。">ⓘ</span>
                     <span class="slider-val" id="vConfirm">47</span>
                   </div>
                   <input id="sConfirm" type="range" min="10" max="150" step="1" value="47">
@@ -271,6 +290,17 @@
                     <span>← 小さい：はみ出し色（マゼンタ）が増える</span>
                     <span>大きい：はみ出し色が減る →</span>
                   </div>
+                </div>
+
+                <div class="k-control">
+                  <span class="k-ctrl-label">代表色の数を変える</span>
+                  <span class="info" data-tip="クラスタリングの階層を1段ずつ動かします。＋でクラスタが1つ増え（より細かく）、−で最も近い2つが1つに統合されます（より粗く）。">ⓘ</span>
+                  <div class="k-stepper">
+                    <button id="kMinus" type="button" class="k-btn">−</button>
+                    <span id="kValue" class="k-value">—</span>
+                    <button id="kPlus" type="button" class="k-btn">＋</button>
+                  </div>
+                  <span id="kRange" class="k-range"></span>
                 </div>
 
                 <div class="palette-head">
@@ -350,6 +380,6 @@
     <!-- hidden work elements -->
     <video id="workVideo" muted playsinline preload="auto"></video>
     <canvas id="exportCanvas" class="offscreen"></canvas>
-    <script src="./app.js?v=20260617-1"></script>
+    <script src="./app.js?v=20260617-2"></script>
   </body>
 </html>

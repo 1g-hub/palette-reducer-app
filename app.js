@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260617-1";
+const APP_VERSION = "20260617-2";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -18,6 +18,8 @@ const dom = {
   presetSeg: $("presetSeg"), analyzeBtn: $("analyzeBtn"), analyzeBtnLabel: $("analyzeBtnLabel"),
   advancedToggle: $("advancedToggle"), advancedCaret: $("advancedCaret"), advancedBody: $("advancedBody"),
   thresholdSeg: $("thresholdSeg"), fixedField: $("fixedField"), resetAdvancedBtn: $("resetAdvancedBtn"),
+  advPrevTabs: $("advPrevTabs"), advPrevName: $("advPrevName"), advPrevStatus: $("advPrevStatus"),
+  cvPrevOrig: $("cvPrevOrig"), cvPrevReduced: $("cvPrevReduced"),
   // analyzing
   analyzingDesc: $("analyzingDesc"), analyzingList: $("analyzingList"),
   elapsedText: $("elapsedText"), stopAnalyzeBtn: $("stopAnalyzeBtn"),
@@ -26,6 +28,7 @@ const dom = {
   backToStep2: $("backToStep2"), playBtn: $("playBtn"), step3Tabs: $("step3Tabs"), activeName: $("activeName"),
   cvOrig: $("cvOrig"), cvReduced: $("cvReduced"), cvMask: $("cvMask"),
   vConfirm: $("vConfirm"), sConfirm: $("sConfirm"),
+  kMinus: $("kMinus"), kValue: $("kValue"), kPlus: $("kPlus"), kRange: $("kRange"),
   paletteCount: $("paletteCount"), palette: $("palette"), cvPlot: $("cvPlot"),
   detailsToggle: $("detailsToggle"), detailsCaret: $("detailsCaret"), detailsBody: $("detailsBody"),
   metrics: $("metrics"), ktableBody: $("ktableBody"), toStep4Btn: $("toStep4Btn"),
@@ -80,8 +83,15 @@ const state = {
   plotRot: { yaw: 0.6, pitch: -0.45 },
   plotDragging: false,
   plotLast: { x: 0, y: 0 },
+  plotCache: null,
   toastTimer: null,
   vid: 0,
+  advPreviewIdx: 0,
+  advPreviewToken: 0,
+  advPreviewTimer: null,
+  previewWorker: null,
+  exportDir: null,
+  exportDirName: "",
 };
 
 /* ============================ init / events ============================ */
@@ -100,9 +110,10 @@ function init() {
   dom.backToStep1.addEventListener("click", () => goStep(1));
   dom.presetSeg.addEventListener("click", onPresetClick);
   dom.analyzeBtn.addEventListener("click", analyzeAll);
-  dom.advancedToggle.addEventListener("click", () => { state.advanced = !state.advanced; syncAdvanced(); });
+  dom.advancedToggle.addEventListener("click", () => { state.advanced = !state.advanced; syncAdvanced(); if (state.advanced) scheduleAdvancedPreview(); });
   dom.thresholdSeg.addEventListener("click", onThresholdModeClick);
   dom.resetAdvancedBtn.addEventListener("click", resetAdvanced);
+  dom.advPrevTabs.addEventListener("click", onAdvPrevTabClick);
   bindSlider(dom.sAna, dom.vAna, "ana");
   bindSlider(dom.sPrev, dom.vPrev, "prev");
   bindSlider(dom.sMaxc, dom.vMaxc, "maxc");
@@ -129,7 +140,11 @@ function init() {
   dom.exportBtn.addEventListener("click", exportSelected);
   dom.restartBtn.addEventListener("click", restart);
 
+  dom.kMinus.addEventListener("click", () => changeK(-1));
+  dom.kPlus.addEventListener("click", () => changeK(1));
+
   attachPlot();
+  attachTooltip();
   render();
 
   if (window.location.protocol === "file:") {
@@ -141,16 +156,23 @@ function bindSlider(slider, label, key) {
   slider.addEventListener("input", () => {
     state.vals[key] = Number(slider.value);
     label.textContent = slider.value;
+    scheduleAdvancedPreview();
   });
 }
 
 /* ============================ video model ============================ */
+
+function fileKey(file) {
+  // Browsers don't expose absolute paths; identify by name + size + lastModified.
+  return `${file.name}__${file.size}__${file.lastModified}`;
+}
 
 function makeVideo(file) {
   state.vid += 1;
   const objectUrl = URL.createObjectURL(file);
   return {
     id: "v" + state.vid,
+    key: fileKey(file),
     file,
     name: file.name,
     url: objectUrl,
@@ -162,6 +184,7 @@ function makeVideo(file) {
     videoWidth: 0, videoHeight: 0, duration: 0,
     thumb: null,
     analysis: null,
+    activeK: 0,
     confirmThreshold: 47,
     processedCache: new Map(),
     maskCache: new Map(),
@@ -171,7 +194,9 @@ function makeVideo(file) {
     save: true,
     exportProgress: 0,
     exportDone: false,
+    exportBlob: null,
     exportUrl: null,
+    savedToDir: false,
     exportName: "",
     exportSize: 0,
   };
@@ -183,9 +208,19 @@ function addFiles(fileList) {
     showToast("error", "動画ファイルが見つかりませんでした。");
     return;
   }
-  files.forEach((f) => state.videos.push(makeVideo(f)));
+  const existing = new Set(state.videos.map((v) => v.key));
+  let added = 0;
+  let skipped = 0;
+  for (const f of files) {
+    const key = fileKey(f);
+    if (existing.has(key)) { skipped += 1; continue; }
+    existing.add(key);
+    state.videos.push(makeVideo(f));
+    added += 1;
+  }
   state.exported = false;
   render();
+  if (skipped > 0) showToast("info", `同じ動画 ${skipped} 件はまとめました${added ? `（${added} 件を追加）` : ""}`);
 }
 
 function onDrop(e) {
@@ -311,6 +346,7 @@ function renderStep2() {
   syncSliders();
   syncAdvanced();
   syncThresholdMode();
+  if (state.advanced) scheduleAdvancedPreview();
 }
 
 function onPresetClick(e) {
@@ -320,6 +356,7 @@ function onPresetClick(e) {
   Object.assign(state.vals, PRESETS[state.preset]);
   syncSliders();
   dom.presetSeg.querySelectorAll(".seg").forEach((b) => b.classList.toggle("active", b.dataset.preset === state.preset));
+  scheduleAdvancedPreview();
 }
 
 function syncSliders() {
@@ -341,6 +378,7 @@ function onThresholdModeClick(e) {
   if (!btn) return;
   state.thresholdMode = btn.dataset.mode;
   syncThresholdMode();
+  scheduleAdvancedPreview();
 }
 
 function syncThresholdMode() {
@@ -353,12 +391,151 @@ function resetAdvanced() {
   state.thresholdMode = "auto";
   state.preset = "recommend";
   renderStep2();
+  scheduleAdvancedPreview();
   showToast("info", "詳細設定をリセットしました");
 }
 
 function syncDetails() {
   dom.detailsBody.hidden = !state.detailsOpen;
   dom.detailsCaret.textContent = state.detailsOpen ? "閉じる ▲" : "開く ▼";
+}
+
+/* ============================ advanced live preview ============================ */
+
+function scheduleAdvancedPreview() {
+  if (!state.advanced || state.analyzing || !hasVideos()) return;
+  if (state.advPreviewIdx >= state.videos.length) state.advPreviewIdx = 0;
+  renderAdvPrevTabs();
+  dom.advPrevStatus.textContent = "計算中…";
+  if (state.advPreviewTimer) clearTimeout(state.advPreviewTimer);
+  state.advPreviewTimer = window.setTimeout(runAdvancedPreview, 450);
+}
+
+function cancelAdvancedPreview() {
+  state.advPreviewToken += 1;
+  if (state.advPreviewTimer) { clearTimeout(state.advPreviewTimer); state.advPreviewTimer = null; }
+  if (state.previewWorker) { state.previewWorker.terminate(); state.previewWorker = null; }
+}
+
+function renderAdvPrevTabs() {
+  const multi = state.videos.length > 1;
+  dom.advPrevTabs.hidden = !multi;
+  if (!multi) return;
+  dom.advPrevTabs.innerHTML = state.videos.map((v, i) => {
+    const cls = i === state.advPreviewIdx ? "adv-prev-tab active" : "adv-prev-tab";
+    const img = v.thumb ? `<img src="${v.thumb}" alt="">` : `<img alt="">`;
+    return `<button class="${cls}" data-idx="${i}" type="button">${img}</button>`;
+  }).join("");
+}
+
+function onAdvPrevTabClick(e) {
+  const btn = e.target.closest("[data-idx]");
+  if (!btn) return;
+  state.advPreviewIdx = Number(btn.dataset.idx);
+  renderAdvPrevTabs();
+  scheduleAdvancedPreview();
+}
+
+async function runAdvancedPreview() {
+  if (!state.advanced || state.analyzing || !hasVideos()) return;
+  const token = ++state.advPreviewToken;
+  const v = state.videos[state.advPreviewIdx] || state.videos[0];
+  if (!v) return;
+  dom.advPrevName.textContent = v.name;
+  try {
+    resetWorkVideo();
+    dom.workVideo.preload = "metadata";
+    dom.workVideo.src = v.url;
+    dom.workVideo.load();
+    await ensureMetadata(dom.workVideo);
+    if (token !== state.advPreviewToken) return;
+    const shortSide = Math.min(state.vals.ana, 240);
+    const frame = await extractFrame(dom.workVideo, 0, shortSide);
+    if (token !== state.advPreviewToken) return;
+    drawImageDataTo(dom.cvPrevOrig, frame.imageData);
+
+    const settings = {
+      ...readSettings(),
+      analysisShortSide: shortSide,
+      previewShortSide: shortSide,
+      maxCandidates: Math.min(state.vals.maxc, 700),
+    };
+    const result = await runPreviewWorker(cloneImageData(frame.imageData), cloneImageData(frame.imageData), settings);
+    if (token !== state.advPreviewToken) return;
+    const reduced = cloneImageData(frame.imageData);
+    processPixels(reduced.data, result.representatives, result.threshold, new Map(), false);
+    drawImageDataTo(dom.cvPrevReduced, reduced);
+    dom.advPrevStatus.textContent = `代表色 ${result.selectedK} 色`;
+  } catch (err) {
+    if (token !== state.advPreviewToken) return;
+    console.error(err);
+    dom.advPrevStatus.textContent = "プレビューを作成できませんでした";
+  }
+}
+
+function runPreviewWorker(firstImageData, lastImageData, settings) {
+  return new Promise((resolve, reject) => {
+    if (state.previewWorker) state.previewWorker.terminate();
+    const worker = new Worker(`./worker.js?v=${APP_VERSION}`);
+    state.previewWorker = worker;
+    worker.onmessage = (event) => {
+      const m = event.data;
+      if (m.type === "done") { worker.terminate(); if (state.previewWorker === worker) state.previewWorker = null; resolve(m.result); }
+      else if (m.type === "error") { worker.terminate(); if (state.previewWorker === worker) state.previewWorker = null; reject(new Error(m.message)); }
+    };
+    worker.onerror = (e) => { worker.terminate(); if (state.previewWorker === worker) state.previewWorker = null; reject(new Error(e.message)); };
+    worker.postMessage(
+      { type: "analyze", payload: { firstBuffer: firstImageData.data.buffer, lastBuffer: lastImageData.data.buffer, settings } },
+      [firstImageData.data.buffer, lastImageData.data.buffer],
+    );
+  });
+}
+
+function cloneImageData(img) {
+  return new ImageData(new Uint8ClampedArray(img.data), img.width, img.height);
+}
+
+function drawImageDataTo(canvas, img) {
+  canvas.width = img.width;
+  canvas.height = img.height;
+  canvas.getContext("2d").putImageData(img, 0, 0);
+}
+
+/* ============================ tooltip ============================ */
+
+function attachTooltip() {
+  const tip = document.createElement("div");
+  tip.className = "tip";
+  tip.hidden = true;
+  document.body.appendChild(tip);
+  const place = (el) => {
+    const r = el.getBoundingClientRect();
+    tip.style.left = "0px";
+    tip.style.top = "0px";
+    tip.hidden = false;
+    const tr = tip.getBoundingClientRect();
+    let left = r.left + r.width / 2 - tr.width / 2;
+    left = Math.max(8, Math.min(window.innerWidth - tr.width - 8, left));
+    let top = r.top - tr.height - 10;
+    if (top < 8) top = r.bottom + 10;
+    tip.style.left = left + "px";
+    tip.style.top = top + "px";
+  };
+  document.addEventListener("mouseover", (e) => {
+    const el = e.target.closest && e.target.closest(".info[data-tip]");
+    if (!el) return;
+    tip.textContent = el.getAttribute("data-tip");
+    place(el);
+  });
+  document.addEventListener("mouseout", (e) => {
+    if (e.target.closest && e.target.closest(".info[data-tip]")) tip.hidden = true;
+  });
+  document.addEventListener("click", (e) => {
+    const el = e.target.closest && e.target.closest(".info[data-tip]");
+    if (!el) { tip.hidden = true; return; }
+    tip.textContent = el.getAttribute("data-tip");
+    place(el);
+  });
 }
 
 /* ============================ settings ============================ */
@@ -385,6 +562,7 @@ function readSettings() {
 
 async function analyzeAll() {
   if (!hasVideos() || state.analyzing) return;
+  cancelAdvancedPreview();
   state.analyzing = true;
   state.cancelled = false;
   state.exported = false;
@@ -421,6 +599,7 @@ async function analyzeAll() {
       });
       throwIfCancelled();
       v.analysis = { ...result, settings };
+      v.activeK = result.selectedK;
       v.confirmThreshold = Math.round(result.threshold);
       v.processedCache = new Map();
       v.maskCache = new Map();
@@ -602,9 +781,41 @@ function renderStep3Dynamic() {
   dom.activeName.textContent = v.name;
   dom.sConfirm.value = v.confirmThreshold;
   dom.vConfirm.textContent = v.confirmThreshold;
+  renderKControl(v);
   renderPalette(v);
   renderMetrics(v);
   renderKTable(v);
+}
+
+function renderKControl(v) {
+  const ks = (v.analysis && v.analysis.availableK) || [];
+  if (!ks.length) { dom.kValue.textContent = String(v.analysis ? v.analysis.representatives.length : "—"); return; }
+  const min = ks[0], max = ks[ks.length - 1];
+  dom.kValue.textContent = String(v.activeK);
+  dom.kRange.textContent = `（${min}〜${max}）`;
+  dom.kMinus.disabled = v.activeK <= min;
+  dom.kPlus.disabled = v.activeK >= max;
+}
+
+function changeK(delta) {
+  const v = activeVideo();
+  if (!v || !v.analysis || !v.analysis.availableK) return;
+  const ks = v.analysis.availableK;
+  let i = ks.indexOf(v.activeK);
+  if (i < 0) i = ks.indexOf(v.analysis.selectedK);
+  i = Math.max(0, Math.min(ks.length - 1, i + delta));
+  const nk = ks[i];
+  if (nk === v.activeK) return;
+  v.activeK = nk;
+  v.analysis.representatives = v.analysis.snapshotsByK[nk].representatives;
+  v.processedCache = new Map();
+  v.maskCache = new Map();
+  state.plotCache = null;
+  renderKControl(v);
+  renderPalette(v);
+  renderMetrics(v);
+  renderKTable(v);
+  if (!state.playing) drawActiveFrame();
 }
 
 function onTabClick(e) {
@@ -641,13 +852,15 @@ function onPaletteClick(e) {
 function renderMetrics(v) {
   const a = v.analysis;
   const ti = a.thresholdInfo;
+  const snap = a.snapshotsByK && a.snapshotsByK[v.activeK];
+  const minDist = snap ? snap.minRepresentativeDistance : a.selectedMinRepresentativeDistance;
   const rows = [
-    ["代表色の数", String(a.selectedK)],
+    ["代表色の数", String(v.activeK || a.selectedK)],
     ["しきい値", String(v.confirmThreshold)],
     ["元のユニーク色", a.uniqueColors.toLocaleString()],
     ["カバー率", formatNumber(a.candidateCoverage * 100, 1) + "%"],
     ["候補色数", a.candidateCount.toLocaleString()],
-    ["代表色の最小距離", formatNumber(a.selectedMinRepresentativeDistance, 1)],
+    ["代表色の最小距離", formatNumber(minDist, 1)],
     ["判定方法", ti.mode === "auto" ? "自動" : "手動"],
     ["分位点", ti.quantileDistance == null ? "—" : formatNumber(ti.quantileDistance, 1)],
   ];
@@ -658,7 +871,7 @@ function renderKTable(v) {
   const a = v.analysis;
   const rows = a.rows.slice(0, 8);
   dom.ktableBody.innerHTML = rows.map((r) => {
-    const sel = r.k === a.selectedK ? " sel" : "";
+    const sel = r.k === (v.activeK || a.selectedK) ? " sel" : "";
     return `<div class="ktable-row${sel}"><span>${r.k}</span><span>${formatNumber(r.relativeGap, 2)}</span><span>${formatNumber(r.minRepresentativeDistance, 1)}</span></div>`;
   }).join("");
 }
@@ -668,12 +881,23 @@ function loadActiveIntoPreview() {
   if (!v || !v.analysis) return;
   stopPlay();
   resetWorkVideo();
+  state.plotCache = null;
   dom.workVideo.preload = "auto";
   dom.workVideo.src = v.url;
   dom.workVideo.load();
   ensureMetadata(dom.workVideo)
-    .then(() => { setPreviewCanvasSizes(v.analysis.settings.previewShortSide); return seekVideo(dom.workVideo, 0); })
-    .then(() => drawActiveFrame())
+    .then(() => {
+      setPreviewCanvasSizes(v.analysis.settings.previewShortSide);
+      // Seek to a small positive time so a real frame decodes (seeking to 0 from 0 fires no "seeked").
+      const t = Math.min(0.08, Math.max(0, (dom.workVideo.duration || 1) / 3));
+      return seekVideo(dom.workVideo, t);
+    })
+    .then(() => {
+      drawActiveFrame();
+      // Draw again next frames in case the first decode wasn't ready.
+      requestAnimationFrame(() => drawActiveFrame());
+      setTimeout(() => { if (!state.playing) drawActiveFrame(); }, 120);
+    })
     .catch((err) => console.error(err));
 }
 
@@ -779,48 +1003,118 @@ function stopPlot() {
   if (state.rafPlot) { cancelAnimationFrame(state.rafPlot); state.rafPlot = null; }
 }
 
+function buildPlotCache(v) {
+  // Precompute normalized positions and each sample's distance to its nearest representative.
+  const reps = v.analysis.representatives;
+  const samples = v.analysis.sampleColors || [];
+  const repPts = reps.map((c) => ({ r: c[0], g: c[1], b: c[2], x: c[0] / 127.5 - 1, y: c[1] / 127.5 - 1, z: c[2] / 127.5 - 1 }));
+  const samplePts = samples.map((c) => {
+    let nd = Infinity;
+    for (const r of reps) {
+      const dr = c[0] - r[0], dg = c[1] - r[1], db = c[2] - r[2];
+      const d = dr * dr + dg * dg + db * db;
+      if (d < nd) nd = d;
+    }
+    return { r: c[0], g: c[1], b: c[2], x: c[0] / 127.5 - 1, y: c[1] / 127.5 - 1, z: c[2] / 127.5 - 1, nd: Math.sqrt(nd) };
+  });
+  return { idx: state.activeIdx, k: v.activeK, repPts, samplePts };
+}
+
 function drawPlot() {
   const cv = dom.cvPlot;
   const v = activeVideo();
   if (!cv || !v || !v.analysis) return;
-  if (!cv.width) { cv.width = 720; cv.height = 320; }
-  const reps = v.analysis.representatives;
-  const samples = v.analysis.sampleColors || [];
+
+  // Crisp backing store (CSS scales it down → sharp).
+  const rect = cv.getBoundingClientRect();
+  const targetW = Math.max(960, Math.round((rect.width || 960) * 2));
+  const targetH = Math.round(targetW * 320 / 720);
+  if (cv.width !== targetW) { cv.width = targetW; cv.height = targetH; }
+
+  if (!state.plotCache || state.plotCache.idx !== state.activeIdx || state.plotCache.k !== v.activeK) {
+    state.plotCache = buildPlotCache(v);
+  }
+  const cache = state.plotCache;
+  const threshold = v.confirmThreshold;
   const ctx = cv.getContext("2d");
   const W = cv.width, H = cv.height;
   ctx.fillStyle = "#0f1117";
   ctx.fillRect(0, 0, W, H);
+
   const yaw = state.plotRot.yaw, pitch = state.plotRot.pitch;
-  const cy = Math.cos(yaw), sy = Math.sin(yaw), cx = Math.cos(pitch), sx = Math.sin(pitch);
-  const cxv = W / 2, cyv = H / 2 + 12, scale = Math.min(W, H) * 0.42, dist = 3.4;
+  const cyw = Math.cos(yaw), syw = Math.sin(yaw), cxp = Math.cos(pitch), sxp = Math.sin(pitch);
+  const cxv = W / 2, cyv = H / 2 + H * 0.04, scale = Math.min(W, H) * 0.46, dist = 3.6;
   const proj = (x, y, z) => {
-    let X = x * cy - z * sy, Z = x * sy + z * cy;
-    let Y = y * cx - Z * sx; Z = y * sx + Z * cx;
+    let X = x * cyw - z * syw, Z = x * syw + z * cyw;
+    let Y = y * cxp - Z * sxp; Z = y * sxp + Z * cxp;
     const f = dist / (dist - Z);
     return { x: cxv + X * scale * f, y: cyv - Y * scale * f, depth: Z, f };
   };
+
+  // axes (R/G/B from the black corner)
   const O = proj(-1, -1, -1);
-  const axes = [[1, -1, -1, "#e8584f", "R"], [-1, 1, -1, "#5fb86a", "G"], [-1, -1, 1, "#5a8fe0", "B"]];
+  const axes = [[1, -1, -1, "#ff5b50", "R"], [-1, 1, -1, "#5fd36a", "G"], [-1, -1, 1, "#5a9bff", "B"]];
+  ctx.lineWidth = 2.5;
   axes.forEach((a) => {
     const P = proj(a[0], a[1], a[2]);
-    ctx.strokeStyle = a[3]; ctx.lineWidth = 2;
+    ctx.strokeStyle = a[3];
     ctx.beginPath(); ctx.moveTo(O.x, O.y); ctx.lineTo(P.x, P.y); ctx.stroke();
-    ctx.fillStyle = a[3]; ctx.font = "bold 13px sans-serif"; ctx.fillText(a[4], P.x + 4, P.y + 4);
+    ctx.fillStyle = a[3]; ctx.font = "bold 22px sans-serif"; ctx.fillText(a[4], P.x + 6, P.y + 6);
   });
-  const pts = [];
-  for (const c of samples) pts.push({ r: c[0], g: c[1], b: c[2], node: false });
-  for (const c of reps) pts.push({ r: c[0], g: c[1], b: c[2], node: true });
-  const drawpts = pts.map((p) => {
-    const P = proj(p.r / 127.5 - 1, p.g / 127.5 - 1, p.b / 127.5 - 1);
-    return { x: P.x, y: P.y, depth: P.depth, f: P.f, p };
+
+  // points: magenta if farther than threshold from nearest representative, else true color
+  const pr = scale; // points-per-normalized-unit (approx, ignoring perspective for radius)
+  const draw = cache.samplePts.map((p) => {
+    const P = proj(p.x, p.y, p.z);
+    return { sx: P.x, sy: P.y, depth: P.depth, f: P.f, p };
   }).sort((a, b) => a.depth - b.depth);
-  drawpts.forEach((d) => {
-    const rad = d.p.node ? 6.5 * d.f : 2.0 * d.f;
-    ctx.beginPath(); ctx.arc(d.x, d.y, Math.max(1, rad), 0, 7);
-    ctx.fillStyle = `rgb(${d.p.r},${d.p.g},${d.p.b})`;
-    ctx.globalAlpha = d.p.node ? 1 : 0.6; ctx.fill();
-    if (d.p.node) { ctx.globalAlpha = 1; ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.stroke(); }
+  draw.forEach((d) => {
+    const out = d.p.nd > threshold;
+    ctx.beginPath();
+    ctx.arc(d.sx, d.sy, Math.max(1.2, 3.0 * d.f), 0, 7);
+    ctx.fillStyle = out ? "#ff00ff" : `rgb(${d.p.r},${d.p.g},${d.p.b})`;
+    ctx.globalAlpha = out ? 0.85 : 0.7;
+    ctx.fill();
   });
+  ctx.globalAlpha = 1;
+
+  // threshold spheres (wireframe great circles) + representative nodes
+  const rNorm = threshold / 127.5;
+  const sorted = cache.repPts.map((c) => ({ c, depth: proj(c.x, c.y, c.z).depth })).sort((a, b) => a.depth - b.depth);
+  sorted.forEach(({ c }) => {
+    const col = `rgb(${c.r},${c.g},${c.b})`;
+    drawWireSphere(ctx, proj, c.x, c.y, c.z, rNorm, col);
+    const P = proj(c.x, c.y, c.z);
+    ctx.beginPath();
+    ctx.arc(P.x, P.y, Math.max(4, 8 * P.f), 0, 7);
+    ctx.fillStyle = col; ctx.globalAlpha = 1; ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = "rgba(255,255,255,.95)"; ctx.stroke();
+  });
+  ctx.globalAlpha = 1;
+}
+
+function drawWireSphere(ctx, proj, cx, cy, cz, r, color) {
+  if (r <= 0) return;
+  const SEG = 30;
+  // three great circles, one in each coordinate plane
+  const circles = [
+    (t) => [cx + r * Math.cos(t), cy + r * Math.sin(t), cz],
+    (t) => [cx + r * Math.cos(t), cy, cz + r * Math.sin(t)],
+    (t) => [cx, cy + r * Math.cos(t), cz + r * Math.sin(t)],
+  ];
+  ctx.lineWidth = 1.4;
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.5;
+  for (const f of circles) {
+    ctx.beginPath();
+    for (let i = 0; i <= SEG; i += 1) {
+      const t = (i / SEG) * Math.PI * 2;
+      const p = f(t);
+      const P = proj(p[0], p[1], p[2]);
+      if (i === 0) ctx.moveTo(P.x, P.y); else ctx.lineTo(P.x, P.y);
+    }
+    ctx.stroke();
+  }
   ctx.globalAlpha = 1;
 }
 
@@ -836,17 +1130,28 @@ function renderStep4() {
   dom.exportBtn.classList.toggle("disabled", sel.length === 0);
   dom.exportingText.hidden = !state.exporting;
   dom.exportedBox.hidden = !state.exported;
-  if (state.exported) dom.exportedText.textContent = `${sel.length} 件の書き出しが完了しました`;
+  if (state.exported) {
+    const okCount = dones.filter((v) => v.exportDone).length;
+    dom.exportedText.textContent = state.exportDirName
+      ? `${okCount} 件を「${state.exportDirName}」フォルダに保存しました`
+      : `${okCount} 件を書き出しました（各行のダウンロードから保存できます）`;
+  }
 }
 
 function renderStep4List() {
   const dones = doneVideos();
   dom.step4List.innerHTML = dones.map((v) => {
     const pct = Math.round(v.exportProgress || 0);
+    const okDone = v.exportDone && (v.savedToDir || v.exportUrl);
     let statusText, statusCls = "";
-    if (state.exported) { statusText = v.save ? (v.exportUrl ? "✓ 保存済み" : "失敗") : "対象外"; statusCls = v.save && v.exportUrl ? "done" : (v.save ? "" : "off"); }
-    else if (state.exporting) { statusText = v.save ? pct + "%" : "対象外"; statusCls = v.save ? "" : "off"; }
-    else { statusText = v.save ? "保存する" : "保存しない"; statusCls = v.save ? "" : "off"; }
+    if (state.exported) {
+      statusText = v.save ? (okDone ? (v.savedToDir ? "✓ フォルダに保存" : "✓ 完了") : "失敗") : "対象外";
+      statusCls = v.save && okDone ? "done" : (v.save ? "" : "off");
+    } else if (state.exporting) {
+      statusText = v.save ? pct + "%" : "対象外"; statusCls = v.save ? "" : "off";
+    } else {
+      statusText = v.save ? "保存する" : "保存しない"; statusCls = v.save ? "" : "off";
+    }
     const bar = state.exporting && v.save ? `<div class="bar"><i style="width:${pct}%"></i></div>` : "";
     const dl = state.exported && v.exportUrl ? `<a class="save-dl" href="${v.exportUrl}" download="${esc(v.exportName)}">ダウンロード (${formatBytes(v.exportSize)})</a>` : "";
     return `
@@ -879,17 +1184,44 @@ async function exportSelected() {
   const sel = doneVideos().filter((v) => v.save);
   if (!sel.length) { showToast("info", "保存する動画を選んでください"); return; }
   if (!supportsRecording()) { showToast("error", "このブラウザは書き出しに対応していません（Chrome / Edge 推奨）。"); return; }
+
+  // Ask for a save folder up front (must run within the click gesture, before any await).
+  let dirHandle = null;
+  if (window.showDirectoryPicker) {
+    try {
+      dirHandle = await window.showDirectoryPicker({ id: "palette-reducer", mode: "readwrite" });
+    } catch (err) {
+      if (err && err.name === "AbortError") { showToast("info", "保存先の選択をキャンセルしました"); return; }
+      dirHandle = null; // unsupported / denied → fall back to download links
+    }
+  }
+  state.exportDir = dirHandle;
+  state.exportDirName = dirHandle ? dirHandle.name : "";
+
   state.exporting = true;
   state.exported = false;
   state.cancelled = false;
   stopPlay();
-  sel.forEach((v) => { v.exportProgress = 0; v.exportDone = false; if (v.exportUrl) { URL.revokeObjectURL(v.exportUrl); v.exportUrl = null; } });
+  sel.forEach((v) => {
+    v.exportProgress = 0; v.exportDone = false; v.savedToDir = false; v.exportBlob = null;
+    if (v.exportUrl) { URL.revokeObjectURL(v.exportUrl); v.exportUrl = null; }
+  });
   render();
 
   for (const v of sel) {
     if (state.cancelled) break;
     try {
       await exportOne(v);
+      if (state.cancelled) break;
+      if (dirHandle) {
+        const fh = await dirHandle.getFileHandle(v.exportName, { create: true });
+        const writable = await fh.createWritable();
+        await writable.write(v.exportBlob);
+        await writable.close();
+        v.savedToDir = true;
+      } else {
+        v.exportUrl = URL.createObjectURL(v.exportBlob);
+      }
       v.exportDone = true;
       v.exportProgress = 100;
     } catch (err) {
@@ -903,7 +1235,9 @@ async function exportSelected() {
   if (state.cancelled) { state.cancelled = false; render(); showToast("info", "書き出しを中断しました"); return; }
   state.exported = true;
   render();
-  showToast("success", `${sel.filter((v) => v.exportUrl).length}件の書き出しが完了しました`);
+  const okCount = sel.filter((v) => v.exportDone).length;
+  if (dirHandle) showToast("success", `${okCount}件を「${state.exportDirName}」フォルダに保存しました`);
+  else showToast("success", `${okCount}件を書き出しました（各行のダウンロードから保存）`);
 }
 
 async function exportOne(v) {
@@ -924,8 +1258,8 @@ async function exportOne(v) {
   recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
   const stopped = new Promise((resolve) => { recorder.onstop = resolve; });
   recorder.start();
-  await seekVideo(dom.workVideo, 0);
   dom.workVideo.muted = true;
+  dom.workVideo.currentTime = 0;
   await dom.workVideo.play();
   await new Promise((resolve) => {
     const step = () => {
@@ -947,7 +1281,7 @@ async function exportOne(v) {
   dom.workVideo.pause();
   if (state.cancelled) return;
   const blob = new Blob(chunks, { type: recorder.mimeType || "video/webm" });
-  v.exportUrl = URL.createObjectURL(blob);
+  v.exportBlob = blob;
   v.exportName = makeOutputName(v.name);
   v.exportSize = blob.size;
 }
@@ -967,7 +1301,12 @@ function restart() {
   state.step = 1;
   state.exported = false;
   state.exporting = false;
-  state.videos.forEach((v) => { v.exportProgress = 0; v.exportDone = false; v.save = true; });
+  state.exportDir = null;
+  state.exportDirName = "";
+  state.videos.forEach((v) => {
+    v.exportProgress = 0; v.exportDone = false; v.save = true; v.savedToDir = false; v.exportBlob = null;
+    if (v.exportUrl) { URL.revokeObjectURL(v.exportUrl); v.exportUrl = null; }
+  });
   render();
 }
 
@@ -1052,7 +1391,12 @@ function fileExtension(name) {
 
 async function extractFrame(video, time, shortSide) {
   await ensureMetadata(video);
-  await seekVideo(video, Math.min(time, Math.max(0, video.duration - 0.001)));
+  const dur = Math.max(0, video.duration - 0.001);
+  let target = Math.min(time, dur);
+  // Seeking to exactly 0 from 0 fires no "seeked" event (no position change),
+  // so a fresh video never decodes a frame. Nudge to a small epsilon near the start.
+  if (target < 0.03 && dur > 0.03) target = 0.03;
+  await seekVideo(video, target);
   const { width, height } = scaledSize(video.videoWidth, video.videoHeight, shortSide);
   const canvas = new OffscreenCanvas(width, height);
   const ctx = canvas.getContext("2d", { willReadFrequently: true });

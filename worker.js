@@ -52,6 +52,17 @@ function analyze(payload) {
   const thresholdInfo = chooseThreshold(colors, counts, snapshot.labels, snapshot.representatives, settings);
   const sampleColors = sampleArray(colors, 1800);
 
+  const snapshotsByK = {};
+  const availableK = [];
+  for (const [k, snap] of clustered.snapshots.entries()) {
+    snapshotsByK[k] = {
+      representatives: snap.representatives,
+      minRepresentativeDistance: snap.minRepresentativeDistance,
+    };
+    availableK.push(k);
+  }
+  availableK.sort((a, b) => a - b);
+
   return {
     selectedK: selected.k,
     representatives: snapshot.representatives,
@@ -64,6 +75,8 @@ function analyze(payload) {
     selectedMinRepresentativeDistance: snapshot.minRepresentativeDistance,
     closestRepresentativePair: snapshot.closestRepresentativePair,
     sampleColors,
+    snapshotsByK,
+    availableK,
     magenta: MAGENTA,
   };
 }
