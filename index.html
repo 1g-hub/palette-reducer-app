@@ -8,16 +8,11 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20260618-2">
+    <link rel="stylesheet" href="./styles.css?v=20260618-4">
   </head>
   <body>
     <div class="page">
       <div class="app-wrap">
-        <div class="frame-label">
-          <span class="dot"></span>
-          <span>動画の色数削減 — 複数の動画をまとめて処理できます</span>
-        </div>
-
         <div class="app-card">
           <!-- header -->
           <header class="app-header">
@@ -27,7 +22,6 @@
               </div>
               <div>
                 <div class="brand-title">Palette Reducer</div>
-                <div class="brand-sub">動画の色を、かんたんに減らす</div>
               </div>
             </div>
             <div class="header-right">
@@ -70,7 +64,7 @@
               <section id="step1" class="step">
                 <div class="step-eyebrow">STEP 1 / 4</div>
                 <h2 class="step-title">動画を選ぶ</h2>
-                <p class="step-desc">色を減らしたい動画をドラッグ＆ドロップ。<b>複数まとめて</b>追加できます。</p>
+                <p class="step-desc">色を減らしたい動画をドラッグ＆ドロップしてください。</p>
 
                 <div id="dropzone" class="dropzone">
                   <span class="dz-icon">↑</span>
@@ -362,7 +356,14 @@
                   <button id="backToStep3" type="button" class="link-muted">← 確認に戻る</button>
                 </div>
                 <h2 class="step-title">保存する</h2>
-                <p class="step-desc">保存したい動画を選んでください。形式は <b>WebM</b> です（MP4 ではありません）。</p>
+                <p class="step-desc">保存したい動画を選び、保存形式を選んでください（音声は含まれません）。</p>
+
+                <div class="fmt-row">
+                  <span class="fmt-label">保存形式</span>
+                  <span id="fmtInfo" class="info" data-tip="">ⓘ</span>
+                  <select id="formatSelect" class="fmt-select"></select>
+                </div>
+                <p id="fmtDesc" class="fmt-desc"></p>
 
                 <div class="list-head">
                   <span id="selCountText" class="list-head-title">0 / 0 件 選択中</span>
@@ -374,8 +375,8 @@
 
                 <div id="step4List" class="save-list"></div>
 
-                <button id="exportBtn" type="button" class="btn-primary block big">⬇ 選択した動画を書き出す（WebM）</button>
-                <p id="exportingText" class="center-note" hidden>書き出し中です… しばらくお待ちください。</p>
+                <button id="exportBtn" type="button" class="btn-primary block big">⬇ 選択した動画を書き出す</button>
+                <p id="exportingText" class="center-note" hidden>書き出し中です… しばらくお待ちください。高品質な形式ほど時間がかかります。</p>
 
                 <div id="exportedBox" hidden>
                   <div class="success-banner">
@@ -396,6 +397,6 @@
     <!-- hidden work elements -->
     <video id="workVideo" muted playsinline preload="auto"></video>
     <canvas id="exportCanvas" class="offscreen"></canvas>
-    <script src="./app.js?v=20260618-2"></script>
+    <script src="./app.js?v=20260618-4"></script>
   </body>
 </html>

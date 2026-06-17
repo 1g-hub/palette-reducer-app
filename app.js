@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260618-2";
+const APP_VERSION = "20260618-4";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -37,6 +37,7 @@ const dom = {
   // step4
   backToStep3: $("backToStep3"), selCountText: $("selCountText"),
   selectAllBtn: $("selectAllBtn"), deselectAllBtn: $("deselectAllBtn"), step4List: $("step4List"),
+  formatSelect: $("formatSelect"), fmtInfo: $("fmtInfo"), fmtDesc: $("fmtDesc"),
   exportBtn: $("exportBtn"), exportingText: $("exportingText"),
   exportedBox: $("exportedBox"), exportedText: $("exportedText"), restartBtn: $("restartBtn"),
   // toast / work
@@ -50,6 +51,38 @@ const dom = {
 };
 
 const NATIVE_RES = 100000; // sentinel → scaledSize keeps native resolution
+const EXPORT_FPS = 24; // frame rate used when re-encoding via ffmpeg.wasm
+
+// Save formats, ordered from most information-preserving to smallest. All video-only (no audio).
+// `via:"mediarecorder"` uses the browser (fast); the rest are encoded with ffmpeg.wasm.
+const EXPORT_FORMATS = [
+  { id: "raw", label: "非圧縮 RGB（AVI・最高品質/最大）", ext: "avi", mime: "video/x-msvideo", via: "ffmpeg", enc: "rawvideo",
+    args: ["-c:v", "rawvideo", "-pix_fmt", "rgb24"],
+    desc: "情報量を一切落とさない無圧縮。最高品質ですがファイルが極端に大きく、書き出しも最も重くなります。" },
+  { id: "ffv1", label: "FFV1 可逆圧縮（MKV）", ext: "mkv", mime: "video/x-matroska", via: "ffmpeg", enc: "ffv1",
+    args: ["-c:v", "ffv1", "-level", "3"],
+    desc: "画質を完全に保ったまま圧縮（可逆）。無圧縮よりかなり小さい。保存・編集向け（再生できるプレイヤーは限られます）。" },
+  { id: "h264lossless", label: "H.264 ロスレス（MKV）", ext: "mkv", mime: "video/x-matroska", via: "ffmpeg", enc: "libx264",
+    args: ["-c:v", "libx264", "-qp", "0", "-preset", "veryfast", "-pix_fmt", "yuv444p"],
+    desc: "H.264の可逆モード。画質劣化なし。FFV1より対応環境が多めです。" },
+  { id: "h265lossless", label: "H.265 ロスレス（MKV）", ext: "mkv", mime: "video/x-matroska", via: "ffmpeg", enc: "libx265",
+    args: ["-c:v", "libx265", "-x265-params", "lossless=1", "-pix_fmt", "yuv444p"],
+    desc: "H.265の可逆モード。可逆の中では小さめですがエンコードは非常に重い。※この環境に無い場合は選べません。" },
+  { id: "prores", label: "ProRes 4444（MOV）", ext: "mov", mime: "video/quicktime", via: "ffmpeg", enc: "prores_ks",
+    args: ["-c:v", "prores_ks", "-profile:v", "4", "-pix_fmt", "yuv444p10le"],
+    desc: "映像編集向けの高品質コーデック。ほぼ無劣化。ファイルは大きめです。" },
+  { id: "h264", label: "H.264 MP4（標準・高画質）", ext: "mp4", mime: "video/mp4", via: "ffmpeg", enc: "libx264",
+    args: ["-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+    desc: "一般的なMP4。少し圧縮されますが高画質で、ほとんどの環境で再生できます。" },
+  { id: "webm-fast", label: "WebM（標準・最速）", ext: "webm", mime: "video/webm", via: "mediarecorder",
+    desc: "ブラウザ標準の高速書き出し。ffmpegの読み込みが不要で最速。画質は標準的です。" },
+  { id: "mp4-low", label: "MP4 低ビットレート（小さい）", ext: "mp4", mime: "video/mp4", via: "ffmpeg", enc: "libx264",
+    args: ["-c:v", "libx264", "-b:v", "800k", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+    desc: "容量を小さく抑えたいとき向け。画質は落ちます。共有・アップロードに。" },
+  { id: "webm-low", label: "WebM 低ビットレート（小さい）", ext: "webm", mime: "video/webm", via: "ffmpeg", enc: "libvpx-vp9",
+    args: ["-c:v", "libvpx-vp9", "-b:v", "500k"],
+    desc: "WebMで容量を抑えたいとき向け。画質は落ちます。" },
+];
 const DEFAULT_VALS = { ana: 540, prev: 360, anaFull: true, prevFull: true, maxc: 800, mindist: 12, mink: 4, maxk: 40, fixed: 60, margin: 5 };
 // Selecting a preset resets ALL parameters (including threshold mode and resolution) to these values.
 const PRESETS = {
@@ -72,6 +105,7 @@ const state = {
   reassure: false,
   exporting: false,
   exported: false,
+  exportFormat: "webm-fast",
   playing: false,
   loop: false,
   cancelled: false,
@@ -157,8 +191,14 @@ function init() {
   dom.selectAllBtn.addEventListener("click", () => setAllSave(true));
   dom.deselectAllBtn.addEventListener("click", () => setAllSave(false));
   dom.step4List.addEventListener("click", onSaveListClick);
+  dom.formatSelect.addEventListener("change", () => {
+    state.exportFormat = dom.formatSelect.value;
+    syncFormatDesc();
+    if (state.step === 4 && !state.exporting) renderStep4List();
+  });
   dom.exportBtn.addEventListener("click", exportSelected);
   dom.restartBtn.addEventListener("click", restart);
+  initFormatSelect();
 
   dom.kMinus.addEventListener("click", () => changeK(-1));
   dom.kPlus.addEventListener("click", () => changeK(1));
@@ -244,12 +284,77 @@ function addFiles(fileList) {
     const key = fileKey(f);
     if (existing.has(key)) { skipped += 1; continue; }
     existing.add(key);
-    state.videos.push(makeVideo(f));
+    const v = makeVideo(f);
+    state.videos.push(v);
+    enqueueThumb(v); // build a thumbnail right away so STEP 1 shows real previews
     added += 1;
   }
   state.exported = false;
   render();
   if (skipped > 0) showToast("info", `同じ動画 ${skipped} 件はまとめました${added ? `（${added} 件を追加）` : ""}`);
+}
+
+/* Thumbnails are generated on add (not only during analysis) so STEP 1 shows real frames.
+   Processed sequentially with a dedicated off-DOM <video> so it never disturbs playback. */
+const thumbQueue = [];
+let thumbBusy = false;
+
+function enqueueThumb(v) {
+  thumbQueue.push(v);
+  pumpThumbs();
+}
+
+async function pumpThumbs() {
+  if (thumbBusy) return;
+  thumbBusy = true;
+  while (thumbQueue.length) {
+    const v = thumbQueue.shift();
+    if (!v || v.thumb || !state.videos.includes(v)) continue;
+    try {
+      await makeThumbForVideo(v);
+      if (state.step === 1) renderStep1();
+    } catch (err) {
+      // Unsupported codec etc. — keep the placeholder; analysis will still try later.
+    }
+  }
+  thumbBusy = false;
+}
+
+function makeThumbForVideo(v) {
+  return new Promise((resolve, reject) => {
+    const vid = document.createElement("video");
+    vid.muted = true;
+    vid.preload = "auto";
+    let done = false;
+    const cleanup = () => { vid.removeAttribute("src"); try { vid.load(); } catch (e) { /* ignore */ } };
+    const fail = (e) => { if (done) return; done = true; window.clearTimeout(timer); cleanup(); reject(e); };
+    const capture = () => {
+      if (done) return;
+      const w = 168;
+      const ratio = (vid.videoWidth && vid.videoHeight) ? vid.videoHeight / vid.videoWidth : 9 / 16;
+      const h = Math.max(1, Math.round(w * ratio));
+      const c = document.createElement("canvas");
+      c.width = w; c.height = h;
+      try {
+        c.getContext("2d").drawImage(vid, 0, 0, w, h);
+        v.thumb = c.toDataURL("image/jpeg", 0.72);
+      } catch (e) { fail(e); return; }
+      if (!v.videoWidth && vid.videoWidth) {
+        v.videoWidth = vid.videoWidth; v.videoHeight = vid.videoHeight; v.duration = vid.duration;
+        v.dimsText = `${vid.videoWidth}×${vid.videoHeight}`; v.durText = formatDuration(vid.duration);
+      }
+      done = true; window.clearTimeout(timer); cleanup(); resolve();
+    };
+    const timer = window.setTimeout(() => fail(new Error("thumb timeout")), 10000);
+    vid.addEventListener("error", () => fail(new Error("thumb load error")), { once: true });
+    vid.addEventListener("seeked", capture, { once: true });
+    vid.addEventListener("loadeddata", () => {
+      // seek a touch into the clip to guarantee a decoded frame
+      try { vid.currentTime = Math.min(0.1, (vid.duration || 1) / 3); } catch (e) { capture(); }
+    }, { once: true });
+    vid.src = v.url;
+    vid.load();
+  });
 }
 
 function onDrop(e) {
@@ -822,13 +927,14 @@ function renderStep3Dynamic() {
   const v = activeVideo();
   if (!v || !v.analysis) return;
   dom.activeName.textContent = v.name;
-  updateSnapMarker(v);
   dom.sConfirm.value = v.confirmThreshold;
   dom.vConfirm.textContent = v.confirmThreshold;
   renderKControl(v);
   renderPalette(v);
   renderMetrics(v);
   renderKTable(v);
+  // The marker is computed from the actual drawn frame, so it is set after the frame
+  // is rendered (loadActiveIntoPreview / changeK / resetConfirmParams).
 }
 
 function renderKControl(v) {
@@ -965,9 +1071,10 @@ function loadActiveIntoPreview() {
     })
     .then(() => {
       drawActiveFrame();
+      updateSnapMarker(v);
       // Draw again next frames in case the first decode wasn't ready.
-      requestAnimationFrame(() => drawActiveFrame());
-      setTimeout(() => { if (!state.playing) drawActiveFrame(); }, 120);
+      requestAnimationFrame(() => { drawActiveFrame(); updateSnapMarker(v); });
+      setTimeout(() => { if (!state.playing) { drawActiveFrame(); updateSnapMarker(v); } }, 120);
     })
     .catch((err) => console.error(err));
 }
@@ -999,8 +1106,7 @@ function setConfirmThreshold(value) {
   requestPlotDraw();
 }
 
-// Threshold at/above which no color is "new" (= magenta count 0): the farthest color's
-// distance to its nearest representative. Depends on the active representatives (K).
+// Fallback estimate from the analyzed color sample (used only if no preview frame is drawn yet).
 function computeNoMagenta(v) {
   const reps = v.analysis.representatives;
   const samples = v.analysis.sampleColors || [];
@@ -1012,15 +1118,43 @@ function computeNoMagenta(v) {
       const d = dr * dr + dg * dg + db * db;
       if (d < nd) nd = d;
     }
-    nd = Math.sqrt(nd);
     if (nd > mx) mx = nd;
   }
-  return Math.ceil(mx);
+  return Math.ceil(Math.sqrt(mx));
+}
+
+// Exact "no magenta" threshold for the CURRENTLY DISPLAYED frame: the farthest pixel's distance
+// to its nearest representative, computed from the same pixels the mask uses (the Original canvas).
+// Recomputed against the active representatives, so it tracks changes in the color count (K).
+function computeFrameNoMagenta(v) {
+  if (!dom.cvOrig.width || !dom.cvOrig.height) return computeNoMagenta(v);
+  let data;
+  try {
+    data = dom.cvOrig.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, dom.cvOrig.width, dom.cvOrig.height).data;
+  } catch (e) {
+    return computeNoMagenta(v);
+  }
+  const reps = v.analysis.representatives;
+  const seen = new Set();
+  let maxSq = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const key = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+    if (seen.has(key)) continue;
+    seen.add(key);
+    let nd = Infinity;
+    for (const r of reps) {
+      const dr = data[i] - r[0], dg = data[i + 1] - r[1], db = data[i + 2] - r[2];
+      const d = dr * dr + dg * dg + db * db;
+      if (d < nd) nd = d;
+    }
+    if (nd > maxSq) maxSq = nd;
+  }
+  return Math.ceil(Math.sqrt(maxSq));
 }
 
 function updateSnapMarker(v) {
   if (!v || !v.analysis) { dom.snapMarker.hidden = true; return; }
-  const nm = computeNoMagenta(v);
+  const nm = computeFrameNoMagenta(v);
   v.noMagentaThreshold = nm;
   const min = Number(dom.sConfirm.min);
   const max = Math.max(150, nm + 8);
@@ -1327,7 +1461,7 @@ function renderStep4() {
   dom.selCountText.textContent = `${sel.length} / ${dones.length} 件 選択中`;
   renderStep4List();
   dom.exportBtn.hidden = state.exporting || state.exported;
-  dom.exportBtn.textContent = `⬇ 選択した ${sel.length} 件を書き出す（WebM）`;
+  dom.exportBtn.textContent = `⬇ 選択した ${sel.length} 件を書き出す`;
   dom.exportBtn.classList.toggle("disabled", sel.length === 0);
   dom.exportingText.hidden = !state.exporting;
   dom.exportedBox.hidden = !state.exported;
@@ -1381,10 +1515,31 @@ function setAllSave(on) {
   renderStep4();
 }
 
+/* ---------- format helpers ---------- */
+function formatById(id) {
+  return EXPORT_FORMATS.find((f) => f.id === id) || EXPORT_FORMATS.find((f) => f.id === "webm-fast");
+}
+
+function initFormatSelect() {
+  dom.formatSelect.innerHTML = EXPORT_FORMATS.map((f) => `<option value="${f.id}">${esc(f.label)}</option>`).join("");
+  dom.formatSelect.value = state.exportFormat;
+  syncFormatDesc();
+}
+
+function syncFormatDesc() {
+  const f = formatById(state.exportFormat);
+  dom.fmtDesc.textContent = f.desc + (f.via === "ffmpeg" ? "（ffmpegで変換するため時間がかかります）" : "");
+  dom.fmtInfo.setAttribute("data-tip", EXPORT_FORMATS.map((x) => `■ ${x.label}\n${x.desc}`).join("\n\n"));
+}
+
 async function exportSelected() {
   const sel = doneVideos().filter((v) => v.save);
   if (!sel.length) { showToast("info", "保存する動画を選んでください"); return; }
-  if (!supportsRecording()) { showToast("error", "このブラウザは書き出しに対応していません（Chrome / Edge 推奨）。"); return; }
+  const fmt = formatById(state.exportFormat);
+  if (fmt.via === "mediarecorder" && !supportsRecording()) {
+    showToast("error", "このブラウザは WebM 書き出しに対応していません。別の形式をお試しください。");
+    return;
+  }
 
   // Ask for a save folder up front (must run within the click gesture, before any await).
   let dirHandle = null;
@@ -1412,7 +1567,8 @@ async function exportSelected() {
   for (const v of sel) {
     if (state.cancelled) break;
     try {
-      await exportOne(v);
+      if (fmt.via === "mediarecorder") await exportViaMediaRecorder(v, fmt);
+      else await exportViaFFmpeg(v, fmt);
       if (state.cancelled) break;
       if (dirHandle) {
         const fh = await dirHandle.getFileHandle(v.exportName, { create: true });
@@ -1437,11 +1593,13 @@ async function exportSelected() {
   state.exported = true;
   render();
   const okCount = sel.filter((v) => v.exportDone).length;
+  if (!okCount) { showToast("error", "書き出しに失敗しました。別の形式をお試しください。"); return; }
   if (dirHandle) showToast("success", `${okCount}件を「${state.exportDirName}」フォルダに保存しました`);
   else showToast("success", `${okCount}件を書き出しました（各行のダウンロードから保存）`);
 }
 
-async function exportOne(v) {
+// Fast path: browser MediaRecorder → WebM.
+async function exportViaMediaRecorder(v, fmt) {
   resetWorkVideo();
   dom.workVideo.preload = "auto";
   dom.workVideo.src = v.url;
@@ -1451,7 +1609,7 @@ async function exportOne(v) {
   dom.exportCanvas.width = width;
   dom.exportCanvas.height = height;
   const ctx = dom.exportCanvas.getContext("2d", { willReadFrequently: true });
-  const stream = dom.exportCanvas.captureStream(24);
+  const stream = dom.exportCanvas.captureStream(EXPORT_FPS);
   const mimeType = chooseRecorderMimeType();
   const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
   state.activeRecorder = recorder;
@@ -1481,10 +1639,61 @@ async function exportOne(v) {
   state.activeRecorder = null;
   dom.workVideo.pause();
   if (state.cancelled) return;
-  const blob = new Blob(chunks, { type: recorder.mimeType || "video/webm" });
-  v.exportBlob = blob;
-  v.exportName = makeOutputName(v.name);
-  v.exportSize = blob.size;
+  v.exportBlob = new Blob(chunks, { type: recorder.mimeType || "video/webm" });
+  v.exportName = makeOutputName(v.name, fmt.ext);
+  v.exportSize = v.exportBlob.size;
+}
+
+// Quality path: render reduced frames to PNGs and encode with ffmpeg.wasm (lossless / ProRes / etc).
+async function exportViaFFmpeg(v, fmt) {
+  const ffmpeg = await getFFmpeg();
+  resetWorkVideo();
+  dom.workVideo.preload = "auto";
+  dom.workVideo.src = v.url;
+  dom.workVideo.load();
+  await ensureMetadata(dom.workVideo);
+  const { width, height } = scaledSize(dom.workVideo.videoWidth, dom.workVideo.videoHeight, v.analysis.settings.previewShortSide);
+  dom.exportCanvas.width = width;
+  dom.exportCanvas.height = height;
+  const ctx = dom.exportCanvas.getContext("2d", { willReadFrequently: true });
+  const dur = dom.workVideo.duration || 1;
+  const total = Math.max(1, Math.min(3600, Math.round(dur * EXPORT_FPS)));
+  const reps = v.analysis.representatives;
+  const th = v.confirmThreshold;
+  const names = [];
+  for (let i = 0; i < total; i += 1) {
+    if (state.cancelled) break;
+    await seekVideo(dom.workVideo, Math.min(dur - 0.001, Math.max(0.001, i / EXPORT_FPS)));
+    ctx.drawImage(dom.workVideo, 0, 0, width, height);
+    const img = ctx.getImageData(0, 0, width, height);
+    processPixels(img.data, reps, th, v.processedCache, false);
+    ctx.putImageData(img, 0, 0);
+    const blob = await new Promise((res) => dom.exportCanvas.toBlob(res, "image/png"));
+    const name = `f${String(i).padStart(5, "0")}.png`;
+    await ffmpeg.writeFile(name, new Uint8Array(await blob.arrayBuffer()));
+    names.push(name);
+    v.exportProgress = (i / total) * 80;
+    updateExport(v);
+  }
+  const cleanup = async () => { for (const n of names) await deleteFFmpegFile(ffmpeg, n); };
+  if (state.cancelled) { await cleanup(); return; }
+  const outName = "out." + fmt.ext;
+  v.exportProgress = 82; updateExport(v);
+  let code;
+  try {
+    code = await ffmpeg.exec(["-y", "-framerate", String(EXPORT_FPS), "-i", "f%05d.png", ...fmt.args, outName]);
+  } catch (e) {
+    await cleanup();
+    throw e;
+  }
+  if (code !== 0) { await cleanup(); await deleteFFmpegFile(ffmpeg, outName); throw new Error(`encode failed (${code})`); }
+  const data = await ffmpeg.readFile(outName);
+  v.exportBlob = new Blob([data.buffer], { type: fmt.mime });
+  v.exportName = makeOutputName(v.name, fmt.ext);
+  v.exportSize = v.exportBlob.size;
+  await cleanup();
+  await deleteFFmpegFile(ffmpeg, outName);
+  v.exportProgress = 99; updateExport(v);
 }
 
 function updateExport(v) {
@@ -1760,9 +1969,9 @@ function formatDuration(sec) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-function makeOutputName(inputName) {
+function makeOutputName(inputName, ext) {
   const base = inputName.replace(/\.[^.]+$/, "") || "palette-reduced";
-  return `${base}-reduced.webm`;
+  return `${base}-reduced.${ext || formatById(state.exportFormat).ext}`;
 }
 
 function esc(str) {
