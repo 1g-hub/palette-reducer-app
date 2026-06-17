@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260618-4";
+const APP_VERSION = "20260618-5";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -53,34 +53,39 @@ const dom = {
 const NATIVE_RES = 100000; // sentinel → scaledSize keeps native resolution
 const EXPORT_FPS = 24; // frame rate used when re-encoding via ffmpeg.wasm
 
+// Full-range BT.709 tagging so YUV outputs are displayed with the same colors as the sRGB preview.
+const FULLRANGE_709 = ["-color_range", "pc", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"];
+const VF_FULL = (pix) => ["-vf", `scale=in_range=full:out_range=full,format=${pix}`];
+
 // Save formats, ordered from most information-preserving to smallest. All video-only (no audio).
-// `via:"mediarecorder"` uses the browser (fast); the rest are encoded with ffmpeg.wasm.
+// RGB-capable codecs (raw / FFV1) keep RGB with no color conversion → colors are bit-identical to
+// the preview. YUV codecs are tagged full-range BT.709 to match the preview as closely as possible.
 const EXPORT_FORMATS = [
-  { id: "raw", label: "非圧縮 RGB（AVI・最高品質/最大）", ext: "avi", mime: "video/x-msvideo", via: "ffmpeg", enc: "rawvideo",
+  { id: "raw", label: "非圧縮 RGB（MKV・最高品質/最大）", ext: "mkv", mime: "video/x-matroska", via: "ffmpeg", enc: "rawvideo",
     args: ["-c:v", "rawvideo", "-pix_fmt", "rgb24"],
-    desc: "情報量を一切落とさない無圧縮。最高品質ですがファイルが極端に大きく、書き出しも最も重くなります。" },
-  { id: "ffv1", label: "FFV1 可逆圧縮（MKV）", ext: "mkv", mime: "video/x-matroska", via: "ffmpeg", enc: "ffv1",
-    args: ["-c:v", "ffv1", "-level", "3"],
-    desc: "画質を完全に保ったまま圧縮（可逆）。無圧縮よりかなり小さい。保存・編集向け（再生できるプレイヤーは限られます）。" },
+    desc: "情報量を一切落とさない無圧縮（RGBのまま保存するので色はプレビューと完全一致）。ファイルは極端に大きく、書き出しも最も重い。" },
+  { id: "ffv1", label: "FFV1 可逆圧縮・RGB（MKV）", ext: "mkv", mime: "video/x-matroska", via: "ffmpeg", enc: "ffv1",
+    args: ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"],
+    desc: "RGBのまま可逆圧縮するので色も画質も完全一致。無圧縮よりかなり小さい。保存・編集向け（再生対応プレイヤーは限られます）。" },
   { id: "h264lossless", label: "H.264 ロスレス（MKV）", ext: "mkv", mime: "video/x-matroska", via: "ffmpeg", enc: "libx264",
-    args: ["-c:v", "libx264", "-qp", "0", "-preset", "veryfast", "-pix_fmt", "yuv444p"],
-    desc: "H.264の可逆モード。画質劣化なし。FFV1より対応環境が多めです。" },
+    args: ["-c:v", "libx264", "-qp", "0", "-preset", "veryfast", ...VF_FULL("yuv444p"), ...FULLRANGE_709],
+    desc: "H.264の可逆モード（色差も間引かない4:4:4・フルレンジ）。画質劣化なし。FFV1より対応環境が多め。" },
   { id: "h265lossless", label: "H.265 ロスレス（MKV）", ext: "mkv", mime: "video/x-matroska", via: "ffmpeg", enc: "libx265",
-    args: ["-c:v", "libx265", "-x265-params", "lossless=1", "-pix_fmt", "yuv444p"],
-    desc: "H.265の可逆モード。可逆の中では小さめですがエンコードは非常に重い。※この環境に無い場合は選べません。" },
+    args: ["-c:v", "libx265", "-x265-params", "lossless=1", ...VF_FULL("yuv444p"), ...FULLRANGE_709],
+    desc: "H.265の可逆モード。可逆の中では小さめですがエンコードは非常に重い。※この環境に無い場合は失敗します。" },
   { id: "prores", label: "ProRes 4444（MOV）", ext: "mov", mime: "video/quicktime", via: "ffmpeg", enc: "prores_ks",
-    args: ["-c:v", "prores_ks", "-profile:v", "4", "-pix_fmt", "yuv444p10le"],
-    desc: "映像編集向けの高品質コーデック。ほぼ無劣化。ファイルは大きめです。" },
+    args: ["-c:v", "prores_ks", "-profile:v", "4", ...VF_FULL("yuv444p10le"), ...FULLRANGE_709],
+    desc: "映像編集向けの高品質コーデック（4:4:4）。ほぼ無劣化。ファイルは大きめです。" },
   { id: "h264", label: "H.264 MP4（標準・高画質）", ext: "mp4", mime: "video/mp4", via: "ffmpeg", enc: "libx264",
-    args: ["-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
-    desc: "一般的なMP4。少し圧縮されますが高画質で、ほとんどの環境で再生できます。" },
+    args: ["-c:v", "libx264", "-crf", "20", ...VF_FULL("yuv420p"), ...FULLRANGE_709, "-movflags", "+faststart"],
+    desc: "一般的なMP4。少し圧縮されますが高画質で、ほとんどの環境で再生できます。色差を間引くため極わずかに変化することがあります。" },
   { id: "webm-fast", label: "WebM（標準・最速）", ext: "webm", mime: "video/webm", via: "mediarecorder",
     desc: "ブラウザ標準の高速書き出し。ffmpegの読み込みが不要で最速。画質は標準的です。" },
   { id: "mp4-low", label: "MP4 低ビットレート（小さい）", ext: "mp4", mime: "video/mp4", via: "ffmpeg", enc: "libx264",
-    args: ["-c:v", "libx264", "-b:v", "800k", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+    args: ["-c:v", "libx264", "-b:v", "800k", ...VF_FULL("yuv420p"), ...FULLRANGE_709, "-movflags", "+faststart"],
     desc: "容量を小さく抑えたいとき向け。画質は落ちます。共有・アップロードに。" },
   { id: "webm-low", label: "WebM 低ビットレート（小さい）", ext: "webm", mime: "video/webm", via: "ffmpeg", enc: "libvpx-vp9",
-    args: ["-c:v", "libvpx-vp9", "-b:v", "500k"],
+    args: ["-c:v", "libvpx-vp9", "-b:v", "500k", ...VF_FULL("yuv420p"), ...FULLRANGE_709],
     desc: "WebMで容量を抑えたいとき向け。画質は落ちます。" },
 ];
 const DEFAULT_VALS = { ana: 540, prev: 360, anaFull: true, prevFull: true, maxc: 800, mindist: 12, mink: 4, maxk: 40, fixed: 60, margin: 5 };
@@ -129,6 +134,7 @@ const state = {
   plotCache: null,
   toastTimer: null,
   vid: 0,
+  noMagentaToken: 0,
   advPreviewIdx: 0,
   advPreviewToken: 0,
   advPreviewTimer: null,
@@ -194,7 +200,7 @@ function init() {
   dom.formatSelect.addEventListener("change", () => {
     state.exportFormat = dom.formatSelect.value;
     syncFormatDesc();
-    if (state.step === 4 && !state.exporting) renderStep4List();
+    if (state.step === 4 && !state.exporting) { state.exported = false; renderStep4(); }
   });
   dom.exportBtn.addEventListener("click", exportSelected);
   dom.restartBtn.addEventListener("click", restart);
@@ -1152,9 +1158,7 @@ function computeFrameNoMagenta(v) {
   return Math.ceil(Math.sqrt(maxSq));
 }
 
-function updateSnapMarker(v) {
-  if (!v || !v.analysis) { dom.snapMarker.hidden = true; return; }
-  const nm = computeFrameNoMagenta(v);
+function positionSnapMarker(v, nm) {
   v.noMagentaThreshold = nm;
   const min = Number(dom.sConfirm.min);
   const max = Math.max(150, nm + 8);
@@ -1163,6 +1167,67 @@ function updateSnapMarker(v) {
   const frac = Math.max(0, Math.min(1, (nm - min) / (max - min)));
   dom.snapMarker.style.left = `calc(9px + ${frac} * (100% - 18px))`;
   dom.snapMarker.hidden = false;
+}
+
+function updateSnapMarker(v) {
+  if (!v || !v.analysis) { dom.snapMarker.hidden = true; return; }
+  // Instant tentative from the visible frame, then refine across the whole clip (async).
+  positionSnapMarker(v, computeFrameNoMagenta(v));
+  ensureWholeClipNoMagenta(v);
+}
+
+let scanVideoEl = null;
+let scanCanvasEl = null;
+
+// Scan several frames across the whole clip (at the mask's resolution) to find the threshold
+// above which NO frame shows magenta. Cached per (video, K). Bumps the marker to the real value.
+async function ensureWholeClipNoMagenta(v) {
+  const k = v.activeK;
+  v.noMagentaByK = v.noMagentaByK || {};
+  if (v.noMagentaByK[k] != null) { if (activeVideo() === v) positionSnapMarker(v, v.noMagentaByK[k]); return; }
+  const token = ++state.noMagentaToken;
+  let nm;
+  try { nm = await scanClipNoMagenta(v); } catch (e) { return; }
+  if (token !== state.noMagentaToken || activeVideo() !== v || v.activeK !== k) return; // stale
+  v.noMagentaByK[k] = nm;
+  positionSnapMarker(v, nm);
+}
+
+async function scanClipNoMagenta(v) {
+  if (!scanVideoEl) { scanVideoEl = document.createElement("video"); scanVideoEl.muted = true; scanVideoEl.preload = "auto"; }
+  if (!scanCanvasEl) { scanCanvasEl = document.createElement("canvas"); }
+  const el = scanVideoEl;
+  el.src = v.url;
+  el.load();
+  await ensureMetadata(el);
+  const dur = el.duration || 1;
+  const { width, height } = scaledSize(el.videoWidth, el.videoHeight, v.analysis.settings.previewShortSide);
+  scanCanvasEl.width = width; scanCanvasEl.height = height;
+  const ctx = scanCanvasEl.getContext("2d", { willReadFrequently: true });
+  const reps = v.analysis.representatives;
+  const N = Math.max(3, Math.min(16, Math.round(16000000 / Math.max(1, width * height))));
+  let maxSq = 0;
+  for (let i = 0; i < N; i += 1) {
+    await seekVideo(el, Math.min(dur - 0.001, Math.max(0.001, ((i + 0.5) / N) * dur)));
+    ctx.drawImage(el, 0, 0, width, height);
+    const data = ctx.getImageData(0, 0, width, height).data;
+    const seen = new Set();
+    for (let p = 0; p < data.length; p += 4) {
+      const key = (data[p] << 16) | (data[p + 1] << 8) | data[p + 2];
+      if (seen.has(key)) continue;
+      seen.add(key);
+      let nd = Infinity;
+      for (const r of reps) {
+        const dr = data[p] - r[0], dg = data[p + 1] - r[1], db = data[p + 2] - r[2];
+        const d = dr * dr + dg * dg + db * db;
+        if (d < nd) nd = d;
+      }
+      if (nd > maxSq) maxSq = nd;
+    }
+  }
+  el.removeAttribute("src");
+  try { el.load(); } catch (e) { /* ignore */ }
+  return Math.ceil(Math.sqrt(maxSq)) + 2; // small safety margin for frames between samples
 }
 
 function drawActiveFrame() {
@@ -1460,16 +1525,20 @@ function renderStep4() {
   const sel = dones.filter((v) => v.save);
   dom.selCountText.textContent = `${sel.length} / ${dones.length} 件 選択中`;
   renderStep4List();
-  dom.exportBtn.hidden = state.exporting || state.exported;
-  dom.exportBtn.textContent = `⬇ 選択した ${sel.length} 件を書き出す`;
+  // Keep the export button available after a save so the user can re-export
+  // (e.g. change the format or which videos are selected, then save again).
+  dom.exportBtn.hidden = state.exporting;
+  dom.exportBtn.textContent = state.exported
+    ? `⬇ もう一度書き出す（${sel.length} 件）`
+    : `⬇ 選択した ${sel.length} 件を書き出す`;
   dom.exportBtn.classList.toggle("disabled", sel.length === 0);
   dom.exportingText.hidden = !state.exporting;
   dom.exportedBox.hidden = !state.exported;
   if (state.exported) {
     const okCount = dones.filter((v) => v.exportDone).length;
     dom.exportedText.textContent = state.exportDirName
-      ? `${okCount} 件を「${state.exportDirName}」フォルダに保存しました`
-      : `${okCount} 件を書き出しました（各行のダウンロードから保存できます）`;
+      ? `${okCount} 件を「${state.exportDirName}」フォルダに保存しました（形式や対象を変えて、もう一度書き出せます）`
+      : `${okCount} 件を書き出しました（各行からダウンロード。形式や対象を変えて、もう一度書き出せます）`;
   }
 }
 
@@ -1506,12 +1575,13 @@ function onSaveListClick(e) {
   const btn = e.target.closest("[data-act='toggle']");
   if (!btn || state.exporting) return;
   const v = state.videos.find((x) => x.id === btn.dataset.id);
-  if (v) { v.save = !v.save; renderStep4(); }
+  if (v) { v.save = !v.save; state.exported = false; renderStep4(); }
 }
 
 function setAllSave(on) {
   if (state.exporting) return;
   doneVideos().forEach((v) => { v.save = on; });
+  state.exported = false;
   renderStep4();
 }
 
@@ -1979,3 +2049,4 @@ function esc(str) {
 }
 
 init();
+
