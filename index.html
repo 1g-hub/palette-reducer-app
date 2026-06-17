@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20260618-6">
+    <link rel="stylesheet" href="./styles.css?v=20260618-8">
   </head>
   <body>
     <div class="page">
@@ -280,11 +280,15 @@
                       <span class="slider-name strong">色のしきい値を調整する</span>
                       <span class="info" data-tip="代表色（クラスタ中心）から、この距離までを『その代表色とみなす』範囲です。小さくすると、はみ出し色（マゼンタ）が増え、大きくすると減ります。">ⓘ</span>
                       <button id="resetConfirm" type="button" class="reset-link" title="しきい値と代表色の数を、分析時に自動で決めた値に戻します">↺ 自動の値に戻す</button>
-                      <span class="slider-val" id="vConfirm">47</span>
+                      <span class="val-stepper">
+                        <button id="confMinus" type="button" class="step-btn" title="しきい値を1下げる">−</button>
+                        <span class="slider-val" id="vConfirm">47</span>
+                        <button id="confPlus" type="button" class="step-btn" title="しきい値を1上げる">＋</button>
+                      </span>
                     </div>
                     <div class="slider-wrap">
                       <div id="snapMarker" class="snap-marker" hidden><span class="snap-label">マゼンタ0</span><span class="snap-tick"></span></div>
-                      <input id="sConfirm" type="range" min="10" max="150" step="1" value="47">
+                      <input id="sConfirm" type="range" min="0" max="150" step="1" value="47">
                     </div>
                     <div class="threshold-legend">
                       <span>← 小さい：はみ出し色（マゼンタ）が増える</span>
@@ -397,6 +401,6 @@
     <!-- hidden work elements -->
     <video id="workVideo" muted playsinline preload="auto"></video>
     <canvas id="exportCanvas" class="offscreen"></canvas>
-    <script src="./app.js?v=20260618-6"></script>
+    <script src="./app.js?v=20260618-8"></script>
   </body>
 </html>

@@ -279,6 +279,11 @@ input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 
 .threshold-panel .slider-val { margin-left: 8px; }
 .reset-link { margin-left: auto; background: none; border: 1px solid var(--line-2); color: var(--ink-3); font-size: 11.5px; font-weight: 700; padding: 4px 11px; border-radius: 8px; cursor: pointer; }
 .reset-link:hover { border-color: var(--accent); color: var(--accent); }
+.val-stepper { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
+.val-stepper .slider-val { margin-left: 0; min-width: 30px; text-align: center; }
+.step-btn { width: 26px; height: 26px; border-radius: 7px; border: 1px solid var(--line-2); background: var(--card); color: var(--accent-d); font-size: 15px; font-weight: 700; line-height: 1; cursor: pointer; }
+.step-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+.step-btn:disabled { color: #c4c9d2; background: transparent; cursor: default; }
 .slider-wrap { position: relative; padding-top: 22px; }
 .snap-marker { position: absolute; top: 0; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; pointer-events: none; z-index: 2; }
 .snap-marker .snap-label { font-size: 10px; font-weight: 700; color: #fff; background: var(--accent-d); padding: 1px 6px; border-radius: 6px; white-space: nowrap; }

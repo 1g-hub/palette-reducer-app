@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260618-6";
+const APP_VERSION = "20260618-8";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -29,6 +29,7 @@ const dom = {
   backToStep2: $("backToStep2"), playBtn: $("playBtn"), loopBtn: $("loopBtn"), step3Tabs: $("step3Tabs"), activeName: $("activeName"),
   cvOrig: $("cvOrig"), cvReduced: $("cvReduced"), cvMask: $("cvMask"),
   vConfirm: $("vConfirm"), sConfirm: $("sConfirm"), resetConfirm: $("resetConfirm"), snapMarker: $("snapMarker"),
+  confMinus: $("confMinus"), confPlus: $("confPlus"),
   kMinus: $("kMinus"), kValue: $("kValue"), kPlus: $("kPlus"), kRange: $("kRange"),
   paletteCount: $("paletteCount"), palette: $("palette"), cvPlot: $("cvPlot"), plotWrap: $("plotWrap"),
   plotZoomIn: $("plotZoomIn"), plotZoomOut: $("plotZoomOut"), plotReset: $("plotReset"), plotFull: $("plotFull"),
@@ -135,7 +136,6 @@ const state = {
   plotCache: null,
   toastTimer: null,
   vid: 0,
-  noMagentaToken: 0,
   advPreviewIdx: 0,
   advPreviewToken: 0,
   advPreviewTimer: null,
@@ -188,7 +188,9 @@ function init() {
   dom.plotFull.addEventListener("click", togglePlotFullscreen);
   dom.cvPlot.addEventListener("wheel", onPlotWheel, { passive: false });
   document.addEventListener("fullscreenchange", () => requestPlotDraw());
-  dom.sConfirm.addEventListener("input", (e) => setConfirmThreshold(+e.target.value));
+  dom.sConfirm.addEventListener("input", (e) => setConfirmThreshold(+e.target.value, true));
+  dom.confMinus.addEventListener("click", () => changeConfirmThreshold(-1));
+  dom.confPlus.addEventListener("click", () => changeConfirmThreshold(1));
   dom.resetConfirm.addEventListener("click", resetConfirmParams);
   dom.palette.addEventListener("click", onPaletteClick);
   dom.detailsToggle.addEventListener("click", () => { state.detailsOpen = !state.detailsOpen; syncDetails(); });
@@ -936,6 +938,7 @@ function renderStep3Dynamic() {
   dom.activeName.textContent = v.name;
   dom.sConfirm.value = v.confirmThreshold;
   dom.vConfirm.textContent = v.confirmThreshold;
+  updateConfStepperBounds(v.confirmThreshold);
   renderKControl(v);
   renderPalette(v);
   renderMetrics(v);
@@ -1094,30 +1097,48 @@ function setPreviewCanvasSizes(shortSide) {
   }
 }
 
-function setConfirmThreshold(value) {
+function setConfirmThreshold(value, snap) {
   const v = activeVideo();
   if (!v) return;
-  // Light snap to the "no magenta" point (where every color is within threshold).
-  const nm = v.noMagentaThreshold;
-  if (nm != null && nm >= Number(dom.sConfirm.min) && Math.abs(value - nm) <= 2) {
-    value = nm;
-    dom.sConfirm.value = value;
+  const min = Number(dom.sConfirm.min);
+  const max = Number(dom.sConfirm.max);
+  // Light snap to the "no magenta" point — only when dragging the slider, not for ± steps.
+  if (snap) {
+    const nm = v.noMagentaThreshold;
+    if (nm != null && nm >= min && Math.abs(value - nm) <= 2) value = nm;
   }
+  value = Math.max(min, Math.min(max, Math.round(value)));
+  dom.sConfirm.value = value;
   v.confirmThreshold = value;
   v.processedCache = new Map();
   v.maskCache = new Map();
   dom.vConfirm.textContent = value;
+  updateConfStepperBounds(value);
   const m = dom.metrics.querySelector(".metric:nth-child(2) .metric-value");
   if (m) m.textContent = String(value);
   if (!state.playing) drawActiveFrame();
   requestPlotDraw();
 }
 
+function changeConfirmThreshold(delta) {
+  const v = activeVideo();
+  if (!v) return;
+  setConfirmThreshold(Number(v.confirmThreshold) + delta, false);
+}
+
+function updateConfStepperBounds(value) {
+  const min = Number(dom.sConfirm.min);
+  const max = Number(dom.sConfirm.max);
+  const val = value == null ? Number(dom.sConfirm.value) : value;
+  dom.confMinus.disabled = val <= min;
+  dom.confPlus.disabled = val >= max;
+}
+
 // Fallback estimate from the analyzed color sample (used only if no preview frame is drawn yet).
 function computeNoMagenta(v) {
   const reps = v.analysis.representatives;
   const samples = v.analysis.sampleColors || [];
-  let mx = 0;
+  let maxSq = 0;
   for (const c of samples) {
     let nd = Infinity;
     for (const r of reps) {
@@ -1125,9 +1146,9 @@ function computeNoMagenta(v) {
       const d = dr * dr + dg * dg + db * db;
       if (d < nd) nd = d;
     }
-    if (nd > mx) mx = nd;
+    if (nd > maxSq) maxSq = nd;
   }
-  return Math.ceil(Math.sqrt(mx));
+  return Math.ceil(Math.sqrt(maxSq));
 }
 
 // Exact "no magenta" threshold for the CURRENTLY DISPLAYED frame: the farthest pixel's distance
@@ -1135,13 +1156,16 @@ function computeNoMagenta(v) {
 // Recomputed against the active representatives, so it tracks changes in the color count (K).
 function computeFrameNoMagenta(v) {
   if (!dom.cvOrig.width || !dom.cvOrig.height) return computeNoMagenta(v);
-  let data;
   try {
-    data = dom.cvOrig.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, dom.cvOrig.width, dom.cvOrig.height).data;
+    const data = dom.cvOrig.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, dom.cvOrig.width, dom.cvOrig.height).data;
+    return computeNoMagentaFromData(data, v.analysis.representatives);
   } catch (e) {
     return computeNoMagenta(v);
   }
-  const reps = v.analysis.representatives;
+}
+
+function computeNoMagentaFromData(data, reps) {
+  if (!reps || !reps.length) return 0;
   const seen = new Set();
   let maxSq = 0;
   for (let i = 0; i < data.length; i += 4) {
@@ -1160,75 +1184,27 @@ function computeFrameNoMagenta(v) {
 }
 
 function positionSnapMarker(v, nm) {
-  v.noMagentaThreshold = nm;
   const min = Number(dom.sConfirm.min);
-  const max = Math.max(150, nm + 8);
+  const exact = Math.max(min, Math.ceil(Number(nm) || 0));
+  v.noMagentaThreshold = exact;
+  // Expanding the max is fine, but marker updates must never lower the user's chosen threshold.
+  const current = Math.max(Number(dom.sConfirm.value) || 0, Number(v.confirmThreshold) || 0);
+  const max = Math.max(150, exact + 8, current);
   dom.sConfirm.max = max;
-  if (Number(dom.sConfirm.value) > max) { dom.sConfirm.value = max; v.confirmThreshold = max; dom.vConfirm.textContent = max; }
-  const frac = Math.max(0, Math.min(1, (nm - min) / (max - min)));
+  const frac = max === min ? 0 : Math.max(0, Math.min(1, (exact - min) / (max - min)));
   dom.snapMarker.style.left = `calc(9px + ${frac} * (100% - 18px))`;
   dom.snapMarker.hidden = false;
+  updateConfStepperBounds(v.confirmThreshold);
 }
 
 function updateSnapMarker(v) {
   if (!v || !v.analysis) { dom.snapMarker.hidden = true; return; }
-  // Instant tentative from the visible frame, then refine across the whole clip (async).
   positionSnapMarker(v, computeFrameNoMagenta(v));
-  ensureWholeClipNoMagenta(v);
 }
 
-let scanVideoEl = null;
-let scanCanvasEl = null;
-
-// Scan several frames across the whole clip (at the mask's resolution) to find the threshold
-// above which NO frame shows magenta. Cached per (video, K). Bumps the marker to the real value.
-async function ensureWholeClipNoMagenta(v) {
-  const k = v.activeK;
-  v.noMagentaByK = v.noMagentaByK || {};
-  if (v.noMagentaByK[k] != null) { if (activeVideo() === v) positionSnapMarker(v, v.noMagentaByK[k]); return; }
-  const token = ++state.noMagentaToken;
-  let nm;
-  try { nm = await scanClipNoMagenta(v); } catch (e) { return; }
-  if (token !== state.noMagentaToken || activeVideo() !== v || v.activeK !== k) return; // stale
-  v.noMagentaByK[k] = nm;
-  positionSnapMarker(v, nm);
-}
-
-async function scanClipNoMagenta(v) {
-  if (!scanVideoEl) { scanVideoEl = document.createElement("video"); scanVideoEl.muted = true; scanVideoEl.preload = "auto"; }
-  if (!scanCanvasEl) { scanCanvasEl = document.createElement("canvas"); }
-  const el = scanVideoEl;
-  el.src = v.url;
-  el.load();
-  await ensureMetadata(el);
-  const dur = el.duration || 1;
-  const { width, height } = scaledSize(el.videoWidth, el.videoHeight, v.analysis.settings.previewShortSide);
-  scanCanvasEl.width = width; scanCanvasEl.height = height;
-  const ctx = scanCanvasEl.getContext("2d", { willReadFrequently: true });
-  const reps = v.analysis.representatives;
-  const N = Math.max(3, Math.min(16, Math.round(16000000 / Math.max(1, width * height))));
-  let maxSq = 0;
-  for (let i = 0; i < N; i += 1) {
-    await seekVideo(el, Math.min(dur - 0.001, Math.max(0.001, ((i + 0.5) / N) * dur)));
-    ctx.drawImage(el, 0, 0, width, height);
-    const data = ctx.getImageData(0, 0, width, height).data;
-    const seen = new Set();
-    for (let p = 0; p < data.length; p += 4) {
-      const key = (data[p] << 16) | (data[p + 1] << 8) | data[p + 2];
-      if (seen.has(key)) continue;
-      seen.add(key);
-      let nd = Infinity;
-      for (const r of reps) {
-        const dr = data[p] - r[0], dg = data[p + 1] - r[1], db = data[p + 2] - r[2];
-        const d = dr * dr + dg * dg + db * db;
-        if (d < nd) nd = d;
-      }
-      if (nd > maxSq) maxSq = nd;
-    }
-  }
-  el.removeAttribute("src");
-  try { el.load(); } catch (e) { /* ignore */ }
-  return Math.ceil(Math.sqrt(maxSq)) + 2; // small safety margin for frames between samples
+function updateSnapMarkerFromImageData(v, data) {
+  if (!v || !v.analysis) { dom.snapMarker.hidden = true; return; }
+  positionSnapMarker(v, computeNoMagentaFromData(data, v.analysis.representatives));
 }
 
 function drawActiveFrame() {
@@ -1247,6 +1223,7 @@ function drawActiveFrame() {
   const mask = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
   processPixels(mask.data, reps, th, v.maskCache, true);
   mCtx.putImageData(mask, 0, 0);
+  updateSnapMarkerFromImageData(v, base.data);
 }
 
 async function togglePlay(loop) {
@@ -2050,3 +2027,5 @@ function esc(str) {
 }
 
 init();
+
+
