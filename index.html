@@ -3,135 +3,353 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Browser Palette Reducer</title>
+    <title>Palette Reducer — 動画の色をかんたんに減らす</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="./styles.css?v=20260609-9">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css?v=20260617-1">
   </head>
   <body>
-    <main class="app-shell">
-      <aside class="panel controls">
-        <h1>Palette Reducer</h1>
-
-        <label class="field">
-          <span>Video</span>
-          <input id="videoFile" type="file" accept="video/*">
-        </label>
-
-        <div class="field-grid">
-          <label class="field">
-            <span>Analysis short side</span>
-            <input id="analysisShortSide" type="number" min="120" max="1080" step="30" value="540">
-          </label>
-          <label class="field">
-            <span>Preview short side</span>
-            <input id="previewShortSide" type="number" min="120" max="1080" step="30" value="360">
-          </label>
+    <div class="page">
+      <div class="app-wrap">
+        <div class="frame-label">
+          <span class="dot"></span>
+          <span>動画の色数削減 — 複数の動画をまとめて処理できます</span>
         </div>
 
-        <div class="field-grid">
-          <label class="field">
-            <span>Max colors</span>
-            <input id="maxCandidates" type="number" min="100" max="1200" step="100" value="800">
-          </label>
-          <label class="field">
-            <span>Min rep distance</span>
-            <input id="minRepDistance" type="number" min="0" max="80" step="1" value="12">
-          </label>
-        </div>
+        <div class="app-card">
+          <!-- header -->
+          <header class="app-header">
+            <div class="brand">
+              <div class="brand-mark">
+                <span></span><span></span><span></span><span></span>
+              </div>
+              <div>
+                <div class="brand-title">Palette Reducer</div>
+                <div class="brand-sub">動画の色を、かんたんに減らす</div>
+              </div>
+            </div>
+            <div class="header-right">
+              <span class="privacy-badge" title="動画はアップロードされません。すべてブラウザ内で処理されます。">🔒 アップロードしません</span>
+              <span id="videoCountBadge" class="count-badge" hidden></span>
+            </div>
+          </header>
 
-        <div class="field-grid">
-          <label class="field">
-            <span>Min K</span>
-            <input id="minClusters" type="number" min="2" max="20" step="1" value="4">
-          </label>
-          <label class="field">
-            <span>Max K</span>
-            <input id="maxClusters" type="number" min="4" max="60" step="1" value="40">
-          </label>
-        </div>
+          <div class="app-body">
+            <!-- left rail -->
+            <aside class="rail">
+              <div class="rail-title">かんたん 4 ステップ</div>
+              <div id="rail" class="rail-list">
+                <div class="rail-item" data-step="1">
+                  <div class="rail-circle">1</div>
+                  <div class="rail-text"><div class="rail-label">動画を選ぶ</div><div class="rail-sub">未着手</div></div>
+                </div>
+                <div class="rail-item" data-step="2">
+                  <div class="rail-circle">2</div>
+                  <div class="rail-text"><div class="rail-label">色を減らす</div><div class="rail-sub">未着手</div></div>
+                </div>
+                <div class="rail-item" data-step="3">
+                  <div class="rail-circle">3</div>
+                  <div class="rail-text"><div class="rail-label">確認する</div><div class="rail-sub">未着手</div></div>
+                </div>
+                <div class="rail-item" data-step="4">
+                  <div class="rail-circle">4</div>
+                  <div class="rail-text"><div class="rail-label">保存する</div><div class="rail-sub">未着手</div></div>
+                </div>
+              </div>
+              <div class="rail-tip">
+                <span>💡</span>
+                <span>複数の動画をまとめてドロップすると、同じ設定で一括処理できます。</span>
+              </div>
+            </aside>
 
-        <label class="field">
-          <span>Threshold mode</span>
-          <select id="thresholdMode">
-            <option value="auto" selected>Auto</option>
-            <option value="fixed">Fixed</option>
-          </select>
-        </label>
+            <!-- main -->
+            <main class="main">
 
-        <div class="field-grid">
-          <label class="field">
-            <span>Fixed threshold</span>
-            <input id="fixedThreshold" type="number" min="0" max="200" step="1" value="60">
-          </label>
-          <label class="field">
-            <span>Auto margin</span>
-            <input id="thresholdMargin" type="number" min="0" max="40" step="1" value="5">
-          </label>
-        </div>
+              <!-- ============ STEP 1 ============ -->
+              <section id="step1" class="step">
+                <div class="step-eyebrow">STEP 1 / 4</div>
+                <h2 class="step-title">動画を選ぶ</h2>
+                <p class="step-desc">色を減らしたい動画をドラッグ＆ドロップ。<b>複数まとめて</b>追加できます。</p>
 
-        <div class="button-row">
-          <button id="analyzeButton" type="button" disabled>Analyze</button>
-          <button id="stopButton" type="button" disabled>Stop</button>
-          <button id="previewButton" type="button" disabled>Preview</button>
-          <button id="recordButton" type="button" disabled>Export WebM</button>
-        </div>
+                <div id="dropzone" class="dropzone">
+                  <span class="dz-icon">↑</span>
+                  <span class="dz-main">ここに動画をまとめてドラッグ＆ドロップ</span>
+                  <span class="dz-or">または <span class="dz-btn">ファイルを選ぶ</span></span>
+                  <span class="dz-hint">対応形式：MP4 / WebM / MOV など（複数可）</span>
+                  <input id="fileInput" type="file" accept="video/*" multiple hidden>
+                </div>
 
-        <progress id="progressBar" value="0" max="1"></progress>
-        <p id="statusText" class="status">Select a video.</p>
+                <div id="step1Added" hidden>
+                  <div class="list-head">
+                    <span id="addedCount" class="list-head-title">追加した動画</span>
+                    <button id="clearAllBtn" type="button" class="link-danger">すべて削除</button>
+                  </div>
+                  <div id="step1List" class="video-list"></div>
+                  <button id="toStep2Btn" type="button" class="btn-primary block mt">次へ：色を減らす →</button>
+                </div>
+              </section>
 
-        <a id="downloadLink" class="download" hidden download="palette-reduced.webm">Download WebM</a>
-      </aside>
+              <!-- ============ STEP 2 ============ -->
+              <section id="step2" class="step" hidden>
+                <div class="step-eyebrow-row">
+                  <div class="step-eyebrow">STEP 2 / 4</div>
+                  <button id="backToStep1" type="button" class="link-muted">← 動画を選び直す</button>
+                </div>
+                <h2 class="step-title">色を減らす</h2>
+                <p id="step2Desc" class="step-desc">すべての動画に同じ設定を適用します。細かく調整したいときは「詳細設定」を開いてください。</p>
 
-      <section class="workspace">
-        <div class="video-grid">
-          <section class="panel viewer">
-            <header>Original</header>
-            <canvas id="sourceCanvas"></canvas>
-          </section>
-          <section class="panel viewer">
-            <header>Reduced</header>
-            <canvas id="processedCanvas"></canvas>
-          </section>
-          <section class="panel viewer">
-            <header>New-color mask</header>
-            <canvas id="maskCanvas"></canvas>
-          </section>
-        </div>
+                <div class="seg-label">仕上がりの好みを選ぶ</div>
+                <div id="presetSeg" class="segmented">
+                  <button type="button" data-preset="recommend" class="seg active">おすすめ</button>
+                  <button type="button" data-preset="hq" class="seg">高精細（遅い）</button>
+                  <button type="button" data-preset="light" class="seg">軽量（速い）</button>
+                </div>
+                <p class="seg-note">数値を1つも触らずに始められます。</p>
 
-        <section id="outputPanel" class="panel output-panel" hidden>
-          <header>Exported WebM</header>
-          <video id="outputVideo" class="output-video" controls playsinline></video>
-        </section>
+                <button id="analyzeBtn" type="button" class="btn-primary block big"><span class="ic">✦</span> <span id="analyzeBtnLabel">色を分析する</span></button>
 
-        <section class="panel palette-panel">
-          <header>Palette</header>
-          <div id="palette" class="palette"></div>
-        </section>
+                <!-- advanced accordion -->
+                <div class="accordion">
+                  <button id="advancedToggle" type="button" class="accordion-head">
+                    <span>詳細設定（上級者向け）</span>
+                    <span id="advancedCaret" class="accordion-caret">開く ▼</span>
+                  </button>
+                  <div id="advancedBody" class="accordion-body" hidden>
+                    <div class="adv-scroll">
+                      <div class="group-title">精度と速度</div>
 
-        <section class="panel metrics-panel">
-          <header>Metrics</header>
-          <div id="metrics" class="metrics"></div>
-        </section>
+                      <div class="slider-field">
+                        <div class="slider-top">
+                          <span class="slider-name">分析の解像度（短辺）</span>
+                          <span class="info" title="分析時に縮小するサイズ。大きいほど精密ですが遅くなります（既定540）。英語名: Analysis short side">ⓘ</span>
+                          <span class="slider-val"><span id="vAna">540</span>px</span>
+                        </div>
+                        <input id="sAna" type="range" min="240" max="1080" step="20" value="540">
+                      </div>
 
-        <section class="panel table-panel">
-          <header>K candidates</header>
-          <div class="table-wrap">
-            <table id="candidateTable">
-              <thead>
-                <tr>
-                  <th>K</th>
-                  <th>Relative gap</th>
-                  <th>Min rep distance</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
+                      <div class="slider-field">
+                        <div class="slider-top">
+                          <span class="slider-name">使う色の細かさ（候補数）</span>
+                          <span class="info" title="分析に使う色の数。多いほど高精度ですが遅くなります（既定800）。英語名: Max colors">ⓘ</span>
+                          <span class="slider-val"><span id="vMaxc">800</span>色</span>
+                        </div>
+                        <input id="sMaxc" type="range" min="200" max="3000" step="50" value="800">
+                      </div>
+
+                      <div class="slider-field">
+                        <div class="slider-top">
+                          <span class="slider-name">プレビュー/書き出しの解像度</span>
+                          <span class="info" title="表示・保存する映像の大きさ（既定360）。英語名: Preview short side">ⓘ</span>
+                          <span class="slider-val"><span id="vPrev">360</span>px</span>
+                        </div>
+                        <input id="sPrev" type="range" min="160" max="720" step="20" value="360">
+                      </div>
+
+                      <div class="group-title">色のまとめ方</div>
+
+                      <div class="slider-field">
+                        <div class="slider-top">
+                          <span class="slider-name">似た色をまとめる強さ</span>
+                          <span class="info" title="値が大きいほど、近い色どうしを1色にまとめます（既定12）。英語名: Min rep distance">ⓘ</span>
+                          <span class="slider-val" id="vMindist">12</span>
+                        </div>
+                        <input id="sMindist" type="range" min="4" max="40" step="1" value="12">
+                      </div>
+
+                      <div class="slider-row">
+                        <div class="slider-field flex1">
+                          <div class="slider-top">
+                            <span class="slider-name">代表色の数（最小）</span>
+                            <span class="slider-val" id="vMink">4</span>
+                          </div>
+                          <input id="sMink" type="range" min="2" max="20" step="1" value="4">
+                        </div>
+                        <div class="slider-field flex1">
+                          <div class="slider-top">
+                            <span class="slider-name">代表色の数（最大）</span>
+                            <span class="slider-val" id="vMaxk">40</span>
+                          </div>
+                          <input id="sMaxk" type="range" min="8" max="64" step="1" value="40">
+                        </div>
+                      </div>
+
+                      <div class="group-title">はみ出し色の判定</div>
+                      <div class="slider-name mb">判定方法</div>
+                      <div id="thresholdSeg" class="segmented narrow">
+                        <button type="button" data-mode="auto" class="seg active">自動（おすすめ）</button>
+                        <button type="button" data-mode="manual" class="seg">手動</button>
+                      </div>
+
+                      <div id="fixedField" class="slider-field" hidden>
+                        <div class="slider-top">
+                          <span class="slider-name">手動のしきい値</span>
+                          <span class="info" title="手動時に使う基準値（既定60）。英語名: Fixed threshold">ⓘ</span>
+                          <span class="slider-val" id="vFixed">60</span>
+                        </div>
+                        <input id="sFixed" type="range" min="10" max="150" step="1" value="60">
+                      </div>
+
+                      <div class="slider-field">
+                        <div class="slider-top">
+                          <span class="slider-name">自動判定の余裕</span>
+                          <span class="info" title="自動時の感度調整。大きいほど“はみ出し色”を少なく判定（既定5）。英語名: Auto margin">ⓘ</span>
+                          <span class="slider-val" id="vMargin">5</span>
+                        </div>
+                        <input id="sMargin" type="range" min="0" max="30" step="1" value="5">
+                      </div>
+
+                      <div class="adv-reset-row">
+                        <button id="resetAdvancedBtn" type="button" class="btn-ghost-sm">既定値にリセット</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <!-- ============ ANALYZING ============ -->
+              <section id="analyzing" class="step" hidden>
+                <div class="step-eyebrow blue">STEP 2 / 4 — 処理中</div>
+                <h2 class="step-title">色を分析しています…</h2>
+                <p id="analyzingDesc" class="step-desc">動画を順に処理しています。動画ごとに進みぐあいが表示されます。</p>
+
+                <div id="analyzingList" class="proc-list"></div>
+
+                <div class="analyzing-foot">
+                  <span id="elapsedText" class="muted-num">経過 0 秒</span>
+                  <button id="stopAnalyzeBtn" type="button" class="btn-stop">■ 中断</button>
+                </div>
+                <div id="reassure" class="reassure" hidden>
+                  <span>⏳</span> まだ処理中です。動画のサイズや件数によっては少し時間がかかります。そのままお待ちください。
+                </div>
+                <div id="transcodeNote" class="transcode-note" hidden>
+                  <span class="spinner amber"></span>
+                  <span id="transcodeText">この動画は変換が必要です。初回のみ約 31MB を読み込みます…</span>
+                </div>
+              </section>
+
+              <!-- ============ STEP 3 ============ -->
+              <section id="step3" class="step" hidden>
+                <div class="step3-head">
+                  <div>
+                    <div class="step-eyebrow">STEP 3 / 4</div>
+                    <h2 class="step-title">仕上がりを確認する</h2>
+                  </div>
+                  <div class="step3-actions">
+                    <button id="backToStep2" type="button" class="btn-ghost">← 色の設定に戻る</button>
+                    <button id="playBtn" type="button" class="btn-primary sm">▶ 再生</button>
+                  </div>
+                </div>
+
+                <div id="step3Tabs" class="vid-tabs" hidden></div>
+                <p class="step-desc">表示中：<b id="activeName">—</b> — 「▶ 再生」で3つの映像を同期再生します。</p>
+
+                <div class="preview-grid">
+                  <div class="preview-cell">
+                    <div class="cell-head"><span>元の動画</span><span class="info" title="読み込んだそのままの映像です。英語名: Original">ⓘ</span></div>
+                    <canvas id="cvOrig" class="preview-canvas"></canvas>
+                  </div>
+                  <div class="preview-cell">
+                    <div class="cell-head"><span>色を減らした映像</span><span class="info" title="代表色だけで作り直した映像です。英語名: Reduced">ⓘ</span></div>
+                    <canvas id="cvReduced" class="preview-canvas"></canvas>
+                  </div>
+                </div>
+                <div class="preview-cell half">
+                  <div class="cell-head"><span>はみ出し色マップ</span><span class="info" title="パレットに無い色（マゼンタで表示）がどこにあるかを示します。英語名: New-color mask">ⓘ</span></div>
+                  <canvas id="cvMask" class="preview-canvas dark"></canvas>
+                </div>
+
+                <div class="threshold-panel">
+                  <div class="slider-top">
+                    <span class="slider-name strong">色のしきい値を調整する</span>
+                    <span class="info" title="代表色（クラスタ中心）から、この距離までを『その代表色とみなす』範囲です。小さくすると、はみ出し色（マゼンタ）が増え、大きくすると減ります。">ⓘ</span>
+                    <span class="slider-val" id="vConfirm">47</span>
+                  </div>
+                  <input id="sConfirm" type="range" min="10" max="150" step="1" value="47">
+                  <div class="threshold-legend">
+                    <span>← 小さい：はみ出し色（マゼンタ）が増える</span>
+                    <span>大きい：はみ出し色が減る →</span>
+                  </div>
+                </div>
+
+                <div class="palette-head">
+                  <span class="palette-title">代表色（パレット）</span>
+                  <span id="paletteCount" class="pill">0色</span>
+                  <span class="palette-hint">クリックで HEX をコピー</span>
+                </div>
+                <div id="palette" class="palette-grid"></div>
+
+                <div class="plot-head">
+                  <span class="palette-title">色の3次元プロット（RGB空間）</span>
+                  <span class="palette-hint">ドラッグで回転 ・ 大きな点が代表色</span>
+                </div>
+                <canvas id="cvPlot" class="plot-canvas"></canvas>
+
+                <div class="accordion mt">
+                  <button id="detailsToggle" type="button" class="accordion-head">
+                    <span>分析の詳細データを見る（上級者向け）</span>
+                    <span id="detailsCaret" class="accordion-caret">開く ▼</span>
+                  </button>
+                  <div id="detailsBody" class="accordion-body" hidden>
+                    <div class="detail-inner">
+                      <div class="group-title">分析の詳細データ</div>
+                      <div id="metrics" class="metrics-grid"></div>
+                      <div class="group-title">色数の候補一覧（なぜこの色数になったか）</div>
+                      <div class="ktable">
+                        <div class="ktable-head">
+                          <span>代表色数 K</span><span>まとまりの良さ</span><span>最小代表色間距離</span>
+                        </div>
+                        <div id="ktableBody"></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <button id="toStep4Btn" type="button" class="btn-primary block mt">次へ：保存する →</button>
+              </section>
+
+              <!-- ============ STEP 4 ============ -->
+              <section id="step4" class="step" hidden>
+                <div class="step-eyebrow-row">
+                  <div class="step-eyebrow">STEP 4 / 4</div>
+                  <button id="backToStep3" type="button" class="link-muted">← 確認に戻る</button>
+                </div>
+                <h2 class="step-title">保存する</h2>
+                <p class="step-desc">保存したい動画を選んでください。形式は <b>WebM</b> です（MP4 ではありません）。</p>
+
+                <div class="list-head">
+                  <span id="selCountText" class="list-head-title">0 / 0 件 選択中</span>
+                  <div class="head-btns">
+                    <button id="selectAllBtn" type="button" class="btn-ghost-sm">全選択</button>
+                    <button id="deselectAllBtn" type="button" class="btn-ghost-sm">全解除</button>
+                  </div>
+                </div>
+
+                <div id="step4List" class="save-list"></div>
+
+                <button id="exportBtn" type="button" class="btn-primary block big">⬇ 選択した動画を書き出す（WebM）</button>
+                <p id="exportingText" class="center-note" hidden>書き出し中です… しばらくお待ちください。</p>
+
+                <div id="exportedBox" hidden>
+                  <div class="success-banner">
+                    <span class="ok-check">✓</span>
+                    <span id="exportedText">書き出しが完了しました</span>
+                  </div>
+                  <button id="restartBtn" type="button" class="btn-ghost block">最初に戻る</button>
+                </div>
+              </section>
+
+              <div id="toast" class="toast" hidden><span class="toast-ic"></span><span class="toast-msg"></span></div>
+            </main>
           </div>
-        </section>
-      </section>
-    </main>
+        </div>
+      </div>
+    </div>
 
+    <!-- hidden work elements -->
     <video id="workVideo" muted playsinline preload="auto"></video>
-    <script src="./app.js?v=20260609-9"></script>
+    <canvas id="exportCanvas" class="offscreen"></canvas>
+    <script src="./app.js?v=20260617-1"></script>
   </body>
 </html>

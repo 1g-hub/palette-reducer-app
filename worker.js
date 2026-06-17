@@ -50,6 +50,7 @@ function analyze(payload) {
   }
 
   const thresholdInfo = chooseThreshold(colors, counts, snapshot.labels, snapshot.representatives, settings);
+  const sampleColors = sampleArray(colors, 1800);
 
   return {
     selectedK: selected.k,
@@ -62,8 +63,22 @@ function analyze(payload) {
     rows: selected.rows,
     selectedMinRepresentativeDistance: snapshot.minRepresentativeDistance,
     closestRepresentativePair: snapshot.closestRepresentativePair,
+    sampleColors,
     magenta: MAGENTA,
   };
+}
+
+function sampleArray(arr, max) {
+  if (arr.length <= max) {
+    return arr.map((c) => [c[0], c[1], c[2]]);
+  }
+  const step = arr.length / max;
+  const out = [];
+  for (let i = 0; i < max; i += 1) {
+    const c = arr[Math.floor(i * step)];
+    out.push([c[0], c[1], c[2]]);
+  }
+  return out;
 }
 
 function buildHistogram(buffers) {
