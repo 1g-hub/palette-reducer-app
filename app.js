@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260618-1";
+const APP_VERSION = "20260618-2";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -28,7 +28,7 @@ const dom = {
   // step3
   backToStep2: $("backToStep2"), playBtn: $("playBtn"), loopBtn: $("loopBtn"), step3Tabs: $("step3Tabs"), activeName: $("activeName"),
   cvOrig: $("cvOrig"), cvReduced: $("cvReduced"), cvMask: $("cvMask"),
-  vConfirm: $("vConfirm"), sConfirm: $("sConfirm"),
+  vConfirm: $("vConfirm"), sConfirm: $("sConfirm"), resetConfirm: $("resetConfirm"), snapMarker: $("snapMarker"),
   kMinus: $("kMinus"), kValue: $("kValue"), kPlus: $("kPlus"), kRange: $("kRange"),
   paletteCount: $("paletteCount"), palette: $("palette"), cvPlot: $("cvPlot"), plotWrap: $("plotWrap"),
   plotZoomIn: $("plotZoomIn"), plotZoomOut: $("plotZoomOut"), plotReset: $("plotReset"), plotFull: $("plotFull"),
@@ -87,6 +87,9 @@ const state = {
   plotBound: false,
   plotRot: { yaw: 0.6, pitch: -0.45 },
   plotZoom: 1,
+  plotPan: { x: 0, y: 0 },
+  plotMode: "rotate",
+  pinchDist: 0,
   plotDragging: false,
   plotLast: { x: 0, y: 0 },
   plotCache: null,
@@ -145,6 +148,7 @@ function init() {
   dom.cvPlot.addEventListener("wheel", onPlotWheel, { passive: false });
   document.addEventListener("fullscreenchange", () => requestPlotDraw());
   dom.sConfirm.addEventListener("input", (e) => setConfirmThreshold(+e.target.value));
+  dom.resetConfirm.addEventListener("click", resetConfirmParams);
   dom.palette.addEventListener("click", onPaletteClick);
   dom.detailsToggle.addEventListener("click", () => { state.detailsOpen = !state.detailsOpen; syncDetails(); });
   dom.toStep4Btn.addEventListener("click", () => { stopPlay(); stopPlot(); goStep(4); });
@@ -818,6 +822,7 @@ function renderStep3Dynamic() {
   const v = activeVideo();
   if (!v || !v.analysis) return;
   dom.activeName.textContent = v.name;
+  updateSnapMarker(v);
   dom.sConfirm.value = v.confirmThreshold;
   dom.vConfirm.textContent = v.confirmThreshold;
   renderKControl(v);
@@ -850,12 +855,37 @@ function changeK(delta) {
   v.processedCache = new Map();
   v.maskCache = new Map();
   state.plotCache = null;
+  updateSnapMarker(v);
   renderKControl(v);
   renderPalette(v);
   renderMetrics(v);
   renderKTable(v);
   if (!state.playing) drawActiveFrame();
   requestPlotDraw();
+}
+
+// Restore the active video's threshold and representative count to the auto-determined originals.
+function resetConfirmParams() {
+  const v = activeVideo();
+  if (!v || !v.analysis) return;
+  v.activeK = v.analysis.selectedK;
+  if (v.analysis.snapshotsByK[v.activeK]) {
+    v.analysis.representatives = v.analysis.snapshotsByK[v.activeK].representatives;
+  }
+  v.confirmThreshold = Math.round(v.analysis.threshold);
+  v.processedCache = new Map();
+  v.maskCache = new Map();
+  state.plotCache = null;
+  updateSnapMarker(v);
+  dom.sConfirm.value = v.confirmThreshold;
+  dom.vConfirm.textContent = v.confirmThreshold;
+  renderKControl(v);
+  renderPalette(v);
+  renderMetrics(v);
+  renderKTable(v);
+  if (!state.playing) drawActiveFrame();
+  requestPlotDraw();
+  showToast("info", "しきい値と代表色の数を自動の値に戻しました");
 }
 
 function onTabClick(e) {
@@ -953,6 +983,12 @@ function setPreviewCanvasSizes(shortSide) {
 function setConfirmThreshold(value) {
   const v = activeVideo();
   if (!v) return;
+  // Light snap to the "no magenta" point (where every color is within threshold).
+  const nm = v.noMagentaThreshold;
+  if (nm != null && nm >= Number(dom.sConfirm.min) && Math.abs(value - nm) <= 2) {
+    value = nm;
+    dom.sConfirm.value = value;
+  }
   v.confirmThreshold = value;
   v.processedCache = new Map();
   v.maskCache = new Map();
@@ -961,6 +997,38 @@ function setConfirmThreshold(value) {
   if (m) m.textContent = String(value);
   if (!state.playing) drawActiveFrame();
   requestPlotDraw();
+}
+
+// Threshold at/above which no color is "new" (= magenta count 0): the farthest color's
+// distance to its nearest representative. Depends on the active representatives (K).
+function computeNoMagenta(v) {
+  const reps = v.analysis.representatives;
+  const samples = v.analysis.sampleColors || [];
+  let mx = 0;
+  for (const c of samples) {
+    let nd = Infinity;
+    for (const r of reps) {
+      const dr = c[0] - r[0], dg = c[1] - r[1], db = c[2] - r[2];
+      const d = dr * dr + dg * dg + db * db;
+      if (d < nd) nd = d;
+    }
+    nd = Math.sqrt(nd);
+    if (nd > mx) mx = nd;
+  }
+  return Math.ceil(mx);
+}
+
+function updateSnapMarker(v) {
+  if (!v || !v.analysis) { dom.snapMarker.hidden = true; return; }
+  const nm = computeNoMagenta(v);
+  v.noMagentaThreshold = nm;
+  const min = Number(dom.sConfirm.min);
+  const max = Math.max(150, nm + 8);
+  dom.sConfirm.max = max;
+  if (Number(dom.sConfirm.value) > max) { dom.sConfirm.value = max; v.confirmThreshold = max; dom.vConfirm.textContent = max; }
+  const frac = Math.max(0, Math.min(1, (nm - min) / (max - min)));
+  dom.snapMarker.style.left = `calc(9px + ${frac} * (100% - 18px))`;
+  dom.snapMarker.hidden = false;
 }
 
 function drawActiveFrame() {
@@ -1035,24 +1103,62 @@ function attachPlot() {
   if (state.plotBound) return;
   state.plotBound = true;
   const el = dom.cvPlot;
-  const pos = (e) => { const o = e.touches ? e.touches[0] : e; return { x: o.clientX, y: o.clientY }; };
-  const down = (e) => { state.plotDragging = true; state.plotLast = pos(e); };
-  const move = (e) => {
+  const backingK = () => { const r = el.getBoundingClientRect(); return r.width ? el.width / r.width : 2; };
+  const touchMid = (e) => { const a = e.touches[0], b = e.touches[1]; return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 }; };
+  const touchDist = (e) => { const a = e.touches[0], b = e.touches[1]; return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY); };
+
+  el.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  // mouse: left = rotate, right / middle / Shift+left = pan
+  el.addEventListener("mousedown", (e) => {
+    state.plotDragging = true;
+    state.plotMode = (e.button === 2 || e.button === 1 || e.shiftKey) ? "pan" : "rotate";
+    state.plotLast = { x: e.clientX, y: e.clientY };
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
     if (!state.plotDragging) return;
-    const p = pos(e);
-    state.plotRot.yaw += (p.x - state.plotLast.x) * 0.01;
-    state.plotRot.pitch += (p.y - state.plotLast.y) * 0.01;
-    state.plotRot.pitch = Math.max(-1.4, Math.min(1.4, state.plotRot.pitch));
-    state.plotLast = p;
-    requestPlotDraw();
-  };
-  const up = () => { state.plotDragging = false; };
-  el.addEventListener("mousedown", down);
-  window.addEventListener("mousemove", move);
-  window.addEventListener("mouseup", up);
-  el.addEventListener("touchstart", down, { passive: true });
-  window.addEventListener("touchmove", move, { passive: true });
-  window.addEventListener("touchend", up);
+    applyPlotDrag(e.clientX - state.plotLast.x, e.clientY - state.plotLast.y, backingK());
+    state.plotLast = { x: e.clientX, y: e.clientY };
+  });
+  window.addEventListener("mouseup", () => { state.plotDragging = false; });
+
+  // touch: 1 finger = rotate, 2 fingers = pan + pinch-zoom
+  el.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 2) {
+      state.plotDragging = true; state.plotMode = "pan";
+      state.plotLast = touchMid(e); state.pinchDist = touchDist(e);
+    } else if (e.touches.length === 1) {
+      state.plotDragging = true; state.plotMode = "rotate";
+      state.plotLast = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    }
+  }, { passive: true });
+  window.addEventListener("touchmove", (e) => {
+    if (!state.plotDragging) return;
+    if (e.touches.length === 2) {
+      const m = touchMid(e);
+      applyPlotDrag(m.x - state.plotLast.x, m.y - state.plotLast.y, backingK(), true);
+      state.plotLast = m;
+      const d = touchDist(e);
+      if (state.pinchDist && d) zoomPlot(d / state.pinchDist);
+      state.pinchDist = d;
+    } else if (e.touches.length === 1) {
+      applyPlotDrag(e.touches[0].clientX - state.plotLast.x, e.touches[0].clientY - state.plotLast.y, backingK());
+      state.plotLast = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    }
+  }, { passive: true });
+  window.addEventListener("touchend", () => { state.plotDragging = false; state.pinchDist = 0; });
+}
+
+function applyPlotDrag(dx, dy, k, forcePan) {
+  if (forcePan || state.plotMode === "pan") {
+    state.plotPan.x += dx * k;
+    state.plotPan.y += dy * k;
+  } else {
+    state.plotRot.yaw += dx * 0.01;
+    state.plotRot.pitch = Math.max(-1.4, Math.min(1.4, state.plotRot.pitch + dy * 0.01));
+  }
+  requestPlotDraw();
 }
 
 // On-demand drawing (no auto-rotation): redraw only on interaction / state change.
@@ -1081,6 +1187,7 @@ function onPlotWheel(e) {
 function resetPlotView() {
   state.plotRot = { yaw: 0.6, pitch: -0.45 };
   state.plotZoom = 1;
+  state.plotPan = { x: 0, y: 0 };
   requestPlotDraw();
 }
 
@@ -1133,7 +1240,7 @@ function drawPlot() {
 
   const yaw = state.plotRot.yaw, pitch = state.plotRot.pitch;
   const cyw = Math.cos(yaw), syw = Math.sin(yaw), cxp = Math.cos(pitch), sxp = Math.sin(pitch);
-  const cxv = W / 2, cyv = H / 2 + H * 0.04, scale = Math.min(W, H) * 0.46 * state.plotZoom, dist = 3.6;
+  const cxv = W / 2 + state.plotPan.x, cyv = H / 2 + H * 0.04 + state.plotPan.y, scale = Math.min(W, H) * 0.46 * state.plotZoom, dist = 3.6;
   const proj = (x, y, z) => {
     let X = x * cyw - z * syw, Z = x * syw + z * cyw;
     let Y = y * cxp - Z * sxp; Z = y * sxp + Z * cxp;
@@ -1152,8 +1259,11 @@ function drawPlot() {
     ctx.fillStyle = a[3]; ctx.font = "bold 22px sans-serif"; ctx.fillText(a[4], P.x + 6, P.y + 6);
   });
 
+  // Point/node radius scales with zoom (and perspective) so zooming out shrinks the dots
+  // instead of leaving them large and overlapping into a blurry blob.
+  const z = state.plotZoom;
   // points: magenta if farther than threshold from nearest representative, else true color
-  const baseR = Math.max(1.2, 2.6 * (W / 1400));
+  const baseR = Math.max(0.8, 2.4 * (W / 1400)) * z;
   const draw = cache.samplePts.map((p) => {
     const P = proj(p.x, p.y, p.z);
     return { sx: P.x, sy: P.y, depth: P.depth, f: P.f, p };
@@ -1161,7 +1271,7 @@ function drawPlot() {
   draw.forEach((d) => {
     const out = d.p.nd > threshold;
     ctx.beginPath();
-    ctx.arc(d.sx, d.sy, Math.max(1, (out ? baseR * 1.5 : baseR) * d.f), 0, 7);
+    ctx.arc(d.sx, d.sy, Math.max(0.5, (out ? baseR * 1.5 : baseR) * d.f), 0, 7);
     ctx.fillStyle = out ? "#ff35ff" : `rgb(${d.p.r},${d.p.g},${d.p.b})`;
     ctx.globalAlpha = out ? 0.95 : 0.62;
     ctx.fill();
@@ -1170,15 +1280,16 @@ function drawPlot() {
 
   // threshold spheres (wireframe great circles) + representative nodes
   const rNorm = threshold / 127.5;
+  const nodeR = Math.max(1.5, 7 * (W / 1400) * z);
   const sorted = cache.repPts.map((c) => ({ c, depth: proj(c.x, c.y, c.z).depth })).sort((a, b) => a.depth - b.depth);
   sorted.forEach(({ c }) => {
     const col = `rgb(${c.r},${c.g},${c.b})`;
     drawWireSphere(ctx, proj, c.x, c.y, c.z, rNorm, col);
     const P = proj(c.x, c.y, c.z);
     ctx.beginPath();
-    ctx.arc(P.x, P.y, Math.max(4, 8 * P.f), 0, 7);
+    ctx.arc(P.x, P.y, Math.max(1.5, nodeR * P.f), 0, 7);
     ctx.fillStyle = col; ctx.globalAlpha = 1; ctx.fill();
-    ctx.lineWidth = 2.5; ctx.strokeStyle = "rgba(255,255,255,.95)"; ctx.stroke();
+    ctx.lineWidth = Math.max(1, 2.5 * Math.min(1.5, z)); ctx.strokeStyle = "rgba(255,255,255,.95)"; ctx.stroke();
   });
   ctx.globalAlpha = 1;
 }
@@ -1385,18 +1496,26 @@ function updateExport(v) {
   if (st && v.save) st.textContent = Math.round(v.exportProgress) + "%";
 }
 
+// "最初に戻る" — full reset back to the very first step (clears loaded videos so the
+// 4-step rail returns to its initial state: only step 1 active, the rest 未着手).
 function restart() {
   stopPlay();
   stopPlot();
+  cancelAdvancedPreview();
+  state.videos.forEach(releaseVideo);
+  state.videos = [];
+  state.activeIdx = 0;
   state.step = 1;
   state.exported = false;
   state.exporting = false;
   state.exportDir = null;
   state.exportDirName = "";
-  state.videos.forEach((v) => {
-    v.exportProgress = 0; v.exportDone = false; v.save = true; v.savedToDir = false; v.exportBlob = null;
-    if (v.exportUrl) { URL.revokeObjectURL(v.exportUrl); v.exportUrl = null; }
-  });
+  state.preset = "recommend";
+  state.advanced = false;
+  state.detailsOpen = false;
+  state.thresholdMode = "auto";
+  state.vals = { ...DEFAULT_VALS };
+  state.plotCache = null;
   render();
 }
 

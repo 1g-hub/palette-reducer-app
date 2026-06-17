@@ -211,7 +211,8 @@ b { font-weight: 700; }
 .accordion-head > span:first-child { font-size: 14px; font-weight: 700; color: var(--ink-2); }
 .accordion-caret { font-size: 13px; color: var(--muted); }
 .accordion-body { border-top: 1px solid var(--line); background: #fff; }
-.adv-scroll { padding: 18px 20px 8px; }
+/* Only the parameter groups scroll; the preview above stays visible while adjusting. */
+.adv-scroll { padding: 4px 20px 8px; max-height: 50vh; overflow-y: auto; }
 .detail-inner { padding: 18px 18px 20px; }
 .group-title { font-size: 11.5px; font-weight: 700; letter-spacing: .05em; color: var(--muted); margin: 0 0 12px; }
 .group-title + .group-title, .metrics-grid + .group-title { margin-top: 4px; }
@@ -279,6 +280,13 @@ input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 
 
 .threshold-panel { margin: 16px 0 4px; padding: 14px 16px; background: #f7f8fc; border: 1px solid #eaecf3; border-radius: 12px; }
 .threshold-panel .slider-top { margin-bottom: 9px; }
+.threshold-panel .slider-val { margin-left: 8px; }
+.reset-link { margin-left: auto; background: none; border: 1px solid var(--line-2); color: var(--ink-3); font-size: 11.5px; font-weight: 700; padding: 4px 11px; border-radius: 8px; cursor: pointer; }
+.reset-link:hover { border-color: var(--accent); color: var(--accent); }
+.slider-wrap { position: relative; padding-top: 22px; }
+.snap-marker { position: absolute; top: 0; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; pointer-events: none; z-index: 2; }
+.snap-marker .snap-label { font-size: 10px; font-weight: 700; color: #fff; background: var(--accent-d); padding: 1px 6px; border-radius: 6px; white-space: nowrap; }
+.snap-marker .snap-tick { width: 2px; height: 11px; background: var(--accent-d); }
 .threshold-panel input[type=range] { margin-top: 0; }
 .threshold-legend { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 6px; }
 
@@ -361,7 +369,7 @@ input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 
 .info { cursor: help; }
 
 /* ---------- advanced live preview ---------- */
-.adv-preview { margin-bottom: 20px; padding: 14px; background: #f7f8fc; border: 1px solid #eaecf3; border-radius: 12px; }
+.adv-preview { margin: 16px 16px 10px; padding: 14px; background: #f7f8fc; border: 1px solid #eaecf3; border-radius: 12px; }
 .adv-preview-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .adv-preview-title { font-size: 12.5px; font-weight: 700; color: var(--ink-2); }
 .adv-preview-note { font-size: 11px; color: var(--muted); }
