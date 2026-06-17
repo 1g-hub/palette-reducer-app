@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20260617-2">
+    <link rel="stylesheet" href="./styles.css?v=20260618-1">
   </head>
   <body>
     <div class="page">
@@ -31,7 +31,6 @@
               </div>
             </div>
             <div class="header-right">
-              <span class="privacy-badge" title="動画はアップロードされません。すべてブラウザ内で処理されます。">🔒 アップロードしません</span>
               <span id="videoCountBadge" class="count-badge" hidden></span>
             </div>
           </header>
@@ -142,10 +141,11 @@
                       <div class="slider-field">
                         <div class="slider-top">
                           <span class="slider-name">分析の解像度（短辺）</span>
-                          <span class="info" data-tip="分析時に縮小するサイズ。大きいほど精密ですが遅くなります（既定540）。英語名: Analysis short side">ⓘ</span>
-                          <span class="slider-val"><span id="vAna">540</span>px</span>
+                          <span class="info" data-tip="色を分析するときに動画を縮小するサイズです。大きいほど精密ですが遅くなります。「入力と同じ」だと元動画の解像度のまま分析します。">ⓘ</span>
+                          <span class="slider-val"><span id="vAna">入力と同じ</span></span>
                         </div>
-                        <input id="sAna" type="range" min="240" max="1080" step="20" value="540">
+                        <label class="res-full"><input id="chkAnaFull" type="checkbox" checked> 入力と同じ解像度で分析する</label>
+                        <input id="sAna" type="range" min="240" max="1080" step="20" value="540" disabled>
                       </div>
 
                       <div class="slider-field">
@@ -160,10 +160,11 @@
                       <div class="slider-field">
                         <div class="slider-top">
                           <span class="slider-name">プレビュー/書き出しの解像度</span>
-                          <span class="info" data-tip="表示・保存する映像の大きさ（既定360）。英語名: Preview short side">ⓘ</span>
-                          <span class="slider-val"><span id="vPrev">360</span>px</span>
+                          <span class="info" data-tip="表示・保存する映像の大きさです。「入力と同じ」だと元動画の解像度のまま書き出します（重くなります）。">ⓘ</span>
+                          <span class="slider-val"><span id="vPrev">入力と同じ</span></span>
                         </div>
-                        <input id="sPrev" type="range" min="160" max="720" step="20" value="360">
+                        <label class="res-full"><input id="chkPrevFull" type="checkbox" checked> 入力と同じ解像度で書き出す</label>
+                        <input id="sPrev" type="range" min="160" max="720" step="20" value="360" disabled>
                       </div>
 
                       <div class="group-title">色のまとめ方</div>
@@ -258,25 +259,28 @@
                   <div class="step3-actions">
                     <button id="backToStep2" type="button" class="btn-ghost">← 色の設定に戻る</button>
                     <button id="playBtn" type="button" class="btn-primary sm">▶ 再生</button>
+                    <button id="loopBtn" type="button" class="btn-ghost">🔁 連続再生</button>
                   </div>
                 </div>
 
                 <div id="step3Tabs" class="vid-tabs" hidden></div>
                 <p class="step-desc">表示中：<b id="activeName">—</b> — 「▶ 再生」で3つの映像を同期再生します。</p>
 
-                <div class="preview-grid">
-                  <div class="preview-cell">
-                    <div class="cell-head"><span>元の動画</span><span class="info" data-tip="読み込んだそのままの映像です。英語名: Original">ⓘ</span></div>
-                    <canvas id="cvOrig" class="preview-canvas"></canvas>
+                <div class="preview-sticky">
+                  <div class="preview-grid">
+                    <div class="preview-cell">
+                      <div class="cell-head"><span>元の動画</span><span class="info" data-tip="読み込んだそのままの映像です。英語名: Original">ⓘ</span></div>
+                      <canvas id="cvOrig" class="preview-canvas"></canvas>
+                    </div>
+                    <div class="preview-cell">
+                      <div class="cell-head"><span>色を減らした映像</span><span class="info" data-tip="代表色だけで作り直した映像です。英語名: Reduced">ⓘ</span></div>
+                      <canvas id="cvReduced" class="preview-canvas"></canvas>
+                    </div>
+                    <div class="preview-cell">
+                      <div class="cell-head"><span>はみ出し色マップ</span><span class="info" data-tip="パレットに無い色（マゼンタで表示）がどこにあるかを示します。英語名: New-color mask">ⓘ</span></div>
+                      <canvas id="cvMask" class="preview-canvas dark"></canvas>
+                    </div>
                   </div>
-                  <div class="preview-cell">
-                    <div class="cell-head"><span>色を減らした映像</span><span class="info" data-tip="代表色だけで作り直した映像です。英語名: Reduced">ⓘ</span></div>
-                    <canvas id="cvReduced" class="preview-canvas"></canvas>
-                  </div>
-                </div>
-                <div class="preview-cell half">
-                  <div class="cell-head"><span>はみ出し色マップ</span><span class="info" data-tip="パレットに無い色（マゼンタで表示）がどこにあるかを示します。英語名: New-color mask">ⓘ</span></div>
-                  <canvas id="cvMask" class="preview-canvas dark"></canvas>
                 </div>
 
                 <div class="threshold-panel">
@@ -312,9 +316,18 @@
 
                 <div class="plot-head">
                   <span class="palette-title">色の3次元プロット（RGB空間）</span>
-                  <span class="palette-hint">ドラッグで回転 ・ 大きな点が代表色</span>
+                  <span class="info" data-tip="動画に含まれる色をRGB空間に点で表示します。大きな点が代表色、各代表色のまわりの球が「しきい値の範囲」で、その球から外れた色（=はみ出し色）はマゼンタで表示されます。ドラッグで回転、ホイールで拡大縮小できます。">ⓘ</span>
+                  <span class="plot-hint">ドラッグで回転 ・ ホイールで拡大 ・ 大きな点が代表色</span>
+                  <div class="plot-tools">
+                    <button id="plotZoomOut" type="button" class="plot-tool" title="縮小">－</button>
+                    <button id="plotZoomIn" type="button" class="plot-tool" title="拡大">＋</button>
+                    <button id="plotReset" type="button" class="plot-tool" title="表示をリセット">⟳</button>
+                    <button id="plotFull" type="button" class="plot-tool" title="全画面表示">⛶ 全画面</button>
+                  </div>
                 </div>
-                <canvas id="cvPlot" class="plot-canvas"></canvas>
+                <div id="plotWrap" class="plot-wrap">
+                  <canvas id="cvPlot" class="plot-canvas"></canvas>
+                </div>
 
                 <div class="accordion mt">
                   <button id="detailsToggle" type="button" class="accordion-head">
@@ -380,6 +393,6 @@
     <!-- hidden work elements -->
     <video id="workVideo" muted playsinline preload="auto"></video>
     <canvas id="exportCanvas" class="offscreen"></canvas>
-    <script src="./app.js?v=20260617-2"></script>
+    <script src="./app.js?v=20260618-1"></script>
   </body>
 </html>

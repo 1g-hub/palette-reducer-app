@@ -50,7 +50,9 @@ function analyze(payload) {
   }
 
   const thresholdInfo = chooseThreshold(colors, counts, snapshot.labels, snapshot.representatives, settings);
-  const sampleColors = sampleArray(colors, 1800);
+  // Plot ALL of the analyzed colors (full unique histogram, not just the clustering candidates),
+  // so colors that fall outside every representative's threshold show up as magenta in the 3D plot.
+  const sampleColors = sampleArray(histogram.map((item) => item.rgb), 12000);
 
   const snapshotsByK = {};
   const availableK = [];

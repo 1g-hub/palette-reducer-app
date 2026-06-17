@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260617-2";
+const APP_VERSION = "20260618-1";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -20,16 +20,18 @@ const dom = {
   thresholdSeg: $("thresholdSeg"), fixedField: $("fixedField"), resetAdvancedBtn: $("resetAdvancedBtn"),
   advPrevTabs: $("advPrevTabs"), advPrevName: $("advPrevName"), advPrevStatus: $("advPrevStatus"),
   cvPrevOrig: $("cvPrevOrig"), cvPrevReduced: $("cvPrevReduced"),
+  chkAnaFull: $("chkAnaFull"), chkPrevFull: $("chkPrevFull"),
   // analyzing
   analyzingDesc: $("analyzingDesc"), analyzingList: $("analyzingList"),
   elapsedText: $("elapsedText"), stopAnalyzeBtn: $("stopAnalyzeBtn"),
   reassure: $("reassure"), transcodeNote: $("transcodeNote"), transcodeText: $("transcodeText"),
   // step3
-  backToStep2: $("backToStep2"), playBtn: $("playBtn"), step3Tabs: $("step3Tabs"), activeName: $("activeName"),
+  backToStep2: $("backToStep2"), playBtn: $("playBtn"), loopBtn: $("loopBtn"), step3Tabs: $("step3Tabs"), activeName: $("activeName"),
   cvOrig: $("cvOrig"), cvReduced: $("cvReduced"), cvMask: $("cvMask"),
   vConfirm: $("vConfirm"), sConfirm: $("sConfirm"),
   kMinus: $("kMinus"), kValue: $("kValue"), kPlus: $("kPlus"), kRange: $("kRange"),
-  paletteCount: $("paletteCount"), palette: $("palette"), cvPlot: $("cvPlot"),
+  paletteCount: $("paletteCount"), palette: $("palette"), cvPlot: $("cvPlot"), plotWrap: $("plotWrap"),
+  plotZoomIn: $("plotZoomIn"), plotZoomOut: $("plotZoomOut"), plotReset: $("plotReset"), plotFull: $("plotFull"),
   detailsToggle: $("detailsToggle"), detailsCaret: $("detailsCaret"), detailsBody: $("detailsBody"),
   metrics: $("metrics"), ktableBody: $("ktableBody"), toStep4Btn: $("toStep4Btn"),
   // step4
@@ -47,11 +49,13 @@ const dom = {
   vMink: $("vMink"), vMaxk: $("vMaxk"), vFixed: $("vFixed"), vMargin: $("vMargin"),
 };
 
-const DEFAULT_VALS = { ana: 540, prev: 360, maxc: 800, mindist: 12, mink: 4, maxk: 40, fixed: 60, margin: 5 };
+const NATIVE_RES = 100000; // sentinel → scaledSize keeps native resolution
+const DEFAULT_VALS = { ana: 540, prev: 360, anaFull: true, prevFull: true, maxc: 800, mindist: 12, mink: 4, maxk: 40, fixed: 60, margin: 5 };
+// Selecting a preset resets ALL parameters (including threshold mode and resolution) to these values.
 const PRESETS = {
-  recommend: { ana: 540, prev: 360, maxc: 800, mindist: 12 },
-  hq: { ana: 720, prev: 540, maxc: 1500, mindist: 8 },
-  light: { ana: 400, prev: 240, maxc: 400, mindist: 20 },
+  recommend: { ana: 540, prev: 360, anaFull: true, prevFull: true, maxc: 800, mindist: 12, mink: 4, maxk: 40, fixed: 60, margin: 5, mode: "auto" },
+  hq: { ana: 720, prev: 540, anaFull: true, prevFull: true, maxc: 1500, mindist: 8, mink: 4, maxk: 48, fixed: 60, margin: 4, mode: "auto" },
+  light: { ana: 400, prev: 240, anaFull: true, prevFull: true, maxc: 400, mindist: 20, mink: 4, maxk: 32, fixed: 60, margin: 6, mode: "auto" },
 };
 
 const state = {
@@ -69,6 +73,7 @@ const state = {
   exporting: false,
   exported: false,
   playing: false,
+  loop: false,
   cancelled: false,
   vals: { ...DEFAULT_VALS },
   activeWorker: null,
@@ -81,6 +86,7 @@ const state = {
   rafPlot: null,
   plotBound: false,
   plotRot: { yaw: 0.6, pitch: -0.45 },
+  plotZoom: 1,
   plotDragging: false,
   plotLast: { x: 0, y: 0 },
   plotCache: null,
@@ -125,9 +131,19 @@ function init() {
 
   dom.stopAnalyzeBtn.addEventListener("click", stopAnalyze);
 
+  dom.chkAnaFull.addEventListener("change", () => { state.vals.anaFull = dom.chkAnaFull.checked; syncSliders(); markCustomPreset(); scheduleAdvancedPreview(); });
+  dom.chkPrevFull.addEventListener("change", () => { state.vals.prevFull = dom.chkPrevFull.checked; syncSliders(); markCustomPreset(); });
+
   dom.backToStep2.addEventListener("click", () => { stopPlay(); stopPlot(); goStep(2); });
-  dom.playBtn.addEventListener("click", togglePlay);
+  dom.playBtn.addEventListener("click", () => togglePlay(false));
+  dom.loopBtn.addEventListener("click", () => togglePlay(true));
   dom.step3Tabs.addEventListener("click", onTabClick);
+  dom.plotZoomIn.addEventListener("click", () => zoomPlot(1.25));
+  dom.plotZoomOut.addEventListener("click", () => zoomPlot(0.8));
+  dom.plotReset.addEventListener("click", resetPlotView);
+  dom.plotFull.addEventListener("click", togglePlotFullscreen);
+  dom.cvPlot.addEventListener("wheel", onPlotWheel, { passive: false });
+  document.addEventListener("fullscreenchange", () => requestPlotDraw());
   dom.sConfirm.addEventListener("input", (e) => setConfirmThreshold(+e.target.value));
   dom.palette.addEventListener("click", onPaletteClick);
   dom.detailsToggle.addEventListener("click", () => { state.detailsOpen = !state.detailsOpen; syncDetails(); });
@@ -155,9 +171,18 @@ function init() {
 function bindSlider(slider, label, key) {
   slider.addEventListener("input", () => {
     state.vals[key] = Number(slider.value);
-    label.textContent = slider.value;
+    if (key === "ana" || key === "prev") label.textContent = slider.value + "px";
+    else label.textContent = slider.value;
+    markCustomPreset();
     scheduleAdvancedPreview();
   });
+}
+
+// When the user hand-tweaks any setting, no preset is "selected" anymore.
+function markCustomPreset() {
+  if (state.preset === null) return;
+  state.preset = null;
+  dom.presetSeg.querySelectorAll(".seg").forEach((b) => b.classList.remove("active"));
 }
 
 /* ============================ video model ============================ */
@@ -353,19 +378,32 @@ function onPresetClick(e) {
   const btn = e.target.closest("[data-preset]");
   if (!btn) return;
   state.preset = btn.dataset.preset;
-  Object.assign(state.vals, PRESETS[state.preset]);
+  // Reset ALL parameters (resolution, color grouping, threshold mode) to the preset's defaults.
+  const p = PRESETS[state.preset];
+  Object.keys(DEFAULT_VALS).forEach((k) => { if (p[k] !== undefined) state.vals[k] = p[k]; });
+  state.thresholdMode = p.mode || "auto";
   syncSliders();
+  syncThresholdMode();
   dom.presetSeg.querySelectorAll(".seg").forEach((b) => b.classList.toggle("active", b.dataset.preset === state.preset));
   scheduleAdvancedPreview();
 }
 
 function syncSliders() {
   const map = [
-    [dom.sAna, dom.vAna, "ana"], [dom.sPrev, dom.vPrev, "prev"], [dom.sMaxc, dom.vMaxc, "maxc"],
-    [dom.sMindist, dom.vMindist, "mindist"], [dom.sMink, dom.vMink, "mink"], [dom.sMaxk, dom.vMaxk, "maxk"],
+    [dom.sMaxc, dom.vMaxc, "maxc"], [dom.sMindist, dom.vMindist, "mindist"],
+    [dom.sMink, dom.vMink, "mink"], [dom.sMaxk, dom.vMaxk, "maxk"],
     [dom.sFixed, dom.vFixed, "fixed"], [dom.sMargin, dom.vMargin, "margin"],
   ];
   map.forEach(([s, l, k]) => { s.value = state.vals[k]; l.textContent = state.vals[k]; });
+  // resolution fields (slider + "入力と同じ" checkbox)
+  dom.chkAnaFull.checked = state.vals.anaFull;
+  dom.sAna.disabled = state.vals.anaFull;
+  dom.sAna.value = state.vals.ana;
+  dom.vAna.textContent = state.vals.anaFull ? "入力と同じ" : state.vals.ana + "px";
+  dom.chkPrevFull.checked = state.vals.prevFull;
+  dom.sPrev.disabled = state.vals.prevFull;
+  dom.sPrev.value = state.vals.prev;
+  dom.vPrev.textContent = state.vals.prevFull ? "入力と同じ" : state.vals.prev + "px";
 }
 
 function syncAdvanced() {
@@ -378,6 +416,7 @@ function onThresholdModeClick(e) {
   if (!btn) return;
   state.thresholdMode = btn.dataset.mode;
   syncThresholdMode();
+  markCustomPreset();
   scheduleAdvancedPreview();
 }
 
@@ -545,8 +584,8 @@ function readSettings() {
   const minClusters = v.mink;
   const maxClusters = Math.max(minClusters + 1, v.maxk);
   return {
-    analysisShortSide: v.ana,
-    previewShortSide: v.prev,
+    analysisShortSide: v.anaFull ? NATIVE_RES : v.ana,
+    previewShortSide: v.prevFull ? NATIVE_RES : v.prev,
     maxCandidates: v.maxc,
     minRepresentativeDistance: v.mindist,
     minClusters,
@@ -816,6 +855,7 @@ function changeK(delta) {
   renderMetrics(v);
   renderKTable(v);
   if (!state.playing) drawActiveFrame();
+  requestPlotDraw();
 }
 
 function onTabClick(e) {
@@ -827,6 +867,7 @@ function onTabClick(e) {
   state.activeIdx = idx;
   renderStep3Dynamic();
   loadActiveIntoPreview();
+  requestPlotDraw();
 }
 
 function renderPalette(v) {
@@ -919,6 +960,7 @@ function setConfirmThreshold(value) {
   const m = dom.metrics.querySelector(".metric:nth-child(2) .metric-value");
   if (m) m.textContent = String(value);
   if (!state.playing) drawActiveFrame();
+  requestPlotDraw();
 }
 
 function drawActiveFrame() {
@@ -939,28 +981,52 @@ function drawActiveFrame() {
   mCtx.putImageData(mask, 0, 0);
 }
 
-async function togglePlay() {
+async function togglePlay(loop) {
   const v = activeVideo();
   if (!v || !v.analysis) return;
-  if (state.playing) { stopPlay(); return; }
+  if (state.playing) {
+    // same button → stop; other button → switch play mode while keeping playback
+    if (state.loop === loop) { stopPlay(); return; }
+    state.loop = loop;
+    dom.workVideo.loop = loop;
+    updatePlayButtons();
+    return;
+  }
   state.playing = true;
-  dom.playBtn.textContent = "⏸ 停止";
+  state.loop = loop;
+  dom.workVideo.loop = loop;
   dom.workVideo.muted = true;
   if (dom.workVideo.ended) dom.workVideo.currentTime = 0;
+  updatePlayButtons();
   try { await dom.workVideo.play(); } catch (err) { stopPlay(); return; }
-  const loop = () => {
-    if (!state.playing || dom.workVideo.paused || dom.workVideo.ended) { stopPlay(); return; }
+  const tick = () => {
+    if (!state.playing || dom.workVideo.paused || (dom.workVideo.ended && !state.loop)) { stopPlay(); return; }
     drawActiveFrame();
-    state.rafPreview = requestAnimationFrame(loop);
+    state.rafPreview = requestAnimationFrame(tick);
   };
-  state.rafPreview = requestAnimationFrame(loop);
+  state.rafPreview = requestAnimationFrame(tick);
 }
 
 function stopPlay() {
   state.playing = false;
-  dom.playBtn.textContent = "▶ 再生";
+  state.loop = false;
+  dom.workVideo.loop = false;
   if (state.rafPreview) { cancelAnimationFrame(state.rafPreview); state.rafPreview = null; }
   if (!dom.workVideo.paused) dom.workVideo.pause();
+  updatePlayButtons();
+}
+
+function updatePlayButtons() {
+  if (!state.playing) {
+    dom.playBtn.textContent = "▶ 再生";
+    dom.loopBtn.textContent = "🔁 連続再生";
+  } else if (state.loop) {
+    dom.playBtn.textContent = "▶ 再生";
+    dom.loopBtn.textContent = "⏸ 停止";
+  } else {
+    dom.playBtn.textContent = "⏸ 停止";
+    dom.loopBtn.textContent = "🔁 連続再生";
+  }
 }
 
 /* ============================ 3D RGB plot ============================ */
@@ -978,6 +1044,7 @@ function attachPlot() {
     state.plotRot.pitch += (p.y - state.plotLast.y) * 0.01;
     state.plotRot.pitch = Math.max(-1.4, Math.min(1.4, state.plotRot.pitch));
     state.plotLast = p;
+    requestPlotDraw();
   };
   const up = () => { state.plotDragging = false; };
   el.addEventListener("mousedown", down);
@@ -988,19 +1055,41 @@ function attachPlot() {
   window.addEventListener("touchend", up);
 }
 
-function startPlot() {
+// On-demand drawing (no auto-rotation): redraw only on interaction / state change.
+function requestPlotDraw() {
+  if (state.step !== 3) return;
   if (state.rafPlot) return;
-  const loop = () => {
-    if (state.step !== 3) { state.rafPlot = null; return; }
-    if (!state.plotDragging) state.plotRot.yaw += 0.004;
-    drawPlot();
-    state.rafPlot = requestAnimationFrame(loop);
-  };
-  state.rafPlot = requestAnimationFrame(loop);
+  state.rafPlot = requestAnimationFrame(() => { state.rafPlot = null; drawPlot(); });
 }
+
+function startPlot() { requestPlotDraw(); }
 
 function stopPlot() {
   if (state.rafPlot) { cancelAnimationFrame(state.rafPlot); state.rafPlot = null; }
+}
+
+function zoomPlot(factor) {
+  state.plotZoom = Math.max(0.4, Math.min(6, state.plotZoom * factor));
+  requestPlotDraw();
+}
+
+function onPlotWheel(e) {
+  e.preventDefault();
+  zoomPlot(e.deltaY < 0 ? 1.12 : 0.89);
+}
+
+function resetPlotView() {
+  state.plotRot = { yaw: 0.6, pitch: -0.45 };
+  state.plotZoom = 1;
+  requestPlotDraw();
+}
+
+function togglePlotFullscreen() {
+  if (document.fullscreenElement) {
+    document.exitFullscreen();
+  } else if (dom.plotWrap.requestFullscreen) {
+    dom.plotWrap.requestFullscreen().then(() => setTimeout(requestPlotDraw, 80)).catch(() => {});
+  }
 }
 
 function buildPlotCache(v) {
@@ -1025,11 +1114,12 @@ function drawPlot() {
   const v = activeVideo();
   if (!cv || !v || !v.analysis) return;
 
-  // Crisp backing store (CSS scales it down → sharp).
+  // Crisp backing store at 2× CSS size (follows the element's actual height → taller plot).
   const rect = cv.getBoundingClientRect();
-  const targetW = Math.max(960, Math.round((rect.width || 960) * 2));
-  const targetH = Math.round(targetW * 320 / 720);
-  if (cv.width !== targetW) { cv.width = targetW; cv.height = targetH; }
+  if (!rect.width || !rect.height) return;
+  const targetW = Math.round(rect.width * 2);
+  const targetH = Math.round(rect.height * 2);
+  if (cv.width !== targetW || cv.height !== targetH) { cv.width = targetW; cv.height = targetH; }
 
   if (!state.plotCache || state.plotCache.idx !== state.activeIdx || state.plotCache.k !== v.activeK) {
     state.plotCache = buildPlotCache(v);
@@ -1043,7 +1133,7 @@ function drawPlot() {
 
   const yaw = state.plotRot.yaw, pitch = state.plotRot.pitch;
   const cyw = Math.cos(yaw), syw = Math.sin(yaw), cxp = Math.cos(pitch), sxp = Math.sin(pitch);
-  const cxv = W / 2, cyv = H / 2 + H * 0.04, scale = Math.min(W, H) * 0.46, dist = 3.6;
+  const cxv = W / 2, cyv = H / 2 + H * 0.04, scale = Math.min(W, H) * 0.46 * state.plotZoom, dist = 3.6;
   const proj = (x, y, z) => {
     let X = x * cyw - z * syw, Z = x * syw + z * cyw;
     let Y = y * cxp - Z * sxp; Z = y * sxp + Z * cxp;
@@ -1063,7 +1153,7 @@ function drawPlot() {
   });
 
   // points: magenta if farther than threshold from nearest representative, else true color
-  const pr = scale; // points-per-normalized-unit (approx, ignoring perspective for radius)
+  const baseR = Math.max(1.2, 2.6 * (W / 1400));
   const draw = cache.samplePts.map((p) => {
     const P = proj(p.x, p.y, p.z);
     return { sx: P.x, sy: P.y, depth: P.depth, f: P.f, p };
@@ -1071,9 +1161,9 @@ function drawPlot() {
   draw.forEach((d) => {
     const out = d.p.nd > threshold;
     ctx.beginPath();
-    ctx.arc(d.sx, d.sy, Math.max(1.2, 3.0 * d.f), 0, 7);
-    ctx.fillStyle = out ? "#ff00ff" : `rgb(${d.p.r},${d.p.g},${d.p.b})`;
-    ctx.globalAlpha = out ? 0.85 : 0.7;
+    ctx.arc(d.sx, d.sy, Math.max(1, (out ? baseR * 1.5 : baseR) * d.f), 0, 7);
+    ctx.fillStyle = out ? "#ff35ff" : `rgb(${d.p.r},${d.p.g},${d.p.b})`;
+    ctx.globalAlpha = out ? 0.95 : 0.62;
     ctx.fill();
   });
   ctx.globalAlpha = 1;
