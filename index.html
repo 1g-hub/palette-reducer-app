@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20260618-10">
+    <link rel="stylesheet" href="./styles.css?v=20260618-13">
   </head>
   <body>
     <div class="page">
@@ -106,13 +106,13 @@
                 <!-- advanced accordion -->
                 <div class="accordion">
                   <button id="advancedToggle" type="button" class="accordion-head">
-                    <span>詳細設定（上級者向け）</span>
+                    <span>詳細設定</span>
                     <span id="advancedCaret" class="accordion-caret">開く ▼</span>
                   </button>
                   <div id="advancedBody" class="accordion-body" hidden>
                       <div class="adv-preview">
                         <div class="adv-preview-head">
-                          <span class="adv-preview-title">最初のフレームでプレビュー（常に表示）</span>
+                          <span class="adv-preview-title">最初のフレームでプレビュー</span>
                           <span class="adv-preview-note">下の設定を変えると右が更新されます</span>
                         </div>
                         <div id="advPrevTabs" class="adv-prev-tabs" hidden></div>
@@ -134,7 +134,7 @@
                       <div class="slider-field">
                         <div class="slider-top">
                           <span class="slider-name">分析の解像度（短辺）</span>
-                          <span class="info" data-tip="色を分析するときに動画を縮小するサイズです。大きいほど精密ですが遅くなります。「入力と同じ」だと元動画の解像度のまま分析します。">ⓘ</span>
+                          <span class="info" data-tip="代表色を決めるために読み取る画像の大きさです。大きいほど細かい色を拾えますが、分析に時間がかかります。「入力と同じ」は元動画の大きさのまま使います。">ⓘ</span>
                           <span class="slider-val"><span id="vAna">入力と同じ</span></span>
                         </div>
                         <label class="res-full"><input id="chkAnaFull" type="checkbox" checked> 入力と同じ解像度で分析する</label>
@@ -144,7 +144,7 @@
                       <div class="slider-field">
                         <div class="slider-top">
                           <span class="slider-name">使う色の細かさ（候補数）</span>
-                          <span class="info" data-tip="分析に使う色の数。多いほど高精度ですが遅くなります（既定800）。">ⓘ</span>
+                          <span class="info" data-tip="分析に残す頻出色の数です。多いほど細かい色まで候補に入りますが、遅くなります。少ないと、あまり出ない色は代表色に選ばれにくくなります。">ⓘ</span>
                           <span class="slider-val"><span id="vMaxc">800</span>色</span>
                         </div>
                         <input id="sMaxc" type="range" min="200" max="3000" step="50" value="800">
@@ -153,7 +153,7 @@
                       <div class="slider-field">
                         <div class="slider-top">
                           <span class="slider-name">プレビュー/書き出しの解像度</span>
-                          <span class="info" data-tip="表示・保存する映像の大きさです。「入力と同じ」だと元動画の解像度のまま書き出します（重くなります）。">ⓘ</span>
+                          <span class="info" data-tip="確認画面と保存する動画の大きさです。「入力と同じ」は元動画と同じ解像度で出力します。大きいほどきれいですが、処理と保存が重くなります。">ⓘ</span>
                           <span class="slider-val"><span id="vPrev">入力と同じ</span></span>
                         </div>
                         <label class="res-full"><input id="chkPrevFull" type="checkbox" checked> 入力と同じ解像度で書き出す</label>
@@ -165,7 +165,7 @@
                       <div class="slider-field">
                         <div class="slider-top">
                           <span class="slider-name">似た色をまとめる強さ</span>
-                          <span class="info" data-tip="値が大きいほど、近い色どうしを1色にまとめます（既定12）。">ⓘ</span>
+                          <span class="info" data-tip="代表色どうしをどれくらい離すかの基準です。値を大きくすると、近い色は別々の代表色として残りにくくなり、より大ざっぱにまとまります。値を小さくすると、近い色も別の代表色として残りやすくなり、細かい色違いを拾いやすくなります。">ⓘ</span>
                           <span class="slider-val" id="vMindist">12</span>
                         </div>
                         <input id="sMindist" type="range" min="4" max="40" step="1" value="12">
@@ -198,16 +198,16 @@
                       <div id="fixedField" class="slider-field" hidden>
                         <div class="slider-top">
                           <span class="slider-name">手動のしきい値</span>
-                          <span class="info" data-tip="手動時に使う基準値（既定60）。">ⓘ</span>
+                          <span class="info" data-tip="手動で「代表色に含める範囲」を決めます。各ピクセルが一番近い代表色からこの距離以内ならその代表色に置き換え、超えたらマゼンタになります。小さいほど厳密、大きいほどゆるい判定です。">ⓘ</span>
                           <span class="slider-val" id="vFixed">60</span>
                         </div>
                         <input id="sFixed" type="range" min="10" max="150" step="1" value="60">
                       </div>
 
-                      <div class="slider-field">
+                      <div id="marginField" class="slider-field">
                         <div class="slider-top">
                           <span class="slider-name">自動判定の余裕</span>
-                          <span class="info" data-tip="自動時の感度調整。大きいほど“はみ出し色”を少なく判定（既定5）。">ⓘ</span>
+                          <span class="info" data-tip="自動で決めたしきい値に足す余白です。大きくすると、少し離れた色も代表色の仲間として扱うため、マゼンタが減ります。小さくすると判定が厳しくなります。手動のときは使いません。">ⓘ</span>
                           <span class="slider-val" id="vMargin">5</span>
                         </div>
                         <input id="sMargin" type="range" min="0" max="30" step="1" value="5">
@@ -262,15 +262,15 @@
                 <div class="preview-sticky">
                   <div class="preview-grid">
                     <div class="preview-cell">
-                      <div class="cell-head"><span>元の動画</span><span class="info" data-tip="読み込んだそのままの映像です。">ⓘ</span></div>
+                      <div class="cell-head"><span>元の動画</span><span class="info" data-tip="読み込んだ動画の現在のフレームです。左の映像を基準に、右の処理後やはみ出し色マップを確認します。">ⓘ</span></div>
                       <canvas id="cvOrig" class="preview-canvas"></canvas>
                     </div>
                     <div class="preview-cell">
-                      <div class="cell-head"><span>色を減らした映像</span><span class="info" data-tip="代表色だけで作り直した映像です。">ⓘ</span></div>
+                      <div class="cell-head"><span>色を減らした映像</span><span class="info" data-tip="各ピクセルを一番近い代表色に置き換えた映像です。代表色の範囲外と判定された色は、確認しやすいようにマゼンタで表示します。">ⓘ</span></div>
                       <canvas id="cvReduced" class="preview-canvas"></canvas>
                     </div>
                     <div class="preview-cell">
-                      <div class="cell-head"><span>はみ出し色マップ</span><span class="info" data-tip="パレットに無い色（マゼンタで表示）がどこにあるかを示します。">ⓘ</span></div>
+                      <div class="cell-head"><span>はみ出し色マップ</span><span class="info" data-tip="黒は代表色の範囲内、マゼンタは範囲外です。しきい値を小さくするとマゼンタが増え、大きくすると減ります。">ⓘ</span></div>
                       <canvas id="cvMask" class="preview-canvas dark"></canvas>
                     </div>
                   </div>
@@ -278,7 +278,7 @@
                   <div class="threshold-panel">
                     <div class="slider-top">
                       <span class="slider-name strong">色のしきい値を調整する</span>
-                      <span class="info" data-tip="代表色（クラスタ中心）から、この距離までを『その代表色とみなす』範囲です。小さくすると、はみ出し色（マゼンタ）が増え、大きくすると減ります。">ⓘ</span>
+                      <span class="info" data-tip="今の代表色から、どこまで離れた色を同じ色として許すかです。小さいほど判定が厳しくなり、はみ出し色（マゼンタ）が増えます。大きいほどゆるくなり、マゼンタが減ります。">ⓘ</span>
                       <button id="resetConfirm" type="button" class="reset-link" title="しきい値と代表色の数を、分析時に自動で決めた値に戻します">↺ 自動の値に戻す</button>
                       <span class="val-stepper">
                         <button id="confMinus" type="button" class="step-btn" title="しきい値を1下げる">−</button>
@@ -299,7 +299,7 @@
 
                 <div class="k-control">
                   <span class="k-ctrl-label">代表色の数を変える</span>
-                  <span class="info" data-tip="クラスタリングの階層を1段ずつ動かします。＋でクラスタが1つ増え（より細かく）、−で最も近い2つが1つに統合されます（より粗く）。">ⓘ</span>
+                  <span class="info" data-tip="代表色の数をあとから増減します。＋で細かい色違いを残しやすくなり、−で近い色をまとめてより大ざっぱにします。">ⓘ</span>
                   <div class="k-stepper">
                     <button id="kMinus" type="button" class="k-btn">−</button>
                     <span id="kValue" class="k-value">—</span>
@@ -317,7 +317,7 @@
 
                 <div class="plot-head">
                   <span class="palette-title">色の3次元プロット（RGB空間）</span>
-                  <span class="info" data-tip="動画に含まれる色をRGB空間に点で表示します。大きな点が代表色、各代表色のまわりの球が「しきい値の範囲」で、その球から外れた色（=はみ出し色）はマゼンタで表示されます。左ドラッグで回転、右ドラッグ（またはShift＋ドラッグ）で移動、ホイールで拡大縮小できます。">ⓘ</span>
+                  <span class="info" data-tip="動画から見つけた色をRGB空間の点で表示します。大きな点が代表色、球がしきい値の範囲、球の外の点がマゼンタです。左ドラッグで回転、右ドラッグ（またはShift＋ドラッグ）で移動、ホイールで拡大縮小できます。">ⓘ</span>
                   <span class="plot-hint">左ドラッグ=回転 ・ 右(またはShift+)ドラッグ=移動 ・ ホイール=拡大</span>
                   <div class="plot-tools">
                     <button id="plotZoomOut" type="button" class="plot-tool" title="縮小">－</button>
@@ -409,6 +409,6 @@
     <!-- hidden work elements -->
     <video id="workVideo" muted playsinline preload="auto"></video>
     <canvas id="exportCanvas" class="offscreen"></canvas>
-    <script src="./app.js?v=20260618-10"></script>
+    <script src="./app.js?v=20260618-13"></script>
   </body>
 </html>

@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260618-10";
+const APP_VERSION = "20260618-13";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -17,7 +17,7 @@ const dom = {
   backToStep1: $("backToStep1"), step2Desc: $("step2Desc"),
   presetSeg: $("presetSeg"), analyzeBtn: $("analyzeBtn"), analyzeBtnLabel: $("analyzeBtnLabel"),
   advancedToggle: $("advancedToggle"), advancedCaret: $("advancedCaret"), advancedBody: $("advancedBody"),
-  thresholdSeg: $("thresholdSeg"), fixedField: $("fixedField"), resetAdvancedBtn: $("resetAdvancedBtn"),
+  thresholdSeg: $("thresholdSeg"), fixedField: $("fixedField"), marginField: $("marginField"), resetAdvancedBtn: $("resetAdvancedBtn"),
   advPrevTabs: $("advPrevTabs"), advPrevName: $("advPrevName"), advPrevStatus: $("advPrevStatus"),
   cvPrevOrig: $("cvPrevOrig"), cvPrevReduced: $("cvPrevReduced"),
   chkAnaFull: $("chkAnaFull"), chkPrevFull: $("chkPrevFull"),
@@ -493,7 +493,7 @@ function onListClick(e) {
 /* ---------- step2 ---------- */
 function renderStep2() {
   dom.step2Desc.textContent = `${state.videos.length}件すべてに同じ設定を適用します。細かく調整したいときは「詳細設定」を開いてください。`;
-  dom.analyzeBtnLabel.textContent = `${state.videos.length}件の色を分析する`;
+  dom.analyzeBtnLabel.textContent = "色を分析する";
   dom.presetSeg.querySelectorAll(".seg").forEach((b) => b.classList.toggle("active", b.dataset.preset === state.preset));
   syncSliders();
   syncAdvanced();
@@ -550,6 +550,7 @@ function onThresholdModeClick(e) {
 function syncThresholdMode() {
   dom.thresholdSeg.querySelectorAll(".seg").forEach((b) => b.classList.toggle("active", b.dataset.mode === state.thresholdMode));
   dom.fixedField.hidden = state.thresholdMode !== "manual";
+  dom.marginField.hidden = state.thresholdMode === "manual";
 }
 
 function resetAdvanced() {
@@ -615,20 +616,19 @@ async function runAdvancedPreview() {
     dom.workVideo.load();
     await ensureMetadata(dom.workVideo);
     if (token !== state.advPreviewToken) return;
-    const shortSide = Math.min(state.vals.ana, 240);
-    const frame = await extractFrame(dom.workVideo, 0, shortSide);
+    const settings = readSettings();
+    const firstAnalysis = await extractFrame(dom.workVideo, 0, settings.analysisShortSide);
     if (token !== state.advPreviewToken) return;
-    drawImageDataTo(dom.cvPrevOrig, frame.imageData);
+    const lastTime = Math.max(0, dom.workVideo.duration - 1 / 30);
+    const lastAnalysis = await extractFrame(dom.workVideo, lastTime, settings.analysisShortSide);
+    if (token !== state.advPreviewToken) return;
+    const previewFrame = await extractFrame(dom.workVideo, initialPreviewTime(dom.workVideo), settings.previewShortSide);
+    if (token !== state.advPreviewToken) return;
+    drawImageDataTo(dom.cvPrevOrig, previewFrame.imageData);
 
-    const settings = {
-      ...readSettings(),
-      analysisShortSide: shortSide,
-      previewShortSide: shortSide,
-      maxCandidates: Math.min(state.vals.maxc, 700),
-    };
-    const result = await runPreviewWorker(cloneImageData(frame.imageData), cloneImageData(frame.imageData), settings);
+    const result = await runPreviewWorker(firstAnalysis.imageData, lastAnalysis.imageData, settings);
     if (token !== state.advPreviewToken) return;
-    const reduced = cloneImageData(frame.imageData);
+    const reduced = cloneImageData(previewFrame.imageData);
     processPixels(reduced.data, result.representatives, result.threshold, new Map(), false);
     drawImageDataTo(dom.cvPrevReduced, reduced);
     dom.advPrevStatus.textContent = `代表色 ${result.selectedK} 色`;
@@ -1085,8 +1085,7 @@ function loadActiveIntoPreview() {
     .then(() => {
       setPreviewCanvasSizes(v.analysis.settings.previewShortSide);
       // Seek to a small positive time so a real frame decodes (seeking to 0 from 0 fires no "seeked").
-      const t = Math.min(0.08, Math.max(0, (dom.workVideo.duration || 1) / 3));
-      return seekVideo(dom.workVideo, t);
+      return seekVideo(dom.workVideo, initialPreviewTime(dom.workVideo));
     })
     .then(() => {
       drawActiveFrame();
@@ -1096,6 +1095,10 @@ function loadActiveIntoPreview() {
       setTimeout(() => { if (!state.playing) { drawActiveFrame(); updateSnapMarker(v); } }, 120);
     })
     .catch((err) => console.error(err));
+}
+
+function initialPreviewTime(video) {
+  return Math.min(0.08, Math.max(0, (video.duration || 1) / 3));
 }
 
 function setPreviewCanvasSizes(shortSide) {
@@ -2069,5 +2072,3 @@ function esc(str) {
 }
 
 init();
-
-
