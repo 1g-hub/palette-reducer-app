@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260618-13";
+const APP_VERSION = "20260618-15";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -338,41 +338,37 @@ async function pumpThumbs() {
   thumbBusy = false;
 }
 
-function makeThumbForVideo(v) {
-  return new Promise((resolve, reject) => {
-    const vid = document.createElement("video");
-    vid.muted = true;
-    vid.preload = "auto";
-    let done = false;
-    const cleanup = () => { vid.removeAttribute("src"); try { vid.load(); } catch (e) { /* ignore */ } };
-    const fail = (e) => { if (done) return; done = true; window.clearTimeout(timer); cleanup(); reject(e); };
-    const capture = () => {
-      if (done) return;
-      const w = 168;
-      const ratio = (vid.videoWidth && vid.videoHeight) ? vid.videoHeight / vid.videoWidth : 9 / 16;
-      const h = Math.max(1, Math.round(w * ratio));
-      const c = document.createElement("canvas");
-      c.width = w; c.height = h;
-      try {
-        c.getContext("2d").drawImage(vid, 0, 0, w, h);
-        v.thumb = c.toDataURL("image/jpeg", 0.72);
-      } catch (e) { fail(e); return; }
-      if (!v.videoWidth && vid.videoWidth) {
-        v.videoWidth = vid.videoWidth; v.videoHeight = vid.videoHeight; v.duration = vid.duration;
-        v.dimsText = `${vid.videoWidth}×${vid.videoHeight}`; v.durText = formatDuration(vid.duration);
-      }
-      done = true; window.clearTimeout(timer); cleanup(); resolve();
-    };
-    const timer = window.setTimeout(() => fail(new Error("thumb timeout")), 10000);
-    vid.addEventListener("error", () => fail(new Error("thumb load error")), { once: true });
-    vid.addEventListener("seeked", capture, { once: true });
-    vid.addEventListener("loadeddata", () => {
-      // seek a touch into the clip to guarantee a decoded frame
-      try { vid.currentTime = Math.min(0.1, (vid.duration || 1) / 3); } catch (e) { capture(); }
-    }, { once: true });
+async function makeThumbForVideo(v) {
+  const vid = document.createElement("video");
+  vid.muted = true;
+  vid.playsInline = true;
+  vid.preload = "auto";
+  try {
     vid.src = v.url;
     vid.load();
-  });
+    await ensureMetadata(vid);
+    await seekVideo(vid, initialPreviewTime(vid));
+    const w = 168;
+    const ratio = (vid.videoWidth && vid.videoHeight) ? vid.videoHeight / vid.videoWidth : 9 / 16;
+    const h = Math.max(1, Math.round(w * ratio));
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    const ctx = c.getContext("2d");
+    if (!ctx) throw new Error("Could not create thumbnail canvas");
+    ctx.drawImage(vid, 0, 0, w, h);
+    v.thumb = c.toDataURL("image/jpeg", 0.72);
+    if (!v.videoWidth && vid.videoWidth) {
+      v.videoWidth = vid.videoWidth;
+      v.videoHeight = vid.videoHeight;
+      v.duration = vid.duration;
+      v.dimsText = `${vid.videoWidth}×${vid.videoHeight}`;
+      v.durText = formatDuration(vid.duration);
+    }
+  } finally {
+    vid.removeAttribute("src");
+    try { vid.load(); } catch (e) { /* ignore */ }
+  }
 }
 
 function onDrop(e) {
@@ -611,20 +607,22 @@ async function runAdvancedPreview() {
   dom.advPrevName.textContent = v.name;
   try {
     resetWorkVideo();
-    dom.workVideo.preload = "metadata";
+    dom.workVideo.preload = "auto";
     dom.workVideo.src = v.url;
     dom.workVideo.load();
     await ensureMetadata(dom.workVideo);
     if (token !== state.advPreviewToken) return;
     const settings = readSettings();
+    const previewFrame = await extractFrame(dom.workVideo, initialPreviewTime(dom.workVideo), settings.previewShortSide);
+    if (token !== state.advPreviewToken) return;
+    drawImageDataTo(dom.cvPrevOrig, previewFrame.imageData);
+    dom.advPrevStatus.textContent = "計算中…";
+
     const firstAnalysis = await extractFrame(dom.workVideo, 0, settings.analysisShortSide);
     if (token !== state.advPreviewToken) return;
     const lastTime = Math.max(0, dom.workVideo.duration - 1 / 30);
     const lastAnalysis = await extractFrame(dom.workVideo, lastTime, settings.analysisShortSide);
     if (token !== state.advPreviewToken) return;
-    const previewFrame = await extractFrame(dom.workVideo, initialPreviewTime(dom.workVideo), settings.previewShortSide);
-    if (token !== state.advPreviewToken) return;
-    drawImageDataTo(dom.cvPrevOrig, previewFrame.imageData);
 
     const result = await runPreviewWorker(firstAnalysis.imageData, lastAnalysis.imageData, settings);
     if (token !== state.advPreviewToken) return;
@@ -807,7 +805,7 @@ function throwIfCancelled() {
 
 async function prepareVideoElement(v) {
   resetWorkVideo();
-  dom.workVideo.preload = "metadata";
+  dom.workVideo.preload = "auto";
   dom.workVideo.src = v.url;
   dom.workVideo.load();
   try {
@@ -1909,10 +1907,21 @@ async function extractFrame(video, time, shortSide) {
   if (target < 0.03 && dur > 0.03) target = 0.03;
   await seekVideo(video, target);
   const { width, height } = scaledSize(video.videoWidth, video.videoHeight, shortSide);
-  const canvas = new OffscreenCanvas(width, height);
+  const canvas = createWorkCanvas(width, height);
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("Could not create frame canvas");
   ctx.drawImage(video, 0, 0, width, height);
   return { width, height, imageData: ctx.getImageData(0, 0, width, height) };
+}
+
+function createWorkCanvas(width, height) {
+  if (typeof OffscreenCanvas === "function") {
+    return new OffscreenCanvas(width, height);
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  return canvas;
 }
 
 function scaledSize(width, height, shortSide) {
@@ -1967,7 +1976,6 @@ function ensureMetadata(video) {
     video.addEventListener("canplay", onLoaded, { once: true });
     video.addEventListener("durationchange", onLoaded, { once: true });
     video.addEventListener("error", onError, { once: true });
-    video.preload = "metadata";
     video.load();
   });
 }
@@ -1986,15 +1994,41 @@ function mediaErrorMessage(video) {
 }
 
 function seekVideo(video, time) {
-  if (Math.abs(video.currentTime - time) < 0.001 && video.readyState >= 2) return Promise.resolve();
+  if (Math.abs(video.currentTime - time) < 0.001 && video.readyState >= 2) return waitForVideoFrame(video);
   return new Promise((resolve, reject) => {
     const timeout = window.setTimeout(() => { cleanup(); reject(new Error(`Timed out while seeking video to ${formatNumber(time, 3)}s`)); }, 30000);
-    const onSeeked = () => { cleanup(); resolve(); };
+    const onSeeked = () => { cleanup(); waitForVideoFrame(video).then(resolve); };
     const onError = () => { cleanup(); reject(new Error("Video seek failed")); };
     const cleanup = () => { window.clearTimeout(timeout); video.removeEventListener("seeked", onSeeked); video.removeEventListener("error", onError); };
     video.addEventListener("seeked", onSeeked, { once: true });
     video.addEventListener("error", onError, { once: true });
-    video.currentTime = time;
+    try {
+      video.currentTime = time;
+    } catch (error) {
+      cleanup();
+      reject(error);
+    }
+  });
+}
+
+function waitForVideoFrame(video) {
+  return new Promise((resolve) => {
+    if (typeof video.requestVideoFrameCallback === "function") {
+      let done = false;
+      const timer = window.setTimeout(() => {
+        if (done) return;
+        done = true;
+        resolve();
+      }, 250);
+      video.requestVideoFrameCallback(() => {
+        if (done) return;
+        done = true;
+        window.clearTimeout(timer);
+        resolve();
+      });
+      return;
+    }
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
   });
 }
 
@@ -2010,7 +2044,7 @@ function chooseRecorderMimeType() {
 /* ============================ helpers ============================ */
 
 function makeThumb(imageData) {
-  const src = new OffscreenCanvas(imageData.width, imageData.height);
+  const src = createWorkCanvas(imageData.width, imageData.height);
   src.getContext("2d").putImageData(imageData, 0, 0);
   const tw = 168;
   const th = Math.max(1, Math.round(tw * imageData.height / imageData.width));
