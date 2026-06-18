@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260618-8";
+const APP_VERSION = "20260618-9";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -39,6 +39,7 @@ const dom = {
   backToStep3: $("backToStep3"), selCountText: $("selCountText"),
   selectAllBtn: $("selectAllBtn"), deselectAllBtn: $("deselectAllBtn"), step4List: $("step4List"),
   formatSelect: $("formatSelect"), fmtInfo: $("fmtInfo"), fmtDesc: $("fmtDesc"),
+  folderPickRow: $("folderPickRow"), useFolderPicker: $("useFolderPicker"), folderHint: $("folderHint"),
   exportBtn: $("exportBtn"), exportingText: $("exportingText"),
   exportedBox: $("exportedBox"), exportedText: $("exportedText"), restartBtn: $("restartBtn"),
   // toast / work
@@ -113,6 +114,7 @@ const state = {
   exporting: false,
   exported: false,
   exportFormat: "webm-fast",
+  useFolderPicker: true,
   playing: false,
   loop: false,
   cancelled: false,
@@ -207,6 +209,12 @@ function init() {
   });
   dom.exportBtn.addEventListener("click", exportSelected);
   dom.restartBtn.addEventListener("click", restart);
+  dom.useFolderPicker.addEventListener("change", () => {
+    state.useFolderPicker = dom.useFolderPicker.checked;
+    dom.folderHint.hidden = !state.useFolderPicker;
+  });
+  // The "choose folder" option only applies where the File System Access API exists (Chrome/Edge).
+  if (window.showDirectoryPicker) { dom.folderPickRow.hidden = false; dom.folderHint.hidden = false; }
   initFormatSelect();
 
   dom.kMinus.addEventListener("click", () => changeK(-1));
@@ -1590,13 +1598,19 @@ async function exportSelected() {
   }
 
   // Ask for a save folder up front (must run within the click gesture, before any await).
+  // Browsers block well-known folders (Downloads/Desktop/Documents/home). If the picker is
+  // turned off or fails, fall back to per-file downloads so the user always gets their files.
   let dirHandle = null;
-  if (window.showDirectoryPicker) {
+  if (state.useFolderPicker && window.showDirectoryPicker) {
     try {
       dirHandle = await window.showDirectoryPicker({ id: "palette-reducer", mode: "readwrite" });
     } catch (err) {
-      if (err && err.name === "AbortError") { showToast("info", "保存先の選択をキャンセルしました"); return; }
-      dirHandle = null; // unsupported / denied → fall back to download links
+      dirHandle = null;
+      if (err && err.name === "AbortError") {
+        showToast("info", "フォルダを選べませんでした。Downloads/デスクトップ直下は選べないことがあります（中に新規フォルダを作るか、チェックを外してください）。ダウンロードで保存します。");
+      } else {
+        showToast("info", "フォルダに保存できないため、ダウンロードで保存します。");
+      }
     }
   }
   state.exportDir = dirHandle;

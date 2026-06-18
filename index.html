@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20260618-8">
+    <link rel="stylesheet" href="./styles.css?v=20260618-9">
   </head>
   <body>
     <div class="page">
@@ -369,6 +369,11 @@
                 </div>
                 <p id="fmtDesc" class="fmt-desc"></p>
 
+                <label id="folderPickRow" class="res-full" hidden>
+                  <input id="useFolderPicker" type="checkbox" checked> 保存先フォルダを選ぶ（オフ：ブラウザのダウンロードフォルダに保存）
+                </label>
+                <p id="folderHint" class="fmt-desc" hidden>※ Downloads・デスクトップ直下はブラウザの制限で選べないことがあります。その場合は中に新しいフォルダを作って選ぶか、このチェックを外してください。</p>
+
                 <div class="list-head">
                   <span id="selCountText" class="list-head-title">0 / 0 件 選択中</span>
                   <div class="head-btns">
@@ -401,6 +406,6 @@
     <!-- hidden work elements -->
     <video id="workVideo" muted playsinline preload="auto"></video>
     <canvas id="exportCanvas" class="offscreen"></canvas>
-    <script src="./app.js?v=20260618-8"></script>
+    <script src="./app.js?v=20260618-9"></script>
   </body>
 </html>
