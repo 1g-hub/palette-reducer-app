@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260618-9";
+const APP_VERSION = "20260618-10";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -40,7 +40,7 @@ const dom = {
   selectAllBtn: $("selectAllBtn"), deselectAllBtn: $("deselectAllBtn"), step4List: $("step4List"),
   formatSelect: $("formatSelect"), fmtInfo: $("fmtInfo"), fmtDesc: $("fmtDesc"),
   folderPickRow: $("folderPickRow"), useFolderPicker: $("useFolderPicker"), folderHint: $("folderHint"),
-  exportBtn: $("exportBtn"), exportingText: $("exportingText"),
+  exportBtn: $("exportBtn"), exportingBox: $("exportingBox"), exportingText: $("exportingText"), stopExportBtn: $("stopExportBtn"),
   exportedBox: $("exportedBox"), exportedText: $("exportedText"), restartBtn: $("restartBtn"),
   // toast / work
   toast: $("toast"),
@@ -208,6 +208,7 @@ function init() {
     if (state.step === 4 && !state.exporting) { state.exported = false; renderStep4(); }
   });
   dom.exportBtn.addEventListener("click", exportSelected);
+  dom.stopExportBtn.addEventListener("click", stopExport);
   dom.restartBtn.addEventListener("click", restart);
   dom.useFolderPicker.addEventListener("change", () => {
     state.useFolderPicker = dom.useFolderPicker.checked;
@@ -1518,13 +1519,13 @@ function renderStep4() {
     ? `⬇ もう一度書き出す（${sel.length} 件）`
     : `⬇ 選択した ${sel.length} 件を書き出す`;
   dom.exportBtn.classList.toggle("disabled", sel.length === 0);
-  dom.exportingText.hidden = !state.exporting;
+  dom.exportingBox.hidden = !state.exporting;
   dom.exportedBox.hidden = !state.exported;
   if (state.exported) {
     const okCount = dones.filter((v) => v.exportDone).length;
     dom.exportedText.textContent = state.exportDirName
       ? `${okCount} 件を「${state.exportDirName}」フォルダに保存しました（形式や対象を変えて、もう一度書き出せます）`
-      : `${okCount} 件を書き出しました（各行からダウンロード。形式や対象を変えて、もう一度書き出せます）`;
+      : `${okCount} 件をダウンロードフォルダに保存しました（形式や対象を変えて、もう一度書き出せます）`;
   }
 }
 
@@ -1598,19 +1599,16 @@ async function exportSelected() {
   }
 
   // Ask for a save folder up front (must run within the click gesture, before any await).
-  // Browsers block well-known folders (Downloads/Desktop/Documents/home). If the picker is
-  // turned off or fails, fall back to per-file downloads so the user always gets their files.
+  // If the user cancels (or the folder is blocked by the browser), STOP — do not download.
+  // Downloading happens only when "保存先フォルダを選ぶ" is OFF (or unsupported).
+  const usePicker = state.useFolderPicker && !!window.showDirectoryPicker;
   let dirHandle = null;
-  if (state.useFolderPicker && window.showDirectoryPicker) {
+  if (usePicker) {
     try {
       dirHandle = await window.showDirectoryPicker({ id: "palette-reducer", mode: "readwrite" });
     } catch (err) {
-      dirHandle = null;
-      if (err && err.name === "AbortError") {
-        showToast("info", "フォルダを選べませんでした。Downloads/デスクトップ直下は選べないことがあります（中に新規フォルダを作るか、チェックを外してください）。ダウンロードで保存します。");
-      } else {
-        showToast("info", "フォルダに保存できないため、ダウンロードで保存します。");
-      }
+      showToast("info", "保存先フォルダを選ばなかったので、書き出しを中止しました。ダウンロードフォルダに保存したいときは「保存先フォルダを選ぶ」をオフにしてください。");
+      return;
     }
   }
   state.exportDir = dirHandle;
@@ -1619,6 +1617,7 @@ async function exportSelected() {
   state.exporting = true;
   state.exported = false;
   state.cancelled = false;
+  dom.stopExportBtn.disabled = false;
   stopPlay();
   sel.forEach((v) => {
     v.exportProgress = 0; v.exportDone = false; v.savedToDir = false; v.exportBlob = null;
@@ -1640,6 +1639,7 @@ async function exportSelected() {
         v.savedToDir = true;
       } else {
         v.exportUrl = URL.createObjectURL(v.exportBlob);
+        triggerDownload(v); // download mode: save to the browser's download folder right away
       }
       v.exportDone = true;
       v.exportProgress = 100;
@@ -1657,7 +1657,35 @@ async function exportSelected() {
   const okCount = sel.filter((v) => v.exportDone).length;
   if (!okCount) { showToast("error", "書き出しに失敗しました。別の形式をお試しください。"); return; }
   if (dirHandle) showToast("success", `${okCount}件を「${state.exportDirName}」フォルダに保存しました`);
-  else showToast("success", `${okCount}件を書き出しました（各行のダウンロードから保存）`);
+  else showToast("success", `${okCount}件をダウンロードフォルダに保存しました（保存先はブラウザの設定によります）`);
+}
+
+// Cancel an in-progress export (including the slow ffmpeg encode of the current video).
+function stopExport() {
+  if (!state.exporting) return;
+  state.cancelled = true;
+  dom.stopExportBtn.disabled = true;
+  if (state.activeRecorder && state.activeRecorder.state !== "inactive") {
+    try { state.activeRecorder.stop(); } catch (e) { /* ignore */ }
+  }
+  // ffmpeg.exec can't be flag-interrupted mid-encode, so tear down the worker to abort it.
+  if (state.ffmpeg) {
+    try { state.ffmpeg.terminate(); } catch (e) { /* ignore */ }
+    state.ffmpeg = null;
+    state.ffmpegLoaded = false;
+  }
+  try { dom.workVideo.pause(); } catch (e) { /* ignore */ }
+}
+
+// Download mode: programmatically save to the browser's download folder.
+function triggerDownload(v) {
+  if (!v.exportUrl) return;
+  const a = document.createElement("a");
+  a.href = v.exportUrl;
+  a.download = v.exportName || makeOutputName(v.name);
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 // Fast path: browser MediaRecorder → WebM.
