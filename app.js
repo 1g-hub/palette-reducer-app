@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260618-15";
+const APP_VERSION = "20260619-01";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -82,8 +82,9 @@ const EXPORT_FORMATS = [
   { id: "h264", label: "H.264 MP4（標準・高画質）", ext: "mp4", mime: "video/mp4", via: "ffmpeg", enc: "libx264",
     args: ["-c:v", "libx264", "-crf", "20", ...VF_FULL("yuv420p"), ...FULLRANGE_709, "-movflags", "+faststart"],
     desc: "一般的なMP4。少し圧縮されますが高画質で、ほとんどの環境で再生できます。色差を間引くため極わずかに変化することがあります。" },
-  { id: "webm-fast", label: "WebM（標準・最速）", ext: "webm", mime: "video/webm", via: "mediarecorder",
-    desc: "ブラウザ標準の高速書き出し。ffmpegの読み込みが不要で最速。画質は標準的です。" },
+  { id: "webm-fast", label: "WebM（標準・速い）", ext: "webm", mime: "video/webm", via: "webcodecs", enc: "libvpx",
+    args: ["-c:v", "libvpx", "-b:v", "2M", ...VF_FULL("yuv420p"), ...FULLRANGE_709],
+    desc: "ブラウザ内蔵エンコーダ（WebCodecs）で書き出し。ffmpegの読み込みが不要で速い。画質は標準的です。" },
   { id: "mp4-low", label: "MP4 低ビットレート（小さい）", ext: "mp4", mime: "video/mp4", via: "ffmpeg", enc: "libx264",
     args: ["-c:v", "libx264", "-b:v", "800k", ...VF_FULL("yuv420p"), ...FULLRANGE_709, "-movflags", "+faststart"],
     desc: "容量を小さく抑えたいとき向け。画質は落ちます。共有・アップロードに。" },
@@ -121,7 +122,7 @@ const state = {
   vals: { ...DEFAULT_VALS },
   activeWorker: null,
   currentReject: null,
-  activeRecorder: null,
+  activeEncoder: null,
   ffmpeg: null,
   ffmpegLoaded: false,
   transcoding: false,
@@ -1594,10 +1595,6 @@ async function exportSelected() {
   const sel = doneVideos().filter((v) => v.save);
   if (!sel.length) { showToast("info", "保存する動画を選んでください"); return; }
   const fmt = formatById(state.exportFormat);
-  if (fmt.via === "mediarecorder" && !supportsRecording()) {
-    showToast("error", "このブラウザは WebM 書き出しに対応していません。別の形式をお試しください。");
-    return;
-  }
 
   // Ask for a save folder up front (must run within the click gesture, before any await).
   // If the user cancels (or the folder is blocked by the browser), STOP — do not download.
@@ -1629,7 +1626,7 @@ async function exportSelected() {
   for (const v of sel) {
     if (state.cancelled) break;
     try {
-      if (fmt.via === "mediarecorder") await exportViaMediaRecorder(v, fmt);
+      if (fmt.via === "webcodecs" && supportsWebCodecs()) await exportViaWebCodecs(v, fmt);
       else await exportViaFFmpeg(v, fmt);
       if (state.cancelled) break;
       if (dirHandle) {
@@ -1666,8 +1663,11 @@ function stopExport() {
   if (!state.exporting) return;
   state.cancelled = true;
   dom.stopExportBtn.disabled = true;
-  if (state.activeRecorder && state.activeRecorder.state !== "inactive") {
-    try { state.activeRecorder.stop(); } catch (e) { /* ignore */ }
+  // Tear down an in-progress WebCodecs encoder (the export loop also checks
+  // state.cancelled each frame, so it stops on its own within one frame).
+  if (state.activeEncoder) {
+    try { if (state.activeEncoder.state !== "closed") state.activeEncoder.close(); } catch (e) { /* ignore */ }
+    state.activeEncoder = null;
   }
   // ffmpeg.exec can't be flag-interrupted mid-encode, so tear down the worker to abort it.
   if (state.ffmpeg) {
@@ -1689,8 +1689,28 @@ function triggerDownload(v) {
   a.remove();
 }
 
-// Fast path: browser MediaRecorder → WebM.
-async function exportViaMediaRecorder(v, fmt) {
+// Fast path: WebCodecs VideoEncoder → WebM (vendored webm-muxer). No ffmpeg load.
+//
+// HISTORY / WHY THIS LOOKS THE WAY IT DOES: this path used to play() the source
+// in real time and let MediaRecorder record canvas.captureStream(24) on a
+// WALL-CLOCK timeline. Any stall while a scene was being drawn — a heavy recolor
+// on a scene change, a decode/buffer underrun, a GC pause, or requestAnimationFrame
+// being throttled when the tab was backgrounded — made the recorder hold the last
+// canvas frame, so that scene appeared FROZEN in the exported video (while the
+// still-playing source advanced and that content was lost). MediaRecorder always
+// timestamps by wall clock, so it can only ever trade "freeze" for "stretched
+// duration" — it cannot produce a correct video when rendering is slower than
+// real time.
+//
+// WebCodecs lets us stamp every frame with an EXPLICIT timestamp, so the output
+// is correct no matter how long recoloring takes. We seek frame-by-frame
+// (deterministic, like the ffmpeg path), recolor, and encode exactly one frame
+// per output frame at timestamp i/24s. A slow frame only makes the export take
+// longer; it can never freeze, drop, or stretch the result — and seeking works
+// even in a backgrounded tab. Browsers without WebCodecs fall back to the
+// deterministic ffmpeg path (see exportSelected / the format's `args`).
+async function exportViaWebCodecs(v, fmt) {
+  const { Muxer, ArrayBufferTarget } = await import(`./vendor/webm-muxer/webm-muxer.js?v=${APP_VERSION}`);
   resetWorkVideo();
   dom.workVideo.preload = "auto";
   dom.workVideo.src = v.url;
@@ -1700,37 +1720,55 @@ async function exportViaMediaRecorder(v, fmt) {
   dom.exportCanvas.width = width;
   dom.exportCanvas.height = height;
   const ctx = dom.exportCanvas.getContext("2d", { willReadFrequently: true });
-  const stream = dom.exportCanvas.captureStream(EXPORT_FPS);
-  const mimeType = chooseRecorderMimeType();
-  const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-  state.activeRecorder = recorder;
-  const chunks = [];
-  recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
-  const stopped = new Promise((resolve) => { recorder.onstop = resolve; });
-  recorder.start();
+  const dur = dom.workVideo.duration || 1;
+  const total = Math.max(1, Math.round(dur * EXPORT_FPS));
+  const reps = v.analysis.representatives;
+  const th = v.confirmThreshold;
+  const usPerFrame = Math.round(1e6 / EXPORT_FPS);
+
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: { codec: "V_VP8", width, height, frameRate: EXPORT_FPS },
+    firstTimestampBehavior: "offset",
+  });
+  let encError = null;
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => { try { muxer.addVideoChunk(chunk, meta); } catch (e) { encError = e; } },
+    error: (e) => { encError = e; },
+  });
+  // Palette-reduced video is mostly flat color and compresses very well, so this
+  // bitrate is generous in practice. Scales with resolution; floored for clarity.
+  const bitrate = Math.max(1500000, Math.round(width * height * EXPORT_FPS * 0.12));
+  encoder.configure({ codec: "vp8", width, height, bitrate, framerate: EXPORT_FPS });
+  state.activeEncoder = encoder;
+
   dom.workVideo.muted = true;
-  dom.workVideo.currentTime = 0;
-  await dom.workVideo.play();
-  await new Promise((resolve) => {
-    const step = () => {
-      if (state.cancelled) { dom.workVideo.pause(); resolve(); return; }
+  try {
+    for (let i = 0; i < total; i += 1) {
+      if (state.cancelled || encError) break;
+      await seekVideo(dom.workVideo, Math.min(dur - 0.001, Math.max(0.001, i / EXPORT_FPS)));
       ctx.drawImage(dom.workVideo, 0, 0, width, height);
       const img = ctx.getImageData(0, 0, width, height);
-      processPixels(img.data, v.analysis.representatives, v.confirmThreshold, v.processedCache, false);
+      processPixels(img.data, reps, th, v.processedCache, false);
       ctx.putImageData(img, 0, 0);
-      v.exportProgress = Math.min(99, dom.workVideo.currentTime / Math.max(0.001, dom.workVideo.duration) * 100);
+      const frame = new VideoFrame(dom.exportCanvas, { timestamp: i * usPerFrame, duration: usPerFrame });
+      encoder.encode(frame, { keyFrame: i % (EXPORT_FPS * 2) === 0 });
+      frame.close();
+      // Keep the encoder queue bounded so memory stays flat on long videos.
+      if (encoder.encodeQueueSize > 16) await encoder.flush();
+      v.exportProgress = Math.min(99, ((i + 1) / total) * 100);
       updateExport(v);
-      if (dom.workVideo.ended || dom.workVideo.paused) { resolve(); return; }
-      requestAnimationFrame(step);
-    };
-    requestAnimationFrame(step);
-  });
-  if (recorder.state !== "inactive") recorder.stop();
-  await stopped;
-  state.activeRecorder = null;
-  dom.workVideo.pause();
+    }
+    if (!state.cancelled && !encError) await encoder.flush();
+  } finally {
+    try { if (encoder.state !== "closed") encoder.close(); } catch (e) { /* ignore */ }
+    state.activeEncoder = null;
+    try { dom.workVideo.pause(); } catch (e) { /* ignore */ }
+  }
   if (state.cancelled) return;
-  v.exportBlob = new Blob(chunks, { type: recorder.mimeType || "video/webm" });
+  if (encError) throw (encError instanceof Error ? encError : new Error("WebCodecs encode failed"));
+  muxer.finalize();
+  v.exportBlob = new Blob([muxer.target.buffer], { type: fmt.mime || "video/webm" });
   v.exportName = makeOutputName(v.name, fmt.ext);
   v.exportSize = v.exportBlob.size;
 }
@@ -2032,13 +2070,8 @@ function waitForVideoFrame(video) {
   });
 }
 
-function supportsRecording() {
-  return Boolean(dom.exportCanvas.captureStream && window.MediaRecorder);
-}
-
-function chooseRecorderMimeType() {
-  const types = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
-  return types.find((type) => MediaRecorder.isTypeSupported(type)) || "";
+function supportsWebCodecs() {
+  return typeof window.VideoEncoder === "function" && typeof window.VideoFrame === "function";
 }
 
 /* ============================ helpers ============================ */
