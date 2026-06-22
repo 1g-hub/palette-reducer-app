@@ -139,7 +139,6 @@ const state = {
   activeWorker: null,
   currentReject: null,
   activeEncoder: null,
-  activeRecorder: null,
   ffmpeg: null,
   ffmpegLoaded: false,
   transcoding: false,
@@ -1979,11 +1978,6 @@ function stopExport() {
     try { if (state.activeEncoder.state !== "closed") state.activeEncoder.close(); } catch (e) { /* ignore */ }
     state.activeEncoder = null;
   }
-  // The fast WebM path records a live canvas stream.
-  if (state.activeRecorder && state.activeRecorder.state !== "inactive") {
-    try { state.activeRecorder.stop(); } catch (e) { /* ignore */ }
-  }
-  state.activeRecorder = null;
   // ffmpeg.exec can't be flag-interrupted mid-encode, so tear down the worker to abort it.
   if (state.ffmpeg) {
     try { state.ffmpeg.terminate(); } catch (e) { /* ignore */ }
@@ -2006,9 +2000,9 @@ function triggerDownload(v) {
 
 // Fast path: play the source ONCE and capture each presented frame via
 // requestVideoFrameCallback, encoding it with WebCodecs using the frame's REAL
-// media timestamp (meta.mediaTime). No per-frame seeking → roughly real-time,
-// i.e. as fast as the old MediaRecorder path but WITHOUT its wall-clock freeze:
-// because every encoded frame carries its true timestamp, a momentary slow
+// media timestamp (meta.mediaTime). No per-frame seeking, so it is roughly
+// real-time while avoiding wall-clock freeze: because every encoded frame
+// carries its true timestamp, a momentary slow
 // recolor at worst thins a frame or two (mild judder), never holds/stretches a
 // scene. (Trade-off vs the frame-exact seek path used by "完全書き出し": under
 // sustained heavy load a few frames may be skipped, and capture pauses while the
