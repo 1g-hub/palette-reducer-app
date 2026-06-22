@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260619-01";
+const APP_VERSION = "20260622-09";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -26,8 +26,11 @@ const dom = {
   elapsedText: $("elapsedText"), stopAnalyzeBtn: $("stopAnalyzeBtn"),
   reassure: $("reassure"), transcodeNote: $("transcodeNote"), transcodeText: $("transcodeText"),
   // step3
-  backToStep2: $("backToStep2"), playBtn: $("playBtn"), loopBtn: $("loopBtn"), step3Tabs: $("step3Tabs"), activeName: $("activeName"),
+  backToStep2: $("backToStep2"), playBtn: $("playBtn"), loopBtn: $("loopBtn"), previewRateSelect: $("previewRateSelect"),
+  step3Tabs: $("step3Tabs"), activeName: $("activeName"),
   cvOrig: $("cvOrig"), cvReduced: $("cvReduced"), cvMask: $("cvMask"),
+  previewSeek: $("previewSeek"), previewTime: $("previewTime"),
+  previewLargeBtn: $("previewLargeBtn"),
   vConfirm: $("vConfirm"), sConfirm: $("sConfirm"), resetConfirm: $("resetConfirm"), snapMarker: $("snapMarker"),
   confMinus: $("confMinus"), confPlus: $("confPlus"),
   kMinus: $("kMinus"), kValue: $("kValue"), kPlus: $("kPlus"), kRange: $("kRange"),
@@ -39,6 +42,7 @@ const dom = {
   backToStep3: $("backToStep3"), selCountText: $("selCountText"),
   selectAllBtn: $("selectAllBtn"), deselectAllBtn: $("deselectAllBtn"), step4List: $("step4List"),
   formatSelect: $("formatSelect"), fmtInfo: $("fmtInfo"), fmtDesc: $("fmtDesc"),
+  exportModeSeg: $("exportModeSeg"), exportModeDesc: $("exportModeDesc"),
   folderPickRow: $("folderPickRow"), useFolderPicker: $("useFolderPicker"), folderHint: $("folderHint"),
   exportBtn: $("exportBtn"), exportingBox: $("exportingBox"), exportingText: $("exportingText"), stopExportBtn: $("stopExportBtn"),
   exportedBox: $("exportedBox"), exportedText: $("exportedText"), restartBtn: $("restartBtn"),
@@ -54,6 +58,13 @@ const dom = {
 
 const NATIVE_RES = 100000; // sentinel → scaledSize keeps native resolution
 const EXPORT_FPS = 24; // frame rate used when re-encoding via ffmpeg.wasm
+const EXPORT_KEYFRAME_INTERVAL = EXPORT_FPS * 5;
+const EXPORT_ENCODER_FLUSH_QUEUE = 64;
+const EXPORT_PROGRESS_STEP = 6;
+const EXPORT_MODE_DESCS = {
+  safe: "低速ですが、WebCodecsで1フレームずつ正確に時刻を付けて書き出します。1フレームも飛ばしたくない場合はこちら。",
+  fast: "再生しながら各フレームを取り込み、WebCodecsで実時間に近い速度で書き出します。壁時計フリーズは起きません（極端に重い場面でごく一部のフレームが間引かれることがあります）。",
+};
 
 // Full-range BT.709 tagging so YUV outputs are displayed with the same colors as the sRGB preview.
 const FULLRANGE_709 = ["-color_range", "pc", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"];
@@ -84,7 +95,7 @@ const EXPORT_FORMATS = [
     desc: "一般的なMP4。少し圧縮されますが高画質で、ほとんどの環境で再生できます。色差を間引くため極わずかに変化することがあります。" },
   { id: "webm-fast", label: "WebM（標準・速い）", ext: "webm", mime: "video/webm", via: "webcodecs", enc: "libvpx",
     args: ["-c:v", "libvpx", "-b:v", "2M", ...VF_FULL("yuv420p"), ...FULLRANGE_709],
-    desc: "ブラウザ内蔵エンコーダ（WebCodecs）で書き出し。ffmpegの読み込みが不要で速い。画質は標準的です。" },
+    desc: "WebCodecsで書き出します（完全＝1フレームずつ正確／高速＝再生しながら取り込み）。ffmpegの読み込みが不要で、画質は標準的です。" },
   { id: "mp4-low", label: "MP4 低ビットレート（小さい）", ext: "mp4", mime: "video/mp4", via: "ffmpeg", enc: "libx264",
     args: ["-c:v", "libx264", "-b:v", "800k", ...VF_FULL("yuv420p"), ...FULLRANGE_709, "-movflags", "+faststart"],
     desc: "容量を小さく抑えたいとき向け。画質は落ちます。共有・アップロードに。" },
@@ -92,12 +103,12 @@ const EXPORT_FORMATS = [
     args: ["-c:v", "libvpx-vp9", "-b:v", "500k", ...VF_FULL("yuv420p"), ...FULLRANGE_709],
     desc: "WebMで容量を抑えたいとき向け。画質は落ちます。" },
 ];
-const DEFAULT_VALS = { ana: 540, prev: 360, anaFull: true, prevFull: true, maxc: 800, mindist: 12, mink: 4, maxk: 40, fixed: 60, margin: 5 };
+const DEFAULT_VALS = { ana: 540, prev: 360, anaFull: true, prevFull: false, maxc: 800, mindist: 12, mink: 4, maxk: 40, fixed: 60, margin: 5 };
 // Selecting a preset resets ALL parameters (including threshold mode and resolution) to these values.
 const PRESETS = {
-  recommend: { ana: 540, prev: 360, anaFull: true, prevFull: true, maxc: 800, mindist: 12, mink: 4, maxk: 40, fixed: 60, margin: 5, mode: "auto" },
+  recommend: { ana: 540, prev: 360, anaFull: true, prevFull: false, maxc: 800, mindist: 12, mink: 4, maxk: 40, fixed: 60, margin: 5, mode: "auto" },
   hq: { ana: 720, prev: 540, anaFull: true, prevFull: true, maxc: 1500, mindist: 8, mink: 4, maxk: 48, fixed: 60, margin: 4, mode: "auto" },
-  light: { ana: 400, prev: 240, anaFull: true, prevFull: true, maxc: 400, mindist: 20, mink: 4, maxk: 32, fixed: 60, margin: 6, mode: "auto" },
+  light: { ana: 400, prev: 240, anaFull: true, prevFull: false, maxc: 400, mindist: 20, mink: 4, maxk: 32, fixed: 60, margin: 6, mode: "auto" },
 };
 
 const state = {
@@ -115,14 +126,20 @@ const state = {
   exporting: false,
   exported: false,
   exportFormat: "webm-fast",
+  exportMode: "safe",
+  previewRate: 1,
   useFolderPicker: true,
   playing: false,
   loop: false,
+  previewLayout: "row",
+  previewZoom: 1,
+  previewPopup: null,
   cancelled: false,
   vals: { ...DEFAULT_VALS },
   activeWorker: null,
   currentReject: null,
   activeEncoder: null,
+  activeRecorder: null,
   ffmpeg: null,
   ffmpegLoaded: false,
   transcoding: false,
@@ -184,6 +201,12 @@ function init() {
   dom.backToStep2.addEventListener("click", () => { stopPlay(); stopPlot(); goStep(2); });
   dom.playBtn.addEventListener("click", () => togglePlay(false));
   dom.loopBtn.addEventListener("click", () => togglePlay(true));
+  dom.previewLargeBtn.addEventListener("click", openPreviewPopup);
+  dom.previewRateSelect.addEventListener("change", () => {
+    state.previewRate = Number(dom.previewRateSelect.value) || 1;
+    applyPreviewRate();
+  });
+  dom.previewSeek.addEventListener("input", onPreviewSeekInput);
   dom.step3Tabs.addEventListener("click", onTabClick);
   dom.plotZoomIn.addEventListener("click", () => zoomPlot(1.25));
   dom.plotZoomOut.addEventListener("click", () => zoomPlot(0.8));
@@ -208,6 +231,7 @@ function init() {
     syncFormatDesc();
     if (state.step === 4 && !state.exporting) { state.exported = false; renderStep4(); }
   });
+  dom.exportModeSeg.addEventListener("click", onExportModeClick);
   dom.exportBtn.addEventListener("click", exportSelected);
   dom.stopExportBtn.addEventListener("click", stopExport);
   dom.restartBtn.addEventListener("click", restart);
@@ -944,8 +968,11 @@ function renderStep3Dynamic() {
   const v = activeVideo();
   if (!v || !v.analysis) return;
   dom.activeName.textContent = v.name;
+  syncPreviewPopupTitle();
   dom.sConfirm.value = v.confirmThreshold;
   dom.vConfirm.textContent = v.confirmThreshold;
+  syncThresholdDockControls(v.confirmThreshold);
+  syncPreviewSeekControls();
   updateConfStepperBounds(v.confirmThreshold);
   renderKControl(v);
   renderPalette(v);
@@ -1003,6 +1030,7 @@ function resetConfirmParams() {
   updateSnapMarker(v);
   dom.sConfirm.value = v.confirmThreshold;
   dom.vConfirm.textContent = v.confirmThreshold;
+  syncThresholdDockControls(v.confirmThreshold);
   renderKControl(v);
   renderPalette(v);
   renderMetrics(v);
@@ -1076,6 +1104,7 @@ function loadActiveIntoPreview() {
   if (!v || !v.analysis) return;
   stopPlay();
   resetWorkVideo();
+  applyPreviewRate();
   state.plotCache = null;
   dom.workVideo.preload = "auto";
   dom.workVideo.src = v.url;
@@ -1124,6 +1153,7 @@ function setConfirmThreshold(value, snap) {
   v.processedCache = new Map();
   v.maskCache = new Map();
   dom.vConfirm.textContent = value;
+  syncThresholdDockControls(value);
   updateConfStepperBounds(value);
   const m = dom.metrics.querySelector(".metric:nth-child(2) .metric-value");
   if (m) m.textContent = String(value);
@@ -1206,6 +1236,7 @@ function positionSnapMarker(v, nm) {
   dom.snapMarker.style.left = `calc(9px + ${frac} * (100% - 18px))`;
   dom.snapMarker.hidden = false;
   updateConfStepperBounds(v.confirmThreshold);
+  syncThresholdDockControls(v.confirmThreshold);
 }
 
 function updateSnapMarker(v) {
@@ -1235,6 +1266,235 @@ function drawActiveFrame() {
   processPixels(mask.data, reps, th, v.maskCache, true);
   mCtx.putImageData(mask, 0, 0);
   updateSnapMarkerFromImageData(v, base.data);
+  syncPreviewSeekControls();
+  syncLargePreview();
+}
+
+function syncLargePreview() {
+  syncPreviewPopupCanvases();
+}
+
+function copyPreviewCanvas(src, dst) {
+  if (!src || !dst || !src.width || !src.height) return;
+  if (dst.width !== src.width || dst.height !== src.height) {
+    dst.width = src.width;
+    dst.height = src.height;
+  }
+  const ctx = dst.getContext("2d");
+  ctx.clearRect(0, 0, dst.width, dst.height);
+  ctx.drawImage(src, 0, 0);
+}
+
+function setPreviewLayout(layout) {
+  state.previewLayout = ["row", "stack", "column"].includes(layout) ? layout : "row";
+  syncPreviewLayoutControls();
+  syncPreviewPopupPresentation();
+}
+
+function syncPreviewLayoutControls() {
+  const doc = getPreviewPopupDocument();
+  if (doc) {
+    const grid = doc.getElementById("popGrid");
+    if (grid) grid.dataset.layout = state.previewLayout;
+    doc.querySelectorAll("[data-preview-layout]").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.previewLayout === state.previewLayout);
+    });
+  }
+}
+
+function changePreviewZoom(factor) {
+  setPreviewZoom(state.previewZoom * factor);
+}
+
+function setPreviewZoom(value) {
+  state.previewZoom = Math.max(0.35, Math.min(4, Number(value) || 1));
+  syncPreviewPopupPresentation();
+}
+
+function applyPreviewFit(grid, body) {
+  if (!grid || !body) return;
+  const shape = previewLayoutShape(state.previewLayout);
+  const aspect = dom.cvOrig.width && dom.cvOrig.height ? dom.cvOrig.width / dom.cvOrig.height : 16 / 9;
+  const gap = 12;
+  const labelH = 24;
+  const bodyW = Math.max(260, body.clientWidth || 720);
+  const bodyH = Math.max(220, body.clientHeight || 420);
+  const fitW = (bodyW - gap * (shape.cols - 1)) / shape.cols;
+  const fitH = Math.max(120, (bodyH - labelH * shape.rows - gap * (shape.rows - 1)) / shape.rows) * aspect;
+  const base = Math.max(140, Math.min(900, Math.floor(Math.min(fitW, fitH))));
+  grid.dataset.layout = state.previewLayout;
+  grid.style.setProperty("--preview-tile-width", base + "px");
+  grid.style.setProperty("--preview-zoom", formatNumber(state.previewZoom, 2));
+}
+
+function previewLayoutShape(layout) {
+  if (layout === "column") return { cols: 1, rows: 3 };
+  if (layout === "stack") return { cols: 2, rows: 2 };
+  return { cols: 3, rows: 1 };
+}
+
+function syncPreviewSeekControls() {
+  const duration = Number.isFinite(dom.workVideo.duration) ? dom.workVideo.duration : 0;
+  const current = Number.isFinite(dom.workVideo.currentTime) ? dom.workVideo.currentTime : 0;
+  const text = `${formatClock(current)} / ${formatClock(duration)}`;
+  syncSeekElement(dom.previewSeek, duration, current);
+  dom.previewTime.textContent = text;
+  const doc = getPreviewPopupDocument();
+  if (doc) {
+    syncSeekElement(doc.getElementById("popSeek"), duration, current);
+    const time = doc.getElementById("popTime");
+    if (time) time.textContent = text;
+  }
+}
+
+function syncSeekElement(el, duration, current) {
+  if (!el) return;
+  el.max = String(Math.max(0, duration));
+  el.value = String(Math.max(0, Math.min(duration || 0, current)));
+}
+
+function onPreviewSeekInput(e) {
+  setPreviewTime(Number(e.target.value));
+}
+
+function setPreviewTime(time) {
+  const duration = Number.isFinite(dom.workVideo.duration) ? dom.workVideo.duration : 0;
+  const target = Math.max(0, Math.min(duration || 0, Number(time) || 0));
+  try { dom.workVideo.currentTime = target; } catch (e) { return; }
+  syncPreviewSeekControls();
+  if (!state.playing) {
+    waitForVideoFrame(dom.workVideo).then(() => {
+      drawActiveFrame();
+      syncPreviewSeekControls();
+    }).catch(() => {});
+  }
+}
+
+function formatClock(sec) {
+  const safe = Math.max(0, Number(sec) || 0);
+  const minutes = Math.floor(safe / 60);
+  const seconds = Math.floor(safe % 60);
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function syncThresholdDockControls(value) {
+  const v = Math.round(Number(value) || 0);
+  const doc = getPreviewPopupDocument();
+  if (doc) {
+    const range = doc.getElementById("popThreshold");
+    const label = doc.getElementById("popThresholdVal");
+    if (range) {
+      range.min = dom.sConfirm.min;
+      range.max = dom.sConfirm.max;
+      range.value = String(v);
+    }
+    if (label) label.textContent = String(v);
+  }
+}
+
+function openPreviewPopup() {
+  const v = activeVideo();
+  if (!v || !v.analysis) return;
+  const popup = window.open("", "paletteReducerPreviewDock", "popup=yes,width=1280,height=860,resizable=yes,scrollbars=yes");
+  if (!popup) {
+    showToast("error", "別ウィンドウを開けませんでした。ブラウザのポップアップ設定を確認してください。");
+    return;
+  }
+  state.previewPopup = popup;
+  writePreviewPopup(popup);
+  syncPreviewPopupTitle();
+  syncPreviewPopupPresentation();
+  syncPreviewSeekControls();
+  syncThresholdDockControls(activeVideo() ? activeVideo().confirmThreshold : 0);
+  syncPreviewPopupCanvases();
+  try { popup.focus(); } catch (e) { /* ignore */ }
+}
+
+function writePreviewPopup(popup) {
+  const doc = popup.document;
+  doc.open();
+  doc.write(`<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>Palette Reducer Preview</title><style>
+    :root{color-scheme:dark;--bg:#11141a;--panel:#1d222b;--line:#343b48;--text:#eef1f5;--muted:#a2aab8;--accent:#e68a2e}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
+    .head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+    .title{font-size:14px;font-weight:700}.name{font-size:12px;color:var(--muted);margin-top:2px;max-width:48vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .actions,.tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+    button{background:#2a303b;border:1px solid #3d4552;color:var(--text);border-radius:8px;padding:7px 10px;font-weight:700;cursor:pointer}button.active{border-color:var(--accent);color:var(--accent);background:#241d16}
+    .zoomBox{display:flex;align-items:center;gap:5px;color:var(--muted);font-size:12px;font-weight:700}.zoomBox input{width:70px;background:#11141a;border:1px solid #3d4552;color:var(--text);border-radius:8px;padding:7px 8px;font:inherit;text-align:right}
+    .controls{padding:10px 14px;border-bottom:1px solid var(--line);background:#171b22}.row{display:flex;align-items:center;gap:10px;margin-bottom:8px}.row:last-child{margin-bottom:0}
+    .label{width:68px;font-size:12px;font-weight:700;color:var(--muted)}input[type=range]{flex:1;min-width:140px}.time{width:86px;text-align:right;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+    .body{height:calc(100vh - 139px);overflow:scroll;scrollbar-gutter:stable both-edges;scrollbar-width:auto;scrollbar-color:#596272 #171b22;padding:12px}
+    .body::-webkit-scrollbar{width:14px;height:14px}.body::-webkit-scrollbar-track{background:#171b22}.body::-webkit-scrollbar-thumb{background:#596272;border:3px solid #171b22;border-radius:10px}
+    .grid{display:grid;grid-template-columns:repeat(3,max-content);gap:12px;align-items:start;width:max-content;min-width:100%;justify-content:center;--preview-tile-width:420px;--preview-zoom:1}
+    .grid[data-layout=stack]{grid-template-columns:repeat(2,max-content)}.grid[data-layout=stack] .cell:nth-child(3){grid-column:1 / 3;justify-self:center}
+    .grid[data-layout=column]{grid-template-columns:max-content}.grid[data-layout=column] .cell:nth-child(3){grid-column:auto}
+    .label2{font-size:12px;font-weight:700;color:var(--muted);margin-bottom:6px}.canvas{width:calc(var(--preview-tile-width) * var(--preview-zoom));height:auto;display:block;background:#222;border:1px solid var(--line);border-radius:8px}
+  </style></head><body>
+    <div class="head"><div><div class="title">プレビュー別ウィンドウ</div><div id="popName" class="name">—</div></div><div class="actions"><button id="popPlay">▶ 再生</button><button id="popLoop">🔁 連続再生</button><button id="popClose">閉じる</button></div></div>
+    <div class="controls">
+      <div class="row"><span class="label">再生位置</span><input id="popSeek" type="range" min="0" max="0" step="0.01" value="0"><span id="popTime" class="time">0:00 / 0:00</span></div>
+      <div class="row"><span class="label">しきい値</span><input id="popThreshold" type="range" min="0" max="150" step="1" value="47"><span id="popThresholdVal" class="time">47</span></div>
+      <div class="tools"><button data-preview-layout="row">横3</button><button data-preview-layout="stack">上2 下1</button><button data-preview-layout="column">縦3</button><button id="popZoomOut">縮小</button><label class="zoomBox">倍率 <input id="popZoomValue" type="number" min="35" max="400" step="5" value="100"><span>%</span></label><button id="popZoomReset">リセット</button><button id="popZoomIn">拡大</button></div>
+    </div>
+    <div id="popBody" class="body"><div id="popGrid" class="grid" data-layout="row">
+      <div class="cell"><div class="label2">元の動画</div><canvas id="popOrig" class="canvas"></canvas></div>
+      <div class="cell"><div class="label2">色を減らした映像</div><canvas id="popReduced" class="canvas"></canvas></div>
+      <div class="cell"><div class="label2">はみ出し色マップ</div><canvas id="popMask" class="canvas"></canvas></div>
+    </div></div>
+  </body></html>`);
+  doc.close();
+  doc.getElementById("popPlay").addEventListener("click", () => togglePlay(false));
+  doc.getElementById("popLoop").addEventListener("click", () => togglePlay(true));
+  doc.getElementById("popClose").addEventListener("click", () => popup.close());
+  doc.getElementById("popSeek").addEventListener("input", onPreviewSeekInput);
+  doc.getElementById("popThreshold").addEventListener("input", (e) => setConfirmThreshold(Number(e.target.value), false));
+  doc.querySelectorAll("[data-preview-layout]").forEach((btn) => btn.addEventListener("click", () => setPreviewLayout(btn.dataset.previewLayout)));
+  doc.getElementById("popZoomOut").addEventListener("click", () => changePreviewZoom(0.85));
+  doc.getElementById("popZoomValue").addEventListener("change", (e) => setPreviewZoom(Number(e.target.value) / 100));
+  doc.getElementById("popZoomValue").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") setPreviewZoom(Number(e.target.value) / 100);
+  });
+  doc.getElementById("popZoomReset").addEventListener("click", () => setPreviewZoom(1));
+  doc.getElementById("popZoomIn").addEventListener("click", () => changePreviewZoom(1.18));
+  popup.addEventListener("resize", syncPreviewPopupPresentation);
+  popup.addEventListener("beforeunload", () => { if (state.previewPopup === popup) state.previewPopup = null; });
+}
+
+function getPreviewPopupDocument() {
+  const popup = state.previewPopup;
+  if (!popup || popup.closed) return null;
+  try { return popup.document; } catch (e) { return null; }
+}
+
+function syncPreviewPopupTitle() {
+  const doc = getPreviewPopupDocument();
+  if (!doc) return;
+  const v = activeVideo();
+  const name = doc.getElementById("popName");
+  if (name) name.textContent = v ? v.name : "—";
+}
+
+function syncPreviewPopupPresentation() {
+  const doc = getPreviewPopupDocument();
+  if (!doc) return;
+  syncPreviewLayoutControls();
+  applyPreviewFit(doc.getElementById("popGrid"), doc.getElementById("popBody"));
+  syncPreviewZoomControls();
+}
+
+function syncPreviewZoomControls() {
+  const doc = getPreviewPopupDocument();
+  if (!doc) return;
+  const input = doc.getElementById("popZoomValue");
+  if (input) input.value = String(Math.round(state.previewZoom * 100));
+}
+
+function syncPreviewPopupCanvases() {
+  const doc = getPreviewPopupDocument();
+  if (!doc) return;
+  copyPreviewCanvas(dom.cvOrig, doc.getElementById("popOrig"));
+  copyPreviewCanvas(dom.cvReduced, doc.getElementById("popReduced"));
+  copyPreviewCanvas(dom.cvMask, doc.getElementById("popMask"));
 }
 
 async function togglePlay(loop) {
@@ -1252,6 +1512,7 @@ async function togglePlay(loop) {
   state.loop = loop;
   dom.workVideo.loop = loop;
   dom.workVideo.muted = true;
+  applyPreviewRate();
   if (dom.workVideo.ended) dom.workVideo.currentTime = 0;
   updatePlayButtons();
   try { await dom.workVideo.play(); } catch (err) { stopPlay(); return; }
@@ -1272,16 +1533,34 @@ function stopPlay() {
   updatePlayButtons();
 }
 
+function applyPreviewRate() {
+  if (dom.previewRateSelect) dom.previewRateSelect.value = String(state.previewRate || 1);
+  try { dom.workVideo.playbackRate = state.previewRate || 1; } catch (e) { /* ignore */ }
+}
+
 function updatePlayButtons() {
+  const doc = getPreviewPopupDocument();
   if (!state.playing) {
     dom.playBtn.textContent = "▶ 再生";
     dom.loopBtn.textContent = "🔁 連続再生";
+    if (doc) {
+      doc.getElementById("popPlay").textContent = "▶ 再生";
+      doc.getElementById("popLoop").textContent = "🔁 連続再生";
+    }
   } else if (state.loop) {
     dom.playBtn.textContent = "▶ 再生";
     dom.loopBtn.textContent = "⏸ 停止";
+    if (doc) {
+      doc.getElementById("popPlay").textContent = "▶ 再生";
+      doc.getElementById("popLoop").textContent = "⏸ 停止";
+    }
   } else {
     dom.playBtn.textContent = "⏸ 停止";
     dom.loopBtn.textContent = "🔁 連続再生";
+    if (doc) {
+      doc.getElementById("popPlay").textContent = "⏸ 停止";
+      doc.getElementById("popLoop").textContent = "🔁 連続再生";
+    }
   }
 }
 
@@ -1343,7 +1622,7 @@ function applyPlotDrag(dx, dy, k, forcePan) {
     state.plotPan.x += dx * k;
     state.plotPan.y += dy * k;
   } else {
-    state.plotRot.yaw += dx * 0.01;
+    state.plotRot.yaw -= dx * 0.01;
     state.plotRot.pitch = Math.max(-1.4, Math.min(1.4, state.plotRot.pitch + dy * 0.01));
   }
   requestPlotDraw();
@@ -1513,6 +1792,7 @@ function renderStep4() {
   const dones = doneVideos();
   const sel = dones.filter((v) => v.save);
   dom.selCountText.textContent = `${sel.length} / ${dones.length} 件 選択中`;
+  syncExportMode();
   renderStep4List();
   // Keep the export button available after a save so the user can re-export
   // (e.g. change the format or which videos are selected, then save again).
@@ -1523,6 +1803,11 @@ function renderStep4() {
   dom.exportBtn.classList.toggle("disabled", sel.length === 0);
   dom.exportingBox.hidden = !state.exporting;
   dom.exportedBox.hidden = !state.exported;
+  if (state.exporting) {
+    dom.exportingText.textContent = state.exportMode === "fast"
+      ? "高速モードで書き出し中です… 旧録画方式のため、重い場面では停止・飛び・伸びが出る可能性があります。"
+      : "完全書き出しモードで書き出し中です… 各フレームを確認しながら処理するため時間がかかります。";
+  }
   if (state.exported) {
     const okCount = dones.filter((v) => v.exportDone).length;
     dom.exportedText.textContent = state.exportDirName
@@ -1591,6 +1876,27 @@ function syncFormatDesc() {
   dom.fmtInfo.setAttribute("data-tip", EXPORT_FORMATS.map((x) => `■ ${x.label}\n${x.desc}`).join("\n\n"));
 }
 
+function onExportModeClick(e) {
+  const btn = e.target.closest("[data-export-mode]");
+  if (!btn || state.exporting) return;
+  state.exportMode = btn.dataset.exportMode === "fast" ? "fast" : "safe";
+  state.exported = false;
+  syncExportMode();
+  renderStep4();
+}
+
+function syncExportMode() {
+  const f = formatById(state.exportFormat);
+  dom.exportModeSeg.querySelectorAll("[data-export-mode]").forEach((b) => {
+    b.classList.toggle("active", b.dataset.exportMode === state.exportMode);
+  });
+  if (state.exportMode === "fast" && f.via !== "webcodecs") {
+    dom.exportModeDesc.textContent = "この保存形式は高速書き出しに対応していないため、FFmpegでの書き出しになります。高速にしたい場合は「WebM（標準・速い）」を選んでください。";
+  } else {
+    dom.exportModeDesc.textContent = EXPORT_MODE_DESCS[state.exportMode] || EXPORT_MODE_DESCS.safe;
+  }
+}
+
 async function exportSelected() {
   const sel = doneVideos().filter((v) => v.save);
   if (!sel.length) { showToast("info", "保存する動画を選んでください"); return; }
@@ -1626,8 +1932,12 @@ async function exportSelected() {
   for (const v of sel) {
     if (state.cancelled) break;
     try {
-      if (fmt.via === "webcodecs" && supportsWebCodecs()) await exportViaWebCodecs(v, fmt);
-      else await exportViaFFmpeg(v, fmt);
+      if (fmt.via === "webcodecs" && supportsWebCodecs()) {
+        if (state.exportMode === "fast") await exportViaPlaybackCapture(v, fmt);
+        else await exportViaWebCodecs(v, fmt);
+      } else {
+        await exportViaFFmpeg(v, fmt);
+      }
       if (state.cancelled) break;
       if (dirHandle) {
         const fh = await dirHandle.getFileHandle(v.exportName, { create: true });
@@ -1669,6 +1979,11 @@ function stopExport() {
     try { if (state.activeEncoder.state !== "closed") state.activeEncoder.close(); } catch (e) { /* ignore */ }
     state.activeEncoder = null;
   }
+  // The fast WebM path records a live canvas stream.
+  if (state.activeRecorder && state.activeRecorder.state !== "inactive") {
+    try { state.activeRecorder.stop(); } catch (e) { /* ignore */ }
+  }
+  state.activeRecorder = null;
   // ffmpeg.exec can't be flag-interrupted mid-encode, so tear down the worker to abort it.
   if (state.ffmpeg) {
     try { state.ffmpeg.terminate(); } catch (e) { /* ignore */ }
@@ -1687,6 +2002,114 @@ function triggerDownload(v) {
   document.body.appendChild(a);
   a.click();
   a.remove();
+}
+
+// Fast path: play the source ONCE and capture each presented frame via
+// requestVideoFrameCallback, encoding it with WebCodecs using the frame's REAL
+// media timestamp (meta.mediaTime). No per-frame seeking → roughly real-time,
+// i.e. as fast as the old MediaRecorder path but WITHOUT its wall-clock freeze:
+// because every encoded frame carries its true timestamp, a momentary slow
+// recolor at worst thins a frame or two (mild judder), never holds/stretches a
+// scene. (Trade-off vs the frame-exact seek path used by "完全書き出し": under
+// sustained heavy load a few frames may be skipped, and capture pauses while the
+// tab is in the background.)
+async function exportViaPlaybackCapture(v, fmt) {
+  const { Muxer, ArrayBufferTarget } = await import(`./vendor/webm-muxer/webm-muxer.js?v=${APP_VERSION}`);
+  resetWorkVideo();
+  dom.workVideo.preload = "auto";
+  dom.workVideo.src = v.url;
+  dom.workVideo.load();
+  await ensureMetadata(dom.workVideo);
+  const { width, height } = scaledSize(dom.workVideo.videoWidth, dom.workVideo.videoHeight, v.analysis.settings.previewShortSide);
+  dom.exportCanvas.width = width;
+  dom.exportCanvas.height = height;
+  const ctx = dom.exportCanvas.getContext("2d", { willReadFrequently: true });
+  const dur = dom.workVideo.duration || 1;
+  const reps = v.analysis.representatives;
+  const th = v.confirmThreshold;
+
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: { codec: "V_VP8", width, height, frameRate: EXPORT_FPS },
+    firstTimestampBehavior: "offset",
+  });
+  let encError = null;
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => { try { muxer.addVideoChunk(chunk, meta); } catch (e) { encError = e; } },
+    error: (e) => { encError = e; },
+  });
+  const bitrate = Math.max(1500000, Math.round(width * height * EXPORT_FPS * 0.12));
+  configureVideoEncoder(encoder, { codec: "vp8", width, height, bitrate, framerate: EXPORT_FPS });
+  state.activeEncoder = encoder;
+
+  dom.workVideo.muted = true;
+  dom.workVideo.playbackRate = 1; // real-time so the element presents every frame (no source-side decimation)
+  let frames = 0;
+  let lastTsUs = -1;
+  const useRVFC = typeof dom.workVideo.requestVideoFrameCallback === "function";
+
+  const captureFrame = (mediaTimeSec) => {
+    let tsUs = Math.round((Number.isFinite(mediaTimeSec) ? mediaTimeSec : dom.workVideo.currentTime) * 1e6);
+    if (tsUs <= lastTsUs) tsUs = lastTsUs + 1; // timestamps must strictly increase
+    lastTsUs = tsUs;
+    ctx.drawImage(dom.workVideo, 0, 0, width, height);
+    const img = ctx.getImageData(0, 0, width, height);
+    processPixels(img.data, reps, th, v.processedCache, false);
+    ctx.putImageData(img, 0, 0);
+    const frame = new VideoFrame(dom.exportCanvas, { timestamp: tsUs });
+    encoder.encode(frame, { keyFrame: frames % EXPORT_KEYFRAME_INTERVAL === 0 });
+    frame.close();
+    frames += 1;
+    if (frames % EXPORT_PROGRESS_STEP === 0) {
+      v.exportProgress = Math.min(99, (dom.workVideo.currentTime / Math.max(0.001, dur)) * 100);
+      updateExport(v);
+    }
+  };
+
+  try {
+    await new Promise((resolve, reject) => {
+      let finished = false;
+      const finish = (err) => {
+        if (finished) return; finished = true;
+        dom.workVideo.removeEventListener("ended", onEnded);
+        dom.workVideo.removeEventListener("error", onErr);
+        err ? reject(err) : resolve();
+      };
+      const onEnded = () => finish();
+      const onErr = () => finish(new Error("playback error during export"));
+      dom.workVideo.addEventListener("ended", onEnded, { once: true });
+      dom.workVideo.addEventListener("error", onErr, { once: true });
+      const onRVFC = (now, meta) => {
+        if (state.cancelled || encError) { finish(); return; }
+        try { captureFrame(meta ? meta.mediaTime : dom.workVideo.currentTime); } catch (e) { finish(e); return; }
+        if (dom.workVideo.ended) { finish(); return; }
+        dom.workVideo.requestVideoFrameCallback(onRVFC);
+      };
+      const onRAF = () => { // fallback for browsers without rVFC
+        if (state.cancelled || encError) { finish(); return; }
+        try { captureFrame(dom.workVideo.currentTime); } catch (e) { finish(e); return; }
+        if (dom.workVideo.ended || dom.workVideo.paused) { finish(); return; }
+        requestAnimationFrame(onRAF);
+      };
+      dom.workVideo.currentTime = 0;
+      dom.workVideo.play().then(() => {
+        if (useRVFC) dom.workVideo.requestVideoFrameCallback(onRVFC);
+        else requestAnimationFrame(onRAF);
+      }).catch((e) => finish(e));
+    });
+    if (!state.cancelled && !encError) await encoder.flush();
+  } finally {
+    try { if (encoder.state !== "closed") encoder.close(); } catch (e) { /* ignore */ }
+    state.activeEncoder = null;
+    try { dom.workVideo.pause(); } catch (e) { /* ignore */ }
+  }
+  if (state.cancelled) return;
+  if (encError) throw (encError instanceof Error ? encError : new Error("WebCodecs encode failed"));
+  if (!frames) throw new Error("no frames captured during playback");
+  muxer.finalize();
+  v.exportBlob = new Blob([muxer.target.buffer], { type: fmt.mime || "video/webm" });
+  v.exportName = makeOutputName(v.name, fmt.ext);
+  v.exportSize = v.exportBlob.size;
 }
 
 // Fast path: WebCodecs VideoEncoder → WebM (vendored webm-muxer). No ffmpeg load.
@@ -1739,7 +2162,7 @@ async function exportViaWebCodecs(v, fmt) {
   // Palette-reduced video is mostly flat color and compresses very well, so this
   // bitrate is generous in practice. Scales with resolution; floored for clarity.
   const bitrate = Math.max(1500000, Math.round(width * height * EXPORT_FPS * 0.12));
-  encoder.configure({ codec: "vp8", width, height, bitrate, framerate: EXPORT_FPS });
+  configureVideoEncoder(encoder, { codec: "vp8", width, height, bitrate, framerate: EXPORT_FPS });
   state.activeEncoder = encoder;
 
   dom.workVideo.muted = true;
@@ -1752,12 +2175,14 @@ async function exportViaWebCodecs(v, fmt) {
       processPixels(img.data, reps, th, v.processedCache, false);
       ctx.putImageData(img, 0, 0);
       const frame = new VideoFrame(dom.exportCanvas, { timestamp: i * usPerFrame, duration: usPerFrame });
-      encoder.encode(frame, { keyFrame: i % (EXPORT_FPS * 2) === 0 });
+      encoder.encode(frame, { keyFrame: i % EXPORT_KEYFRAME_INTERVAL === 0 });
       frame.close();
       // Keep the encoder queue bounded so memory stays flat on long videos.
-      if (encoder.encodeQueueSize > 16) await encoder.flush();
-      v.exportProgress = Math.min(99, ((i + 1) / total) * 100);
-      updateExport(v);
+      if (encoder.encodeQueueSize > EXPORT_ENCODER_FLUSH_QUEUE) await encoder.flush();
+      if (i % EXPORT_PROGRESS_STEP === 0 || i === total - 1) {
+        v.exportProgress = Math.min(99, ((i + 1) / total) * 100);
+        updateExport(v);
+      }
     }
     if (!state.cancelled && !encError) await encoder.flush();
   } finally {
@@ -1771,6 +2196,10 @@ async function exportViaWebCodecs(v, fmt) {
   v.exportBlob = new Blob([muxer.target.buffer], { type: fmt.mime || "video/webm" });
   v.exportName = makeOutputName(v.name, fmt.ext);
   v.exportSize = v.exportBlob.size;
+}
+
+function configureVideoEncoder(encoder, baseConfig) {
+  encoder.configure(baseConfig);
 }
 
 // Quality path: render reduced frames to PNGs and encode with ffmpeg.wasm (lossless / ProRes / etc).
@@ -1848,12 +2277,15 @@ function restart() {
   state.exporting = false;
   state.exportDir = null;
   state.exportDirName = "";
+  state.exportMode = "safe";
+  state.previewRate = 1;
   state.preset = "recommend";
   state.advanced = false;
   state.detailsOpen = false;
   state.thresholdMode = "auto";
   state.vals = { ...DEFAULT_VALS };
   state.plotCache = null;
+  applyPreviewRate();
   render();
 }
 
@@ -1863,6 +2295,7 @@ function resetWorkVideo() {
   dom.workVideo.pause();
   dom.workVideo.removeAttribute("src");
   dom.workVideo.load();
+  try { dom.workVideo.playbackRate = state.previewRate || 1; } catch (e) { /* ignore */ }
 }
 
 async function transcodeVideo(v, originalError) {
@@ -1973,7 +2406,7 @@ function processPixels(data, representatives, threshold, cache, maskOnly) {
   for (let index = 0; index < data.length; index += 4) {
     const key = (data[index] << 16) | (data[index + 1] << 8) | data[index + 2];
     let mapped = cache.get(key);
-    if (!mapped) {
+    if (mapped === undefined) {
       let best = representatives[0];
       let bestSq = Infinity;
       for (const rep of representatives) {
@@ -1984,12 +2417,14 @@ function processPixels(data, representatives, threshold, cache, maskOnly) {
         if (distSq < bestSq) { bestSq = distSq; best = rep; }
       }
       const isNew = bestSq > thresholdSq;
-      mapped = maskOnly ? (isNew ? [255, 0, 255] : [0, 0, 0]) : (isNew ? [255, 0, 255] : best);
+      mapped = maskOnly
+        ? (isNew ? 0xff00ff : 0)
+        : (isNew ? 0xff00ff : ((best[0] << 16) | (best[1] << 8) | best[2]));
       cache.set(key, mapped);
     }
-    data[index] = mapped[0];
-    data[index + 1] = mapped[1];
-    data[index + 2] = mapped[2];
+    data[index] = (mapped >> 16) & 255;
+    data[index + 1] = (mapped >> 8) & 255;
+    data[index + 2] = mapped & 255;
     data[index + 3] = 255;
   }
 }
@@ -2031,11 +2466,17 @@ function mediaErrorMessage(video) {
   return `${label} (code ${error.code})${extra}`;
 }
 
-function seekVideo(video, time) {
-  if (Math.abs(video.currentTime - time) < 0.001 && video.readyState >= 2) return waitForVideoFrame(video);
+function seekVideo(video, time, waitForFrame = true) {
+  if (Math.abs(video.currentTime - time) < 0.001 && video.readyState >= 2) {
+    return waitForFrame ? waitForVideoFrame(video) : Promise.resolve();
+  }
   return new Promise((resolve, reject) => {
     const timeout = window.setTimeout(() => { cleanup(); reject(new Error(`Timed out while seeking video to ${formatNumber(time, 3)}s`)); }, 30000);
-    const onSeeked = () => { cleanup(); waitForVideoFrame(video).then(resolve); };
+    const onSeeked = () => {
+      cleanup();
+      if (waitForFrame) waitForVideoFrame(video).then(resolve);
+      else resolve();
+    };
     const onError = () => { cleanup(); reject(new Error("Video seek failed")); };
     const cleanup = () => { window.clearTimeout(timeout); video.removeEventListener("seeked", onSeeked); video.removeEventListener("error", onError); };
     video.addEventListener("seeked", onSeeked, { once: true });
