@@ -1,11 +1,12 @@
 "use strict";
 
 const MAGENTA = [255, 0, 255];
+const DEFAULT_BUCKET_BITS = 5;
+const KMEANS_ITERS = 30;
+const SAMPLE_LIMIT = 12000;
 
 self.onmessage = (event) => {
-  if (!event.data || event.data.type !== "analyze") {
-    return;
-  }
+  if (!event.data || event.data.type !== "analyze") return;
 
   try {
     const result = analyze(event.data.payload);
@@ -23,36 +24,42 @@ function postProgress(stage, value, message) {
 }
 
 function analyze(payload) {
-  const settings = payload.settings;
+  const settings = payload.settings || {};
   const first = new Uint8ClampedArray(payload.firstBuffer);
   const last = new Uint8ClampedArray(payload.lastBuffer);
   const totalPixels = first.length / 4 + last.length / 4;
+  const bucketBits = settings.bucketBits || DEFAULT_BUCKET_BITS;
 
-  postProgress("histogram", 0.05, "Counting colors");
-  const histogram = buildHistogram([first, last]);
+  postProgress("histogram", 0.05, "Bucketing colors");
+  const buckets = buildBucketCandidates([first, last], bucketBits);
+  const histogram = buckets.candidates;
   const uniqueColors = histogram.length;
-  postProgress("histogram", 0.09, `Found ${uniqueColors.toLocaleString()} unique colors`);
+  if (!uniqueColors) throw new Error("No colors were available for palette analysis");
+
+  postProgress("histogram", 0.10, `Found ${uniqueColors.toLocaleString()} color buckets`);
   histogram.sort((a, b) => b.count - a.count);
 
-  const candidateCount = Math.min(settings.maxCandidates, histogram.length);
+  const requestedCandidates = Math.max(1, settings.maxCandidates || 1200);
+  const candidateCount = Math.min(requestedCandidates, histogram.length);
   const candidates = histogram.slice(0, candidateCount);
-  const candidateCoverage = candidates.reduce((sum, item) => sum + item.count, 0) / totalPixels;
+  const candidateCoverage = candidates.reduce((sum, item) => sum + item.count, 0) / Math.max(1, totalPixels);
 
+  const minClusters = Math.max(1, Math.min(settings.minClusters || 2, candidateCount));
+  const maxClusters = Math.max(minClusters, Math.min(settings.maxClusters || minClusters, candidateCount));
   const colors = candidates.map((item) => item.rgb);
   const counts = candidates.map((item) => item.count);
+  const weights = candidates.map((item) => Math.sqrt(item.count));
 
-  postProgress("cluster", 0.15, `Preparing ${colors.length} candidate colors`);
-  const clustered = completeLinkage(colors, counts, settings);
-  const selected = selectClusterCount(clustered, settings);
+  postProgress("cluster", 0.14, `Preparing ${colors.length.toLocaleString()} candidate colors`);
+  const clustered = buildKMeansSnapshots(colors, weights, minClusters, maxClusters, settings);
+  const selected = selectClusterCount(clustered.rows, settings);
   const snapshot = clustered.snapshots.get(selected.k);
-  if (!snapshot) {
-    throw new Error("Selected cluster snapshot was not available");
-  }
+  if (!snapshot) throw new Error("Selected cluster snapshot was not available");
 
+  postProgress("threshold", 0.94, "Choosing threshold");
   const thresholdInfo = chooseThreshold(colors, counts, snapshot.labels, snapshot.representatives, settings);
-  // Plot ALL of the analyzed colors (full unique histogram, not just the clustering candidates),
-  // so colors that fall outside every representative's threshold show up as magenta in the 3D plot.
-  const sampleColors = sampleArray(histogram.map((item) => item.rgb), 12000);
+  postProgress("plot", 0.98, "Preparing color plot samples");
+  const sampleColors = sampleArray(histogram.map((item) => item.rgb), SAMPLE_LIMIT);
 
   const snapshotsByK = {};
   const availableK = [];
@@ -60,17 +67,21 @@ function analyze(payload) {
     snapshotsByK[k] = {
       representatives: snap.representatives,
       minRepresentativeDistance: snap.minRepresentativeDistance,
+      closestRepresentativePair: snap.closestRepresentativePair,
+      sse: snap.sse,
     };
     availableK.push(k);
   }
   availableK.sort((a, b) => a - b);
 
+  postProgress("done", 1, "Palette ready");
   return {
     selectedK: selected.k,
     representatives: snapshot.representatives,
     threshold: thresholdInfo.threshold,
     thresholdInfo,
     uniqueColors,
+    colorBucketBits: bucketBits,
     candidateCount,
     candidateCoverage,
     rows: selected.rows,
@@ -83,283 +94,253 @@ function analyze(payload) {
   };
 }
 
-function sampleArray(arr, max) {
-  if (arr.length <= max) {
-    return arr.map((c) => [c[0], c[1], c[2]]);
-  }
-  const step = arr.length / max;
-  const out = [];
-  for (let i = 0; i < max; i += 1) {
-    const c = arr[Math.floor(i * step)];
-    out.push([c[0], c[1], c[2]]);
-  }
-  return out;
-}
-
-function buildHistogram(buffers) {
+function buildBucketCandidates(buffers, bucketBits) {
+  const shift = 8 - Math.max(1, Math.min(8, bucketBits));
   const counts = new Map();
+
   for (const data of buffers) {
     for (let index = 0; index < data.length; index += 4) {
-      const key = (data[index] << 16) | (data[index + 1] << 8) | data[index + 2];
-      counts.set(key, (counts.get(key) || 0) + 1);
+      const r = data[index] >> shift;
+      const g = data[index + 1] >> shift;
+      const b = data[index + 2] >> shift;
+      const key = (r << (bucketBits * 2)) | (g << bucketBits) | b;
+      let row = counts.get(key);
+      if (!row) {
+        row = { count: 0, rSum: 0, gSum: 0, bSum: 0 };
+        counts.set(key, row);
+      }
+      row.count += 1;
+      row.rSum += data[index];
+      row.gSum += data[index + 1];
+      row.bSum += data[index + 2];
     }
   }
 
-  const rows = [];
-  for (const [key, count] of counts.entries()) {
-    rows.push({
+  const candidates = [];
+  for (const [key, row] of counts.entries()) {
+    const inv = 1 / row.count;
+    candidates.push({
       key,
-      rgb: [(key >> 16) & 255, (key >> 8) & 255, key & 255],
-      count,
+      rgb: [
+        Math.round(row.rSum * inv),
+        Math.round(row.gSum * inv),
+        Math.round(row.bSum * inv),
+      ],
+      count: row.count,
     });
   }
-  return rows;
+  return { candidates };
 }
 
-function completeLinkage(colors, counts, settings) {
-  const n = colors.length;
-  if (n < settings.minClusters + 1) {
-    throw new Error("Not enough candidate colors for the requested cluster range");
-  }
-
-  const distances = new Float32Array(n * n);
-  const heapItems = [];
-  for (let i = 0; i < n; i += 1) {
-    for (let j = i + 1; j < n; j += 1) {
-      const distance = colorDistance(colors[i], colors[j]);
-      distances[i * n + j] = distance;
-      distances[j * n + i] = distance;
-      heapItems.push({ distance: distances[i * n + j], i, j });
-    }
-    if (i % 24 === 0 || i === n - 1) {
-      const progress = 0.15 + (i / Math.max(1, n - 1)) * 0.1;
-      postProgress("distance", progress, `Building RGB distance table: ${i + 1}/${n}`);
-    }
-  }
-  const heap = new MinPairHeap(heapItems);
-  postProgress("cluster", 0.25, `Prepared ${heap.size().toLocaleString()} color pairs`);
-
-  const active = new Uint8Array(n);
-  active.fill(1);
-  const members = Array.from({ length: n }, (_, index) => [index]);
-  const weights = counts.slice();
-  const distanceAtReduction = new Map();
+function buildKMeansSnapshots(colors, weights, minClusters, maxClusters, settings) {
   const snapshots = new Map();
-  let activeCount = n;
-  let mergeIndex = 0;
-  const stopAt = Math.max(1, settings.minClusters - 1);
-
-  while (activeCount > stopAt) {
-    const best = takeNearestActivePair(heap, distances, active, n);
-    const bestDistance = best.distance;
-    const bestI = best.i;
-    const bestJ = best.j;
-
-    if (bestI < 0 || bestJ < 0) {
-      throw new Error("Could not find a cluster pair to merge");
-    }
-
-    distanceAtReduction.set(activeCount, bestDistance);
-    members[bestI] = members[bestI].concat(members[bestJ]);
-    members[bestJ] = [];
-    weights[bestI] += weights[bestJ];
-    weights[bestJ] = 0;
-    active[bestJ] = 0;
-
-    for (let x = 0; x < n; x += 1) {
-      if (!active[x] || x === bestI) continue;
-      const updated = Math.max(distances[bestI * n + x], distances[bestJ * n + x]);
-      distances[bestI * n + x] = updated;
-      distances[x * n + bestI] = updated;
-      heap.push({
-        distance: updated,
-        i: Math.min(bestI, x),
-        j: Math.max(bestI, x),
-      });
-    }
-
-    activeCount -= 1;
-    mergeIndex += 1;
-
-    if (activeCount <= settings.maxClusters && activeCount >= settings.minClusters) {
-      snapshots.set(activeCount, makeSnapshot(colors, counts, active, members, weights));
-    }
-
-    if (mergeIndex % 8 === 0 || activeCount <= settings.maxClusters) {
-      const done = (n - activeCount) / Math.max(1, n - stopAt);
-      postProgress("cluster", 0.25 + done * 0.62, `Clustering: ${activeCount} clusters`);
-    }
-  }
-
-  return { distanceAtReduction, snapshots };
-}
-
-function takeNearestActivePair(heap, distances, active, n) {
-  while (heap.size() > 0) {
-    const item = heap.pop();
-    if (!active[item.i] || !active[item.j]) {
-      continue;
-    }
-
-    const current = distances[item.i * n + item.j];
-    if (Math.abs(current - item.distance) > 1e-5) {
-      continue;
-    }
-
-    return item;
-  }
-  return { distance: Infinity, i: -1, j: -1 };
-}
-
-class MinPairHeap {
-  constructor(items) {
-    this.items = items;
-    for (let index = Math.floor(this.items.length / 2) - 1; index >= 0; index -= 1) {
-      this.sink(index);
-    }
-  }
-
-  size() {
-    return this.items.length;
-  }
-
-  push(item) {
-    this.items.push(item);
-    this.swim(this.items.length - 1);
-  }
-
-  pop() {
-    if (this.items.length === 0) {
-      return null;
-    }
-
-    const first = this.items[0];
-    const last = this.items.pop();
-    if (this.items.length > 0) {
-      this.items[0] = last;
-      this.sink(0);
-    }
-    return first;
-  }
-
-  swim(index) {
-    while (index > 0) {
-      const parent = Math.floor((index - 1) / 2);
-      if (this.items[parent].distance <= this.items[index].distance) {
-        break;
-      }
-      this.swap(parent, index);
-      index = parent;
-    }
-  }
-
-  sink(index) {
-    const length = this.items.length;
-    while (true) {
-      const left = index * 2 + 1;
-      const right = left + 1;
-      let smallest = index;
-
-      if (left < length && this.items[left].distance < this.items[smallest].distance) {
-        smallest = left;
-      }
-      if (right < length && this.items[right].distance < this.items[smallest].distance) {
-        smallest = right;
-      }
-      if (smallest === index) {
-        break;
-      }
-      this.swap(index, smallest);
-      index = smallest;
-    }
-  }
-
-  swap(a, b) {
-    const item = this.items[a];
-    this.items[a] = this.items[b];
-    this.items[b] = item;
-  }
-}
-
-function makeSnapshot(colors, counts, active, members, weights) {
-  const clusters = [];
-  for (let index = 0; index < active.length; index += 1) {
-    if (!active[index]) continue;
-    const memberIndices = members[index];
-    let repCandidate = memberIndices[0];
-    for (const member of memberIndices) {
-      if (counts[member] > counts[repCandidate]) {
-        repCandidate = member;
-      }
-    }
-    clusters.push({
-      activeIndex: index,
-      members: memberIndices,
-      weight: weights[index],
-      representative: colors[repCandidate],
-    });
-  }
-
-  clusters.sort((a, b) => b.weight - a.weight);
-  const labels = new Int16Array(colors.length);
-  const representatives = [];
-  for (let label = 0; label < clusters.length; label += 1) {
-    representatives.push(clusters[label].representative);
-    for (const member of clusters[label].members) {
-      labels[member] = label;
-    }
-  }
-
-  const pairInfo = minPairwiseDistance(representatives);
-  return {
-    labels: Array.from(labels),
-    representatives,
-    minRepresentativeDistance: pairInfo.distance,
-    closestRepresentativePair: pairInfo.pair,
-  };
-}
-
-function selectClusterCount(clustered, settings) {
   const rows = [];
-  for (let k = settings.minClusters; k <= settings.maxClusters; k += 1) {
-    const previous = clustered.distanceAtReduction.get(k + 1);
-    const next = clustered.distanceAtReduction.get(k);
-    const snapshot = clustered.snapshots.get(k);
-    if (!Number.isFinite(previous) || !Number.isFinite(next) || !snapshot) {
-      continue;
-    }
+  let prevSse = null;
+  const totalK = maxClusters - minClusters + 1;
+  postProgress("cluster", 0.16, "Preparing k-means seeds");
+  const seedCenters = initCenterSequence(colors, weights, maxClusters);
 
-    const absoluteGap = next - previous;
-    const relativeGap = next / Math.max(previous, 1e-9);
+  for (let k = minClusters; k <= maxClusters; k += 1) {
+    const kIndex = k - minClusters;
+    const start = 0.20 + (kIndex / totalK) * 0.70;
+    const end = 0.20 + ((kIndex + 1) / totalK) * 0.70;
+    postProgress("cluster", start, `Weighted k-means: ${k} colors`);
+
+    const model = weightedKMeans(colors, weights, seedCenters, k, KMEANS_ITERS, (iterFrac) => {
+      postProgress("cluster", start + (end - start) * iterFrac, `Weighted k-means: ${k} colors`);
+    });
+    const representatives = representativesFromCenters(colors, model.centers);
+    const labels = labelsForRepresentatives(colors, representatives);
+    const sse = weightedSse(colors, weights, labels, representatives);
+    const pairInfo = minPairwiseDistance(representatives);
+    const absoluteGap = prevSse == null ? 0 : Math.max(0, prevSse - sse);
+    const improvement = prevSse == null ? 0 : absoluteGap / Math.max(prevSse, 1e-9);
+    const relativeGap = 1 + improvement;
+
+    snapshots.set(k, {
+      labels,
+      representatives,
+      sse,
+      minRepresentativeDistance: pairInfo.distance,
+      closestRepresentativePair: pairInfo.pair,
+    });
     rows.push({
       k,
-      previous,
-      next,
+      previous: prevSse == null ? sse : prevSse,
+      next: sse,
       absoluteGap,
       relativeGap,
-      minRepresentativeDistance: snapshot.minRepresentativeDistance,
+      minRepresentativeDistance: pairInfo.distance,
     });
+    prevSse = sse;
+    postProgress("cluster", end, `Weighted k-means: ${k} colors`);
   }
 
-  if (!rows.length) {
-    throw new Error("No cluster-count candidates were available");
+  postProgress("cluster", 0.92, "Choosing palette size");
+  return { snapshots, rows };
+}
+
+function weightedKMeans(colors, weights, seedCenters, k, maxIters, onProgress) {
+  const n = colors.length;
+  const centers = seedCenters.slice(0, k).map((center) => center.slice());
+  const labels = new Int16Array(n);
+  labels.fill(-1);
+  const sumW = new Float64Array(k);
+  const sumR = new Float64Array(k);
+  const sumG = new Float64Array(k);
+  const sumB = new Float64Array(k);
+
+  for (let iter = 0; iter < maxIters; iter += 1) {
+    sumW.fill(0);
+    sumR.fill(0);
+    sumG.fill(0);
+    sumB.fill(0);
+    let changed = false;
+
+    for (let i = 0; i < n; i += 1) {
+      const label = nearestColorIndex(colors[i], centers);
+      if (labels[i] !== label) {
+        labels[i] = label;
+        changed = true;
+      }
+      const w = weights[i];
+      sumW[label] += w;
+      sumR[label] += colors[i][0] * w;
+      sumG[label] += colors[i][1] * w;
+      sumB[label] += colors[i][2] * w;
+    }
+
+    for (let c = 0; c < k; c += 1) {
+      if (sumW[c] <= 0) continue;
+      const inv = 1 / sumW[c];
+      centers[c] = [sumR[c] * inv, sumG[c] * inv, sumB[c] * inv];
+    }
+
+    if (onProgress && (iter === 0 || iter % 4 === 3)) onProgress((iter + 1) / maxIters);
+    if (!changed && iter > 0) break;
   }
 
-  const valid = rows.filter((row) => row.minRepresentativeDistance >= settings.minRepresentativeDistance);
-  const pool = valid.length ? valid : rows;
-  const best = pool.reduce((current, row) => {
-    if (!current) return row;
-    if (row.relativeGap !== current.relativeGap) {
-      return row.relativeGap > current.relativeGap ? row : current;
-    }
-    if (row.absoluteGap !== current.absoluteGap) {
-      return row.absoluteGap > current.absoluteGap ? row : current;
-    }
-    return row.k > current.k ? row : current;
-  }, null);
+  return { centers, labels: Array.from(labels) };
+}
 
-  rows.sort((a, b) => b.relativeGap - a.relativeGap);
-  return { k: best.k, rows };
+function initCenterSequence(colors, weights, maxK) {
+  let first = 0;
+  for (let i = 1; i < colors.length; i += 1) {
+    if (weights[i] > weights[first]) first = i;
+  }
+
+  const centers = [colors[first].slice()];
+  while (centers.length < maxK) {
+    let bestIndex = 0;
+    let bestScore = -1;
+    for (let i = 0; i < colors.length; i += 1) {
+      let nearestSq = Infinity;
+      for (const center of centers) {
+        const d = colorDistanceSq(colors[i], center);
+        if (d < nearestSq) nearestSq = d;
+      }
+      const score = nearestSq * Math.sqrt(Math.max(1, weights[i]));
+      if (score > bestScore) {
+        bestScore = score;
+        bestIndex = i;
+      }
+    }
+    centers.push(colors[bestIndex].slice());
+  }
+  return centers;
+}
+
+function representativesFromCenters(colors, centers) {
+  const reps = [];
+  for (const center of centers) {
+    let bestIndex = 0, bestDistance = Infinity;
+    for (let i = 0; i < colors.length; i += 1) {
+      const d = colorDistanceSq(colors[i], center);
+      if (d < bestDistance) {
+        bestDistance = d;
+        bestIndex = i;
+      }
+    }
+    reps.push(colors[bestIndex].slice());
+  }
+  return reps;
+}
+
+function labelsForRepresentatives(colors, representatives) {
+  const labels = new Int16Array(colors.length);
+  for (let i = 0; i < colors.length; i += 1) {
+    labels[i] = nearestColorIndex(colors[i], representatives);
+  }
+  return Array.from(labels);
+}
+
+function weightedSse(colors, counts, labels, representatives) {
+  let total = 0;
+  for (let i = 0; i < colors.length; i += 1) {
+    total += colorDistanceSq(colors[i], representatives[labels[i]]) * counts[i];
+  }
+  return total;
+}
+
+function nearestColorIndex(color, palette) {
+  let best = 0;
+  let bestDistance = Infinity;
+  for (let i = 0; i < palette.length; i += 1) {
+    const d = colorDistanceSq(color, palette[i]);
+    if (d < bestDistance) {
+      bestDistance = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+function selectClusterCount(rows, settings) {
+  if (!rows.length) throw new Error("No cluster-count candidates were available");
+  const minDistance = settings.minRepresentativeDistance || 0;
+  // Candidate Ks: palettes whose two closest reps are at least `minDistance` apart (the "merge
+  // similar colors" strength) and that aren't degenerate (duplicate reps). Fall back progressively
+  // so a tiny histogram still yields a choice.
+  let pool = rows.filter((r) => r.minRepresentativeDistance >= minDistance && r.minRepresentativeDistance > 0);
+  if (pool.length < 2) pool = rows.filter((r) => r.minRepresentativeDistance > 0);
+  if (pool.length < 2) pool = rows.slice();
+
+  // Auto K = the ELBOW (knee) of the weighted-SSE-vs-K curve. The curve drops steeply while real,
+  // distinct flat colors are still being separated, then flattens into a slow tail that only chips
+  // away at gradient/noise. The knee = the K whose point lies farthest BELOW the straight chord
+  // joining the first and last candidate K — the natural "enough colors, ignore the noise tail"
+  // point. (Old rule = max relative gap → picked the first big drop → too few colors. A
+  // variance-explained floor would instead chase the gradient tail → too many. The knee adapts.)
+  const xs = pool.map((r) => r.k);
+  const ys = pool.map((r) => r.next); // weighted SSE at this k
+  const x0 = xs[0], x1 = xs[xs.length - 1];
+  const y0 = ys[0], y1 = ys[ys.length - 1];
+  const xr = (x1 - x0) || 1, yr = (y0 - y1) || 1; // SSE decreases with k → y0 >= y1
+  const below = pool.map((r, i) => {
+    const xn = (xs[i] - x0) / xr;     // 0..1
+    const yn = (ys[i] - y1) / yr;     // ~1..0
+    return (1 - xn) - yn;             // how far the curve dips below the chord (>=0 when convex)
+  });
+  let peak = 0;
+  for (const d of below) if (d > peak) peak = d;
+  // Among the Ks within `sensitivity` of the peak knee-ness, take the LARGEST — it sits on the
+  // high-K shoulder of the knee (a touch richer / more natural) rather than the bare minimum. This
+  // is the single knob: →1.0 = leanest (exact knee), ↓ = more colors.
+  const sensitivity = Math.max(0.5, Math.min(1, settings.colorElbowSensitivity || 0.9));
+  let chosen = pool[0];
+  if (peak > 1e-9) {
+    for (let i = 0; i < pool.length; i += 1) if (below[i] >= sensitivity * peak) chosen = pool[i];
+  } else {
+    // No real knee (monotone / near-linear curve) → a modest default palette size.
+    chosen = pool[Math.min(pool.length - 1, Math.max(0, Math.round(pool.length * 0.4)))];
+  }
+
+  const rankedRows = rows.slice().sort((a, b) => {
+    if (b.relativeGap !== a.relativeGap) return b.relativeGap - a.relativeGap;
+    if (b.absoluteGap !== a.absoluteGap) return b.absoluteGap - a.absoluteGap;
+    return b.k - a.k;
+  });
+  return { k: chosen.k, rows: rankedRows };
 }
 
 function chooseThreshold(colors, counts, labels, representatives, settings) {
@@ -372,17 +353,15 @@ function chooseThreshold(colors, counts, labels, representatives, settings) {
     };
   }
 
-  const distances = colors.map((color, index) => {
-    return colorDistance(color, representatives[labels[index]]);
-  });
-  const quantileDistance = weightedQuantile(distances, counts, settings.thresholdQuantile);
-  const threshold = quantileDistance + settings.thresholdMargin;
+  const distances = colors.map((color, index) => colorDistance(color, representatives[labels[index]]));
+  const quantileDistance = weightedQuantile(distances, counts, settings.thresholdQuantile || 0.995);
+  const threshold = quantileDistance + (settings.thresholdMargin || 0);
   return {
     mode: "auto",
     threshold,
-    quantile: settings.thresholdQuantile,
+    quantile: settings.thresholdQuantile || 0.995,
     quantileDistance,
-    margin: settings.thresholdMargin,
+    margin: settings.thresholdMargin || 0,
   };
 }
 
@@ -394,18 +373,24 @@ function weightedQuantile(values, weights, quantile) {
   let cumulative = 0;
   for (const item of order) {
     cumulative += item.weight;
-    if (cumulative >= target) {
-      return item.value;
-    }
+    if (cumulative >= target) return item.value;
   }
-  return order[order.length - 1].value;
+  return order.length ? order[order.length - 1].value : 0;
+}
+
+function sampleArray(arr, max) {
+  if (arr.length <= max) return arr.map((c) => [c[0], c[1], c[2]]);
+  const step = arr.length / max;
+  const out = [];
+  for (let i = 0; i < max; i += 1) {
+    const c = arr[Math.floor(i * step)];
+    out.push([c[0], c[1], c[2]]);
+  }
+  return out;
 }
 
 function minPairwiseDistance(representatives) {
-  if (representatives.length < 2) {
-    return { distance: 0, pair: [] };
-  }
-
+  if (representatives.length < 2) return { distance: 0, pair: [] };
   let bestDistance = Infinity;
   let bestPair = [];
   for (let i = 0; i < representatives.length - 1; i += 1) {
@@ -421,8 +406,12 @@ function minPairwiseDistance(representatives) {
 }
 
 function colorDistance(a, b) {
+  return Math.sqrt(colorDistanceSq(a, b));
+}
+
+function colorDistanceSq(a, b) {
   const dr = a[0] - b[0];
   const dg = a[1] - b[1];
   const db = a[2] - b[2];
-  return Math.sqrt(dr * dr + dg * dg + db * db);
+  return dr * dr + dg * dg + db * db;
 }
