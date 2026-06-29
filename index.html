@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20260622-09">
+    <link rel="stylesheet" href="./styles.css?v=20260623-68">
   </head>
   <body>
     <div class="page">
@@ -24,15 +24,12 @@
                 <div class="brand-title">Palette Reducer</div>
               </div>
             </div>
-            <div class="header-right">
-              <span id="videoCountBadge" class="count-badge" hidden></span>
-            </div>
           </header>
 
           <div class="app-body">
             <!-- left rail -->
             <aside class="rail">
-              <div class="rail-title">かんたん 4 ステップ</div>
+              <div class="rail-title">かんたん 5 ステップ</div>
               <div id="rail" class="rail-list">
                 <div class="rail-item" data-step="1">
                   <div class="rail-circle">1</div>
@@ -48,12 +45,12 @@
                 </div>
                 <div class="rail-item" data-step="4">
                   <div class="rail-circle">4</div>
+                  <div class="rail-text"><div class="rail-label">色を統合する</div><div class="rail-sub">未着手</div></div>
+                </div>
+                <div class="rail-item" data-step="5">
+                  <div class="rail-circle">5</div>
                   <div class="rail-text"><div class="rail-label">保存する</div><div class="rail-sub">未着手</div></div>
                 </div>
-              </div>
-              <div class="rail-tip">
-                <span>💡</span>
-                <span>複数の動画をまとめてドロップすると、同じ設定で一括処理できます。</span>
               </div>
             </aside>
 
@@ -62,15 +59,15 @@
 
               <!-- ============ STEP 1 ============ -->
               <section id="step1" class="step">
-                <div class="step-eyebrow">STEP 1 / 4</div>
+                <div class="step-eyebrow">STEP 1 / 5</div>
                 <h2 class="step-title">動画を選ぶ</h2>
                 <p class="step-desc">色を減らしたい動画をドラッグ＆ドロップしてください。</p>
 
                 <div id="dropzone" class="dropzone">
                   <span class="dz-icon">↑</span>
-                  <span class="dz-main">ここに動画をまとめてドラッグ＆ドロップ</span>
+                  <span class="dz-main">ここに動画をドラッグ＆ドロップ</span>
                   <span class="dz-or">または <span class="dz-btn">ファイルを選ぶ</span></span>
-                  <span class="dz-hint">対応形式：MP4 / WebM / MOV など（複数可）</span>
+                  <span class="dz-hint">対応形式：MP4 / WebM / MOV など</span>
                   <input id="fileInput" type="file" accept="video/*" multiple hidden>
                 </div>
 
@@ -87,19 +84,18 @@
               <!-- ============ STEP 2 ============ -->
               <section id="step2" class="step" hidden>
                 <div class="step-eyebrow-row">
-                  <div class="step-eyebrow">STEP 2 / 4</div>
-                  <button id="backToStep1" type="button" class="link-muted">← 動画を選び直す</button>
+                  <div class="step-eyebrow">STEP 2 / 5</div>
+                  <button id="backToStep1" type="button" class="btn-ghost">← 動画を選び直す</button>
                 </div>
                 <h2 class="step-title">色を減らす</h2>
-                <p id="step2Desc" class="step-desc">すべての動画に同じ設定を適用します。細かく調整したいときは「詳細設定」を開いてください。</p>
+                <p id="step2Desc" class="step-desc">細かく調整したいときは「詳細設定」を開いてください。</p>
 
-                <div class="seg-label">仕上がりの好みを選ぶ</div>
-                <div id="presetSeg" class="segmented">
-                  <button type="button" data-preset="recommend" class="seg active">おすすめ</button>
-                  <button type="button" data-preset="hq" class="seg">高精細（遅い）</button>
-                  <button type="button" data-preset="light" class="seg">軽量（速い）</button>
+                <div class="seg-label">処理のしかたを選ぶ</div>
+                <div id="modeSwitch" class="segmented" role="group" aria-label="処理モード">
+                  <button type="button" data-mode="whole" class="seg active">全編通し</button>
+                  <button type="button" data-mode="scene" class="seg">シーン別</button>
                 </div>
-                <p class="seg-note">数値を1つも触らずに始められます。</p>
+                <p class="seg-note">全編通し＝動画全体を1つの色セットにまとめます。シーン別＝カット（場面）ごとに分けて、色を統合できます。</p>
 
                 <button id="analyzeBtn" type="button" class="btn-primary block big"><span class="ic">✦</span> <span id="analyzeBtnLabel">色を分析する</span></button>
 
@@ -145,9 +141,9 @@
                         <div class="slider-top">
                           <span class="slider-name">使う色の細かさ（候補数）</span>
                           <span class="info" data-tip="分析に残す頻出色の数です。多いほど細かい色まで候補に入りますが、遅くなります。少ないと、あまり出ない色は代表色に選ばれにくくなります。">ⓘ</span>
-                          <span class="slider-val"><span id="vMaxc">800</span>色</span>
+                          <span class="slider-val"><span id="vMaxc">1200</span>色</span>
                         </div>
-                        <input id="sMaxc" type="range" min="200" max="3000" step="50" value="800">
+                        <input id="sMaxc" type="range" min="200" max="3000" step="50" value="1200">
                       </div>
 
                       <div class="slider-field">
@@ -156,7 +152,7 @@
                           <span class="info" data-tip="確認画面と保存する動画の大きさです。「入力と同じ」は元動画と同じ解像度で出力します。大きいほどきれいですが、処理と保存が重くなります。">ⓘ</span>
                           <span class="slider-val"><span id="vPrev">360px</span></span>
                         </div>
-                        <label class="res-full"><input id="chkPrevFull" type="checkbox"> 入力と同じ解像度で書き出す</label>
+                        <label class="res-full"><input id="chkPrevFull" type="checkbox" checked> 入力と同じ解像度で書き出す</label>
                         <input id="sPrev" type="range" min="160" max="720" step="20" value="360">
                       </div>
 
@@ -188,29 +184,62 @@
                         </div>
                       </div>
 
-                      <div class="group-title">はみ出し色の判定</div>
-                      <div class="slider-name mb">判定方法</div>
-                      <div id="thresholdSeg" class="segmented narrow">
-                        <button type="button" data-mode="auto" class="seg active">自動（おすすめ）</button>
-                        <button type="button" data-mode="manual" class="seg">手動</button>
-                      </div>
-
-                      <div id="fixedField" class="slider-field" hidden>
+                      <div id="sceneDetectGroup">
+                      <div class="group-title">シーン検出</div>
+                      <div class="slider-field">
                         <div class="slider-top">
-                          <span class="slider-name">手動のしきい値</span>
-                          <span class="info" data-tip="手動で「代表色に含める範囲」を決めます。各ピクセルが一番近い代表色からこの距離以内ならその代表色に置き換え、超えたらマゼンタになります。小さいほど厳密、大きいほどゆるい判定です。">ⓘ</span>
-                          <span class="slider-val" id="vFixed">60</span>
+                          <span class="slider-name">分割方法</span>
+                          <span class="info" data-tip="自動分割は感度でカットを拾います。シーン数指定は、変化が大きい順にカットを選び、指定した数のシーンに分けます。">ⓘ</span>
                         </div>
-                        <input id="sFixed" type="range" min="10" max="150" step="1" value="60">
+                        <div id="cutModeSeg" class="segmented narrow">
+                          <button type="button" data-cut-mode="auto" class="seg active">自動分割</button>
+                          <button type="button" data-cut-mode="fixed" class="seg">シーン数指定</button>
+                        </div>
                       </div>
-
-                      <div id="marginField" class="slider-field">
+                      <div class="slider-field">
                         <div class="slider-top">
-                          <span class="slider-name">自動判定の余裕</span>
-                          <span class="info" data-tip="自動で決めたしきい値に足す余白です。大きくすると、少し離れた色も代表色の仲間として扱うため、マゼンタが減ります。小さくすると判定が厳しくなります。手動のときは使いません。">ⓘ</span>
-                          <span class="slider-val" id="vMargin">5</span>
+                          <span class="slider-name">検出感度</span>
+                          <span class="info" data-tip="シーンの切り替わり（カット）を見つける感度です。HSVヒストグラムの変化がこの値を超えるとカットと判定します。小さいほど敏感（カットが増える）、大きいほど鈍感。0〜1スケールで目安は0.18前後。">ⓘ</span>
+                          <span class="slider-val" id="vCutSens">0.18</span>
                         </div>
-                        <input id="sMargin" type="range" min="0" max="30" step="1" value="5">
+                        <input id="sCutSens" type="range" min="0.02" max="0.5" step="0.01" value="0.18">
+                      </div>
+                      <div class="slider-row">
+                        <div id="targetScenesField" class="slider-field flex1" hidden>
+                          <div class="slider-top">
+                            <span class="slider-name">シーン数</span>
+                            <span class="info" data-tip="分けたいシーン数を指定します。例: 8シーンなら、変化が大きい7カットを選びます。">ⓘ</span>
+                            <span class="slider-val" id="vTargetScenes">8</span>
+                          </div>
+                          <input id="sTargetScenes" type="range" min="2" max="40" step="1" value="8">
+                        </div>
+                        <div class="slider-field flex1">
+                          <div class="slider-top">
+                            <span class="slider-name">最短シーン秒</span>
+                            <span class="info" data-tip="これより短い区間は作りません。近すぎるカットの誤検出を抑えます。">ⓘ</span>
+                            <span class="slider-val" id="vMinShot">1</span>
+                          </div>
+                          <input id="sMinShot" type="range" min="0.2" max="10" step="0.1" value="1">
+                        </div>
+                      </div>
+                      <div class="slider-row">
+                        <div class="slider-field flex1">
+                          <div class="slider-top">
+                            <span class="slider-name">サブ分割秒（0=なし）</span>
+                            <span class="info" data-tip="カットが無くても被写体が徐々に変わる長いシーン（AI動画のモーフ等）を、この秒数ごとにさらに分割します。0で無効。">ⓘ</span>
+                            <span class="slider-val" id="vSubshot">0</span>
+                          </div>
+                          <input id="sSubshot" type="range" min="0" max="30" step="0.5" value="0">
+                        </div>
+                        <div class="slider-field flex1">
+                          <div class="slider-top">
+                            <span class="slider-name">探索間隔</span>
+                            <span class="info" data-tip="粗探索のサンプル間隔です。小さいほど精密（遅い）、大きいほど高速（取りこぼしやすい）。">ⓘ</span>
+                            <span class="slider-val" id="vDetectStride">3</span>
+                          </div>
+                          <input id="sDetectStride" type="range" min="1" max="15" step="1" value="3">
+                        </div>
+                      </div>
                       </div>
 
                       <div class="adv-reset-row">
@@ -223,11 +252,21 @@
 
               <!-- ============ ANALYZING ============ -->
               <section id="analyzing" class="step" hidden>
-                <div class="step-eyebrow blue">STEP 2 / 4 — 処理中</div>
+                <div class="step-eyebrow blue">STEP 2 / 5 — 処理中</div>
                 <h2 class="step-title">色を分析しています…</h2>
                 <p id="analyzingDesc" class="step-desc">動画を順に処理しています。動画ごとに進みぐあいが表示されます。</p>
 
                 <div id="analyzingList" class="proc-list"></div>
+                <div id="scenePreviewBox" class="scene-preview-box" hidden>
+                  <div class="scene-preview-head">
+                    <span id="scenePreviewTitle">パレット分析に使うシーン</span>
+                  </div>
+                  <div id="scenePreviewList" class="scene-preview-list"></div>
+                  <div id="scenePreviewActions" class="scene-preview-actions" hidden>
+                    <button id="scenePreviewBack" type="button" class="btn-ghost">← 戻る</button>
+                    <button id="scenePreviewConfirm" type="button" class="btn-primary">このフレームでパレット分析を開始</button>
+                  </div>
+                </div>
 
                 <div class="analyzing-foot">
                   <span id="elapsedText" class="muted-num">経過 0 秒</span>
@@ -246,7 +285,7 @@
               <section id="step3" class="step" hidden>
                 <div class="step3-head">
                   <div>
-                    <div class="step-eyebrow">STEP 3 / 4</div>
+                    <div class="step-eyebrow">STEP 3 / 5</div>
                     <h2 class="step-title">仕上がりを確認する</h2>
                   </div>
                   <div class="step3-actions">
@@ -263,19 +302,18 @@
                         <option value="4">4x</option>
                       </select>
                     </label>
-                    <button id="playBtn" type="button" class="btn-primary sm">▶ 再生</button>
-                    <button id="loopBtn" type="button" class="btn-ghost">🔁 連続再生</button>
+                    <button id="playBtn" type="button" class="btn-primary sm" title="動画を最後まで再生し、終わったら先頭から繰り返します">▶ 再生</button>
+                    <button id="frameBackBtn" type="button" class="btn-ghost" title="1フレーム戻す">◀ コマ戻し</button>
+                    <button id="frameFwdBtn" type="button" class="btn-ghost" title="1フレーム進める">コマ送り ▶</button>
                     <button id="previewLargeBtn" type="button" class="btn-ghost">⛶ 拡大表示</button>
                   </div>
                 </div>
 
+                <button id="toStep4Btn" type="button" class="btn-primary block step3-next-top">次へ：色を統合する →</button>
+
                 <div id="step3Tabs" class="vid-tabs" hidden></div>
+                <div id="sceneTabs" class="scene-tabs" hidden></div>
                 <p class="step-desc">表示中：<b id="activeName">—</b> — 「▶ 再生」で3つの映像を同期再生します。</p>
-                <div class="preview-control-row">
-                  <span class="preview-control-label">再生位置</span>
-                  <input id="previewSeek" class="preview-seek" type="range" min="0" max="0" step="0.01" value="0">
-                  <span id="previewTime" class="preview-time">0:00 / 0:00</span>
-                </div>
 
                 <div class="preview-sticky">
                   <div class="preview-grid">
@@ -284,13 +322,22 @@
                       <canvas id="cvOrig" class="preview-canvas"></canvas>
                     </div>
                     <div class="preview-cell">
-                      <div class="cell-head"><span>色を減らした映像</span><span class="info" data-tip="各ピクセルを一番近い代表色に置き換えた映像です。代表色の範囲外と判定された色は、確認しやすいようにマゼンタで表示します。">ⓘ</span></div>
-                      <canvas id="cvReduced" class="preview-canvas"></canvas>
+                      <div class="cell-head"><span>色を減らした映像</span><span class="info" data-tip="各ピクセルを一番近い代表色に置き換えた映像です。代表色の範囲外と判定された色は、確認しやすいようにマゼンタで表示します。マウスオーバーで拡大ルーペ、クリックでその色をOFF（最も近い別の色に振り替え）にできます。">ⓘ</span></div>
+                      <div class="reduced-canvas-wrap"><canvas id="cvReduced" class="preview-canvas"></canvas><div id="reducedLoupe" class="merge-loupe" hidden></div></div>
                     </div>
                     <div class="preview-cell">
                       <div class="cell-head"><span>はみ出し色マップ</span><span class="info" data-tip="黒は代表色の範囲内、マゼンタは範囲外です。しきい値を小さくするとマゼンタが増え、大きくすると減ります。">ⓘ</span></div>
                       <canvas id="cvMask" class="preview-canvas dark"></canvas>
                     </div>
+                  </div>
+
+                  <div class="preview-control-row">
+                    <span class="preview-control-label">再生位置</span>
+                    <span class="preview-seek-wrap">
+                      <div id="cutMarkers" class="cut-markers"></div>
+                      <input id="previewSeek" class="preview-seek" type="range" min="0" max="0" step="0.01" value="0">
+                    </span>
+                    <span id="previewTime" class="preview-time">0:00 / 0:00</span>
                   </div>
 
                   <div class="threshold-panel">
@@ -315,21 +362,27 @@
                   </div>
                 </div>
 
-                <div class="k-control">
-                  <span class="k-ctrl-label">代表色の数を変える</span>
-                  <span class="info" data-tip="代表色の数をあとから増減します。＋で細かい色違いを残しやすくなり、−で近い色をまとめてより大ざっぱにします。">ⓘ</span>
-                  <div class="k-stepper">
-                    <button id="kMinus" type="button" class="k-btn">−</button>
-                    <span id="kValue" class="k-value">—</span>
-                    <button id="kPlus" type="button" class="k-btn">＋</button>
+                <div class="threshold-panel k-panel">
+                  <div class="slider-top">
+                    <span class="slider-name strong">代表色の数を変える</span>
+                    <span class="info" data-tip="代表色の数をあとから増減します。＋で細かい色違いを残しやすくなり、−で近い色をまとめてより大ざっぱにします。">ⓘ</span>
+                    <span id="kRange" class="k-range"></span>
+                    <span class="val-stepper">
+                      <button id="kMinus" type="button" class="step-btn" title="代表色を1減らす">−</button>
+                      <span class="slider-val" id="kValue">—</span>
+                      <button id="kPlus" type="button" class="step-btn" title="代表色を1増やす">＋</button>
+                    </span>
                   </div>
-                  <span id="kRange" class="k-range"></span>
+                  <div class="slider-wrap">
+                    <input id="sK" type="range" min="2" max="32" step="1" value="8">
+                  </div>
                 </div>
+
 
                 <div class="palette-head">
                   <span class="palette-title">代表色（パレット）</span>
                   <span id="paletteCount" class="pill">0色</span>
-                  <span class="palette-hint">クリックで HEX をコピー</span>
+                  <span class="palette-hint">クリックでその色をOFF（最も近い別の色に振り替え）／もう一度でON</span>
                 </div>
                 <div id="palette" class="palette-grid"></div>
 
@@ -367,15 +420,95 @@
                     </div>
                   </div>
                 </div>
-
-                <button id="toStep4Btn" type="button" class="btn-primary block mt">次へ：保存する →</button>
               </section>
 
-              <!-- ============ STEP 4 ============ -->
+              <!-- ============ STEP 4 — 色を統合する ============ -->
               <section id="step4" class="step" hidden>
                 <div class="step-eyebrow-row">
-                  <div class="step-eyebrow">STEP 4 / 4</div>
-                  <button id="backToStep3" type="button" class="link-muted">← 確認に戻る</button>
+                  <div class="step-eyebrow">STEP 4 / 5</div>
+                  <button id="backToStep3" type="button" class="btn-ghost">← 確認に戻る</button>
+                </div>
+                <h2 class="step-title">色を統合する</h2>
+                <p class="step-desc">シーンをまたいで（または同じシーン内で）色を統合できます。2つのプレビューを見比べ、統合したい色を選んでまとめます。統合結果は保存（STEP5）にも反映されます。</p>
+
+                <div id="mergeNoScene" class="center-note" hidden>この動画にはカット（シーンの切り替わり）が無いため、1つのシーン内での色の統合のみ可能です。</div>
+
+                <div class="merge-toolbar">
+                  <button id="mergeModeBtn" type="button" class="btn-ghost">🎯 統合モード：オフ</button>
+                  <button id="mergeRegionBtn" type="button" class="btn-ghost" hidden>🧩 選択範囲：色全体</button>
+                  <span id="mergeModeHint" class="fmt-desc"></span>
+                </div>
+
+                <div id="mergePair" class="merge-pair">
+                  <div class="merge-col" data-side="L">
+                    <div class="merge-col-head">
+                      <span class="merge-col-title">左</span>
+                      <select id="mergeSceneL" class="fmt-select sm"></select>
+                    </div>
+                    <div class="merge-canvas-wrap"><canvas id="mergeCanvasL" class="merge-canvas"></canvas><div id="mergeLoupeL" class="merge-loupe" hidden></div><div id="mergeProgressL" class="merge-progress" hidden><div class="merge-progress-ring"><div class="merge-progress-hole"><span class="merge-progress-pct">0%</span></div></div><div class="merge-progress-label">フレームを読み込み中…</div><button id="mergeCancelL" class="merge-progress-cancel" type="button">キャンセル</button></div></div>
+                    <div class="preview-control-row compact">
+                      <button id="mergePlayL" type="button" class="btn-ghost sm">▶</button>
+                      <button id="mergeBackL" type="button" class="btn-ghost sm" title="1コマ戻す">◀|</button>
+                      <button id="mergeFwdL" type="button" class="btn-ghost sm" title="1コマ進める">|▶</button>
+                      <span class="preview-seek-wrap"><input id="mergeSeekL" class="preview-seek" type="range" min="0" max="0" step="0.01" value="0"></span>
+                      <select id="mergeRateL" class="speed-select sm"><option value="0.25">0.25x</option><option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option><option value="4">4x</option></select>
+                      <span id="mergeTimeL" class="preview-time">0:00 / 0:00</span>
+                    </div>
+                    <div class="merge-selected"><span class="merge-selected-label">選択色（左）</span><div id="mergeChipsL" class="merge-chips"></div></div>
+                  </div>
+
+                  <div class="merge-col" data-side="R">
+                    <div class="merge-col-head">
+                      <span class="merge-col-title">右</span>
+                      <select id="mergeSceneR" class="fmt-select sm"></select>
+                    </div>
+                    <div class="merge-canvas-wrap"><canvas id="mergeCanvasR" class="merge-canvas"></canvas><div id="mergeLoupeR" class="merge-loupe" hidden></div><div id="mergeProgressR" class="merge-progress" hidden><div class="merge-progress-ring"><div class="merge-progress-hole"><span class="merge-progress-pct">0%</span></div></div><div class="merge-progress-label">フレームを読み込み中…</div><button id="mergeCancelR" class="merge-progress-cancel" type="button">キャンセル</button></div></div>
+                    <div class="preview-control-row compact">
+                      <button id="mergePlayR" type="button" class="btn-ghost sm">▶</button>
+                      <button id="mergeBackR" type="button" class="btn-ghost sm" title="1コマ戻す">◀|</button>
+                      <button id="mergeFwdR" type="button" class="btn-ghost sm" title="1コマ進める">|▶</button>
+                      <span class="preview-seek-wrap"><input id="mergeSeekR" class="preview-seek" type="range" min="0" max="0" step="0.01" value="0"></span>
+                      <select id="mergeRateR" class="speed-select sm"><option value="0.25">0.25x</option><option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option><option value="4">4x</option></select>
+                      <span id="mergeTimeR" class="preview-time">0:00 / 0:00</span>
+                    </div>
+                    <div class="merge-selected"><span class="merge-selected-label">選択色（右）</span><div id="mergeChipsR" class="merge-chips"></div></div>
+                  </div>
+                </div>
+
+                <div id="mergeActionRow" class="merge-action-row" hidden>
+                  <button id="mergeDoBtn" type="button" class="btn-primary">選んだ色を統合する…</button>
+                  <button id="mergeClearSelBtn" type="button" class="btn-ghost">選択をクリア</button>
+                </div>
+
+                <div id="mergePanel" class="merge-panel" hidden>
+                  <div class="merge-panel-head">どの色にまとめますか？</div>
+                  <p class="fmt-desc">選んだ色のうち「まとめ先」を1つ選びます。ほかの色はこの色に置き換わります。左右のプレビューと下の3次元プロットで結果を確認できます。</p>
+                  <div id="mergeTargets" class="merge-targets"></div>
+                  <div class="merge-compare">
+                    <div class="cmp-col"><div class="cmp-title">シーン1</div><canvas id="cmpPlot1" class="cmp-plot"></canvas></div>
+                    <div class="cmp-col cmp-after"><div class="cmp-title">統合後</div><canvas id="cmpPlot2" class="cmp-plot"></canvas></div>
+                    <div id="cmpCol3" class="cmp-col"><div class="cmp-title">シーン2</div><canvas id="cmpPlot3" class="cmp-plot"></canvas></div>
+                  </div>
+                  <div class="cmp-hint">プロットはドラッグで回転できます（3つ同時に回ります）。</div>
+                  <div class="merge-panel-actions">
+                    <button id="mergeConfirmBtn" type="button" class="btn-primary">この色に統合する</button>
+                    <button id="mergeCancelBtn" type="button" class="btn-ghost">キャンセル</button>
+                  </div>
+                </div>
+
+                <div class="merge-groups">
+                  <div class="list-head"><span class="list-head-title">統合した色</span></div>
+                  <div id="mergeGroupList" class="merge-group-list"><p class="fmt-desc">まだ統合はありません。</p></div>
+                </div>
+
+                <button id="toStep5Btn" type="button" class="btn-primary block mt">次へ：保存する →</button>
+              </section>
+
+              <!-- ============ STEP 5 — 保存する ============ -->
+              <section id="step5" class="step" hidden>
+                <div class="step-eyebrow-row">
+                  <div class="step-eyebrow">STEP 5 / 5</div>
+                  <button id="backToStep4" type="button" class="btn-ghost">← 統合に戻る</button>
                 </div>
                 <h2 class="step-title">保存する</h2>
                 <p class="step-desc">保存したい動画を選び、保存形式を選んでください（音声は含まれません）。</p>
@@ -436,6 +569,7 @@
     <!-- hidden work elements -->
     <video id="workVideo" muted playsinline preload="auto"></video>
     <canvas id="exportCanvas" class="offscreen"></canvas>
-    <script src="./app.js?v=20260622-09"></script>
+    <script src="./icm.js?v=20260623-68"></script>
+    <script src="./app.js?v=20260623-68"></script>
   </body>
 </html>

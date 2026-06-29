@@ -1,0 +1,7 @@
+# Local scratch / backups / sample media — not part of the app
+/palette-reducer-app-*/
+/palette-reducer-app-*.zip
+/made/
+*.mp4
+*.webm
+*.mov
