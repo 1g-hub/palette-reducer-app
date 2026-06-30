@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260623-68";
+const APP_VERSION = "20260623-69";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -269,8 +269,8 @@ function init() {
   dom.mergeFwdR.addEventListener("click", () => mpStep("R", 1));
   dom.mergeSeekL.addEventListener("input", (e) => mpSeek("L", Number(e.target.value)));
   dom.mergeSeekR.addEventListener("input", (e) => mpSeek("R", Number(e.target.value)));
-  dom.mergeRateL.addEventListener("change", (e) => { const mp = mergePlayers.L; const vb = activeVideo(); if (vb && regionBusy(vb, "L")) return; if (mp) { mp.rate = Number(e.target.value) || 1; try { mp.video.playbackRate = mp.rate; } catch (e2) { /* ignore */ } } });
-  dom.mergeRateR.addEventListener("change", (e) => { const mp = mergePlayers.R; const vb = activeVideo(); if (vb && regionBusy(vb, "R")) return; if (mp) { mp.rate = Number(e.target.value) || 1; try { mp.video.playbackRate = mp.rate; } catch (e2) { /* ignore */ } } });
+  dom.mergeRateL.addEventListener("change", (e) => { const mp = mergePlayers.L; const vb = activeVideo(); if (vb && regionBusy(vb, "L")) { e.target.value = String((mp && mp.rate) || 1); return; } if (mp) { mp.rate = Number(e.target.value) || 1; try { mp.video.playbackRate = mp.rate; } catch (e2) { /* ignore */ } } });
+  dom.mergeRateR.addEventListener("change", (e) => { const mp = mergePlayers.R; const vb = activeVideo(); if (vb && regionBusy(vb, "R")) { e.target.value = String((mp && mp.rate) || 1); return; } if (mp) { mp.rate = Number(e.target.value) || 1; try { mp.video.playbackRate = mp.rate; } catch (e2) { /* ignore */ } } });
   dom.mergeModeBtn.addEventListener("click", toggleMergeMode);
   dom.mergeRegionBtn.addEventListener("click", toggleRegionMode);
   if (dom.mergeCancelL) dom.mergeCancelL.addEventListener("click", () => cancelRegionBuild("L"));
@@ -3111,7 +3111,7 @@ function toggleMergeMode() {
   if (v.mergeMode) { mpStop("L"); mpStop("R"); } // picking requires a still frame
   else closeMergePanel(v);
   syncMergeModeUI(v);
-  ["L", "R"].forEach((s) => { const mp = mergePlayers[s]; if (mp && !mp.playing) mpDraw(s); });
+  ["L", "R"].forEach((s) => { const mp = mergePlayers[s]; if (mp && !mp.playing && !regionBusy(v, s)) mpDraw(s); }); // don't redraw a side mid-region-capture (would jump its frame off the capture position)
 }
 // A merge needs at least two DIFFERENT color codes — selecting the same color (even via
 // two swatches / two regions) has no valid target, so the merge action stays hidden.
@@ -3143,6 +3143,7 @@ function syncMergeModeUI(v) {
 function toggleRegionMode() {
   const v = activeVideo(); if (!v || !v.mergeMode) return;
   if (anyRegionBusy(v)) { flashMergeHint("いま領域を計算中です…"); return; }
+  if (v._mergePanelOpen) { flashMergeHint("統合の確定中です。先に『統合する』か『キャンセル』を押してください"); return; }
   v.regionMode = !v.regionMode;
   syncMergeModeUI(v);
 }
@@ -3167,6 +3168,7 @@ function repIndexForColor(reps, d) {
 }
 function mergePickAt(side, clientX, clientY) {
   const v = activeVideo(); if (!v || !v.mergeMode) return;
+  if (v._mergePanelOpen) { flashMergeHint("統合の確定中です。先に『統合する』か『キャンセル』を押してください"); return; } // the panel is a snapshot of the selection — don't let a pick/region build change it under the open panel (would be dropped or silently folded in)
   const mp = mergePlayers[side]; if (!mp || !mp.scene || !mp.pickCtx) return;
   if (mp.playing) { flashMergeHint("⏸ 再生を止めてからクリックしてください"); return; }
   if (regionBusy(v, side)) { flashMergeHint("いまこの側で領域を計算中です…"); return; } // the OTHER side can still pick/build in parallel
@@ -3202,7 +3204,7 @@ function toggleMergeSelection(v, side, paletteId, repIndex, color) {
 function refreshMergeSelection(v) {
   renderMergeChips(v);
   dom.mergeActionRow.hidden = !(v.mergeMode && mergeHasDistinctColors(v));
-  ["L", "R"].forEach((s) => { const mp = mergePlayers[s]; if (mp && !mp.playing) mpDraw(s); });
+  ["L", "R"].forEach((s) => { const mp = mergePlayers[s]; if (mp && !mp.playing && !regionBusy(v, s)) mpDraw(s); }); // don't redraw a side mid-region-capture (would jump its frame off the capture position)
 }
 function renderMergeChips(v) {
   const sel = (v && v.mergeSel) || [];
@@ -3218,6 +3220,7 @@ function onMergeChipClick(e) {
   const btn = e.target.closest("[data-mc-id]"); if (!btn) return;
   const v = activeVideo(); if (!v) return;
   if (anyRegionBusy(v)) { flashMergeHint("いま領域を計算中です…"); return; } // don't edit the selection the build will push into
+  if (v._mergePanelOpen) { flashMergeHint("統合の確定中です。先に『統合する』か『キャンセル』を押してください"); return; } // deselecting under the open panel would still merge the removed color (frozen _mergePending)
   const s = (v.mergeSel || []).find((x) => String(x.id) === btn.dataset.mcId);
   if (!s) return;
   v.mergeSel = v.mergeSel.filter((x) => x !== s); // deselect immediately (no confirm)
@@ -3226,6 +3229,7 @@ function onMergeChipClick(e) {
 function clearMergeSelection() {
   const v = activeVideo(); if (!v || !(v.mergeSel && v.mergeSel.length)) return;
   if (anyRegionBusy(v)) { flashMergeHint("いま領域を計算中です…"); return; }
+  if (v._mergePanelOpen) { flashMergeHint("統合の確定中です。先に『統合する』か『キャンセル』を押してください"); return; }
   if (!window.confirm("選択した色をすべて解除しますか？")) return;
   v.mergeSel = [];
   refreshMergeSelection(v);
@@ -3234,7 +3238,7 @@ function mergeLoupeMove(side, clientX, clientY) {
   const v = activeVideo();
   const mp = mergePlayers[side];
   const loupe = side === "L" ? dom.mergeLoupeL : dom.mergeLoupeR;
-  if (!v || !v.mergeMode || !mp || !mp.pickCanvas || mp.playing) { loupe.hidden = true; return; }
+  if (!v || !v.mergeMode || !mp || !mp.pickCanvas || mp.playing || regionBusy(v, side)) { loupe.hidden = true; return; } // no loupe while this side is region-capturing (would overwrite the progress overlay/hint)
   const at = canvasPixelAt(side, clientX, clientY); if (!at) { loupe.hidden = true; return; }
   if (mp.frameDirty || !mp.loupeUrl) { mp.loupeUrl = mp.pickCanvas.toDataURL(); mp.frameDirty = false; }
   const cw = mp.pickCanvas.width, chh = mp.pickCanvas.height;
@@ -3811,7 +3815,7 @@ function attachCmpDrag() {
   window.addEventListener("mouseup", () => { drag = false; });
 }
 function redrawMergeAll(v) {
-  ["L", "R"].forEach((s) => { const mp = mergePlayers[s]; if (mp && !mp.playing) mpDraw(s); });
+  ["L", "R"].forEach((s) => { const mp = mergePlayers[s]; if (mp && !mp.playing && !regionBusy(v, s)) mpDraw(s); }); // don't redraw a side mid-region-capture (would jump its frame off the capture position)
   if (v && v._mergePanelOpen) drawMergeCompare(v);
 }
 function renderMergeTargets(v) {
