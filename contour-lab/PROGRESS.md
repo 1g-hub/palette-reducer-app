@@ -83,3 +83,22 @@ cd contour-lab/test && node e2e.js smoke    # → 9 PASS / 0 FAIL（要 npm inst
 - 復元はメタ即時＋フレーム RLE を `savedFrames` に読み込み、**デコードは初訪時に遅延**（大量所有フレームでも復元が軽い）。削除レイヤの残骸は onFrameEnter で現行 layer id にフィルタして無視。
 - 保存ステータスは計画のヘッダではなく**パネル内**に配置。
 - IndexedDB 不可オリジン（file://直開き）では自動保存を無効化しトースト表示のみ。JSON 入出力は file:// でも動作。
+
+### P1-3 一括書き出し / P1-4 マスク取込（完了 2026-07-03）
+- 純関数（`morpho.js` 新規）: **`maskToLines`**（内側境界。取込の唯一の受け口。fill は導出）＋`crc32`＋`zipStore`（無圧縮ZIP）。ContourLab に co-attach。
+- **maskToLines の要石プロパティを厳密テスト**: `maskToLines∘computeFill == mask` を単一凸形状300件＋donut/L字/2ブロブ/端接触/1px で検証（unit 52/0）。**既知の限界を明示テスト化**: 壁1pxの穴(3x3リング)は even-odd で塗られる＝復元不可（ユーザ手描きと同じモデル限界。実マスクでは実害無視可）。zipStore は system `unzip -t` でも検証。
+- `io.js`（新規）: P1-3 = 所有フレーム×色 → 白黒PNG(`mask_L{lid}_f{00000}.png`)＋`manifest.json` を ZIP 出力。P1-4 = PNG 取込（二値化→maskToLines→レイヤ、replace/OR、しきい値、ファイル名 f##### でフレーム対応）。index.html に「読み込み」節＋ZIP ボタン。
+- 版 11。`window.CLIO` をテスト公開。
+- **e2e `io-roundtrip` → 9/0**: 四角描画(29400px)→maskPngBytes(44155B)→実ブラウザで decode→imageToMask→新レイヤへ applyMaskToLayer→**元マスクと画素完全一致(29400 vs 29400)**。export ファイル名・manifest 検証。errs 0。
+
+**P1 完了時点の回帰基準**
+```
+node contour-lab/test/test-contour.js        # 52 PASS / 0 FAIL
+node contour-lab/test/check-version.js        # 6 refs all ?v=11
+cd contour-lab/test && node e2e.js <smoke|cow|persist|io-roundtrip>  # 11/13/11/9 PASS, 0 FAIL
+```
+
+**設計判断（P1-3/P1-4）**
+- `maskToLines`/`zipStore` は計画どおり `morpho.js`（RLE は P1-1 で contour-lab.js に置いた）。
+- ZIP 書き出しは v1 では**所有フレームのみ**（carry 実体化した「全フレーム」出力は後回し）。PNG は白黒 RGBA（厳密な8bitグレースケールではないが機能的に等価、取込は輝度しきい値）。
+- ダウンロード捕捉に依存しないよう `buildExportFiles()`/`maskPngBytes()` を公開し、PNG往復を実ブラウザのコーデックで検証。

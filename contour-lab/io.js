@@ -1,0 +1,104 @@
+'use strict';
+/* io.js (P1-3 / P1-4) — 一括書き出し(ZIP)とマスクPNG取込。
+   書き出し: 所有フレーム×レイヤ を白黒PNG(mask_L{lid}_f{00000}.png)＋manifest.json で ZIP。
+   取込: PNG → 二値化 → maskToLines → レイヤへ（fill は導出）。取込は全ての外部マスクの共通受け口。 */
+(() => {
+  if (!window.CL) return;
+  const CL = window.CL, S = CL.S, CLab = window.ContourLab, $ = (id) => document.getElementById(id);
+  const pad5 = (n) => String(n).padStart(5, '0');
+
+  // ---- フレーム×レイヤの lines（所有 in-memory 優先、無ければ savedFrames の RLE） ----
+  function getLines(f, lid) {
+    const d = S.frames.get(f);
+    if (d) { const a = d.lines.get(lid); if (a && !d.sharedLids.has(lid)) return a; }
+    const rec = S.savedFrames && S.savedFrames.get(f);
+    if (rec && rec[lid]) return CLab.bitmapFromRle(rec[lid], S.W * S.H);
+    return null;
+  }
+  // 書き出し対象フレーム（所有 in-memory ∪ savedFrames）昇順
+  function exportFrameList() {
+    const set = new Set();
+    for (const f of S.frames.keys()) if (CL.owned(f)) set.add(f);
+    if (S.savedFrames) for (const f of S.savedFrames.keys()) set.add(f);
+    return [...set].sort((a, b) => a - b);
+  }
+  const toBytes = (blob) => blob.arrayBuffer().then((b) => new Uint8Array(b));
+  function maskPngBytes(f, lid) {
+    const W = S.W, H = S.H, N = W * H, lines = getLines(f, lid); if (!lines) return null;
+    const fill = CLab.computeFill(lines, W, H);
+    const c = document.createElement('canvas'); c.width = W; c.height = H; const ctx = c.getContext('2d');
+    const img = ctx.createImageData(W, H), px = img.data;
+    for (let i = 0, p = 0; i < N; i++, p += 4) { const on = (lines[i] || fill[i]) ? 255 : 0; px[p] = px[p + 1] = px[p + 2] = on; px[p + 3] = 255; }
+    ctx.putImageData(img, 0, 0);
+    return new Promise((res) => c.toBlob((b) => res(b ? toBytes(b) : null), 'image/png'));
+  }
+  async function buildExportFiles() {
+    const frames = exportFrameList(), files = [], usedFrames = [];
+    for (const f of frames) {
+      let anyLayer = false;
+      for (const L of S.layers) { const bytesP = maskPngBytes(f, L.id); if (!bytesP) continue; const bytes = await bytesP; if (bytes) { files.push({ name: 'mask_L' + L.id + '_f' + pad5(f) + '.png', data: bytes }); anyLayer = true; } }
+      if (anyLayer) usedFrames.push(f);
+    }
+    const manifest = { format: 'contour-lab-masks', version: 1, fps: S.fps, W: S.W, H: S.H, total: S.total,
+      layers: S.layers.map((l) => ({ id: l.id, name: l.name, color: l.color })), frames: usedFrames };
+    files.push({ name: 'manifest.json', data: new TextEncoder().encode(JSON.stringify(manifest, null, 1)) });
+    return files;
+  }
+  async function exportMasksZip() {
+    if (!S.W) { CL.toast('動画が読み込まれていません'); return; }
+    CL.toast('書き出し中…');
+    const files = await buildExportFiles();
+    if (files.length <= 1) { CL.toast('書き出す所有フレームがありません'); return; }
+    const zip = CLab.zipStore(files);
+    const blob = new Blob([zip], { type: 'application/zip' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = (S.file ? S.file.name.replace(/\.[^.]+$/, '') : 'masks') + '_masks.zip'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    CL.toast('書き出し完了（' + (files.length - 1) + '枚）');
+  }
+
+  // ---- 取込: 画像 → 二値マスク（S.W×S.H に描画） ----
+  function imageToMask(bitmap, threshold) {
+    const W = S.W, H = S.H, N = W * H, c = document.createElement('canvas'); c.width = W; c.height = H;
+    const ctx = c.getContext('2d', { willReadFrequently: true }); ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(bitmap, 0, 0, W, H); // 解像度が違えば S.W×S.H に伸縮
+    const d = ctx.getImageData(0, 0, W, H).data, mask = new Uint8Array(N);
+    for (let i = 0, p = 0; i < N; i++, p += 4) { const lum = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2]; if (d[p + 3] > 127 && lum > threshold) mask[i] = 1; }
+    return mask;
+  }
+  // マスクをレイヤに適用（mode: 'replace' | 'or'）。差分 Undo。lines=maskToLines(mask)、fill 再計算。
+  function applyMaskToLayer(f, lid, mask, mode) {
+    const N = S.W * S.H, d = CL.fdata(f), newLines = CLab.maskToLines(mask, S.W, S.H);
+    const old = d.lines.get(lid) || new Uint8Array(N), target = new Uint8Array(N);
+    for (let i = 0; i < N; i++) target[i] = ((mode === 'or' ? (old[i] || newLines[i]) : newLines[i]) ? 1 : 0);
+    const changed = new Map();
+    for (let i = 0; i < N; i++) if ((old[i] ? 1 : 0) !== target[i]) changed.set(i, old[i] || 0);
+    if (!changed.size) return 0;
+    const w = CL.writableLines(f, lid); for (const [i] of changed) w[i] = target[i];
+    d.fill.set(lid, CL.newFill(w)); CL.commitChanges(f, lid, changed);
+    return changed.size;
+  }
+  const frameFromName = (name) => { const m = /f(\d{3,6})/.exec(name); return m ? +m[1] : null; };
+  async function decodeImage(fileOrBlob) { try { return await createImageBitmap(fileOrBlob); } catch (e) { return await new Promise((res, rej) => { const img = new Image(); img.onload = () => res(img); img.onerror = () => rej(new Error('画像デコード失敗')); img.src = URL.createObjectURL(fileOrBlob); }); } }
+
+  async function importMaskFiles(files) {
+    if (!S.W) { CL.toast('先に動画を読み込んでください'); return; }
+    const lid = S.activeLid, thr = +($('importThresh') ? $('importThresh').value : 127), mode = ($('importMode') && $('importMode').value) || 'replace';
+    const startF = S.cur >= 0 ? S.cur : 0;
+    let applied = 0, idx = 0;
+    const sorted = [...files].sort((a, b) => a.name.localeCompare(b.name));
+    for (const file of sorted) {
+      let bmp; try { bmp = await decodeImage(file); } catch (e) { continue; }
+      const mask = imageToMask(bmp, thr);
+      let f = frameFromName(file.name); if (f == null) f = startF + idx; // 連番: ファイル名に f####### が無ければ現在フレームから順に
+      if (f < 0 || f >= S.total) { idx++; continue; }
+      applyMaskToLayer(f, lid, mask, mode); applied++; idx++;
+    }
+    CL.S.cur = -1; CL.requestFrame(S.want || 0); // 取込結果を再描画
+    CL.toast('マスクを取込みました（' + applied + '枚）');
+  }
+
+  // ---- UI 配線 ----
+  if ($('exportMasksZip')) $('exportMasksZip').addEventListener('click', exportMasksZip);
+  const imp = $('importMask'); if (imp) imp.addEventListener('change', (e) => { const fs = e.target.files; if (fs && fs.length) importMaskFiles([...fs]); imp.value = ''; });
+
+  window.CLIO = { buildExportFiles, exportFrameList, maskPngBytes, imageToMask, applyMaskToLayer, importMaskFiles, decodeImage, getLines };
+})();

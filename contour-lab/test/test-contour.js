@@ -1,4 +1,5 @@
 const A = require('../contour-lab.js');
+const M = require('../morpho.js');
 let pass = 0, fail = 0;
 function ok(cond, msg) { if (cond) { pass++; } else { fail++; console.log('  FAIL:', msg); } }
 const at = (arr, W, x, y) => arr[y * W + x];
@@ -140,6 +141,66 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
   const single = new Uint8Array(5); single[3] = 1; const sr = A.rleFromBitmap(single);
   ok(sr.length === 2 && sr[0] === 3 && sr[1] === 1, 'RLE of single px = run [3,1]');
   ok(A.bitmapFromRle(null, 5).every((v) => v === 0), 'bitmapFromRle(null) = all zeros');
+}
+
+// ---- maskToLines ∘ computeFill が mask を復元する（P1-4 の要石） ----
+{
+  const orInto = (a, b) => { const o = new Uint8Array(a.length); for (let i = 0; i < a.length; i++) o[i] = (a[i] || b[i]) ? 1 : 0; return o; };
+  const eqArr = (a, b) => { if (a.length !== b.length) return false; for (let i = 0; i < a.length; i++) if ((a[i] ? 1 : 0) !== (b[i] ? 1 : 0)) return false; return true; };
+  const borderHasNonMask = (m, W, H) => { for (let x = 0; x < W; x++) if (!m[x] || !m[(H - 1) * W + x]) return true; for (let y = 0; y < H; y++) if (!m[y * W] || !m[y * W + W - 1]) return true; return false; };
+  const round = (m, W, H) => orInto(M.maskToLines(m, W, H), A.computeFill(M.maskToLines(m, W, H), W, H));
+  let seed2 = 98765; const rnd2 = () => { seed2 = (seed2 * 1103515245 + 12345) & 0x7fffffff; return seed2 / 0x7fffffff; };
+  const ri = (a, b) => a + ((rnd2() * (b - a + 1)) | 0);
+  // 単一の凸形状（単連結）= even-odd で必ず復元可能なドメイン。ここでの失敗は maskToLines の真のバグ。
+  function genMask(W, H) {
+    const m = new Uint8Array(W * H);
+    if (rnd2() < 0.5) { const x0 = ri(0, W - 2), y0 = ri(0, H - 2), x1 = Math.min(W - 1, x0 + ri(2, 12)), y1 = Math.min(H - 1, y0 + ri(2, 12)); for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) m[y * W + x] = 1; }
+    else { const cx = ri(2, W - 3), cy = ri(2, H - 3), r = ri(2, 7); for (let y = Math.max(0, cy - r); y <= Math.min(H - 1, cy + r); y++) for (let x = Math.max(0, cx - r); x <= Math.min(W - 1, cx + r); x++) if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r) m[y * W + x] = 1; }
+    return m;
+  }
+  let tested = 0, skipped = 0, failMsg = '';
+  for (let t = 0; t < 300 && !failMsg; t++) {
+    const W = ri(12, 40), H = ri(12, 40), mask = genMask(W, H);
+    let pop = 0; for (let i = 0; i < mask.length; i++) pop += mask[i];
+    if (!pop || !borderHasNonMask(mask, W, H)) { skipped++; continue; } // 空 or 外部シード無(画像全面被覆)
+    if (!eqArr(round(mask, W, H), mask)) failMsg = 'W=' + W + ' H=' + H + ' t=' + t; else tested++;
+  }
+  ok(!failMsg, 'maskToLines∘computeFill reconstructs ' + tested + ' single convex shapes' + (failMsg ? ' FAIL@' + failMsg : '') + ' (' + skipped + ' degenerate skipped)');
+  // maskToLines の定義（内側境界）を直接検証: 5x5 塗り四角の内側境界＝外周リング（中心のみ非線）
+  { const m = new Uint8Array(49); for (let y = 1; y <= 5; y++) for (let x = 1; x <= 5; x++) m[y * 7 + x] = 1; const L = M.maskToLines(m, 7, 7); ok(L[3 * 7 + 3] === 0 && L[1 * 7 + 1] === 1 && L[2 * 7 + 2] === 0, 'maskToLines = inner boundary (center non-line, corner is line, 1-in interior non-line)'); }
+  // 複雑だが壁の厚い形状（代表的な実マスク）
+  const L_shape = new Uint8Array(100); for (let y = 1; y <= 8; y++) for (let x = 1; x <= 3; x++) L_shape[y * 10 + x] = 1; for (let y = 6; y <= 8; y++) for (let x = 1; x <= 8; x++) L_shape[y * 10 + x] = 1;
+  ok(eqArr(round(L_shape, 10, 10), L_shape), 'roundtrip: L-shape (thick, non-convex)');
+  const two = new Uint8Array(120); for (let y = 2; y <= 5; y++) for (let x = 1; x <= 4; x++) two[y * 12 + x] = 1; for (let y = 3; y <= 7; y++) for (let x = 7; x <= 10; x++) two[y * 12 + x] = 1;
+  ok(eqArr(round(two, 12, 10), two), 'roundtrip: two disjoint blobs');
+  // 既知の限界（黙って壊れないよう明示テスト）: 壁1pxの穴(3x3リングの中心)は even-odd で塗られる＝復元は穴を埋める。
+  // 一方、壁2px以上の穴（上のdonut）は保持される。実マスク(キャラ輪郭)では細壁の穴はほぼ無く実害は無視できる。
+  { const W = 5, H = 5, m = new Uint8Array(W * H); for (let y = 1; y <= 3; y++) for (let x = 1; x <= 3; x++) m[y * W + x] = 1; m[2 * W + 2] = 0; const r = round(m, W, H); ok(r[2 * W + 2] === 1, 'known limit: 1px-walled hole (3x3 ring) is filled by even-odd — documented model limitation'); }
+  // 手作りケース
+  const sq = new Uint8Array(81); for (let y = 2; y <= 6; y++) for (let x = 2; x <= 6; x++) sq[y * 9 + x] = 1;
+  ok(eqArr(round(sq, 9, 9), sq), 'roundtrip: solid square');
+  const dn = new Uint8Array(81); for (let y = 1; y <= 7; y++) for (let x = 1; x <= 7; x++) dn[y * 9 + x] = 1; for (let y = 3; y <= 5; y++) for (let x = 3; x <= 5; x++) dn[y * 9 + x] = 0;
+  ok(eqArr(round(dn, 9, 9), dn), 'roundtrip: donut (hole preserved)');
+  const lh = new Uint8Array(81); for (let y = 0; y < 9; y++) for (let x = 0; x <= 4; x++) lh[y * 9 + x] = 1;
+  ok(eqArr(round(lh, 9, 9), lh), 'roundtrip: edge-touching left half');
+  const px = new Uint8Array(81); px[4 * 9 + 4] = 1;
+  ok(eqArr(round(px, 9, 9), px), 'roundtrip: single pixel');
+}
+
+// ---- zipStore（無圧縮ZIP）の構造と、あれば system unzip での検証 ----
+{
+  const enc = (s) => { const a = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i) & 255; return a; };
+  const zip = M.zipStore([{ name: 'a.txt', data: enc('hello') }, { name: 'dir/b.bin', data: new Uint8Array([1, 2, 3, 4, 5]) }]);
+  ok(zip[0] === 0x50 && zip[1] === 0x4b && zip[2] === 0x03 && zip[3] === 0x04, 'zip starts with local-file-header signature');
+  let eocd = -1; for (let i = zip.length - 22; i >= 0; i--) if (zip[i] === 0x50 && zip[i + 1] === 0x4b && zip[i + 2] === 0x05 && zip[i + 3] === 0x06) { eocd = i; break; }
+  ok(eocd >= 0, 'zip has EOCD record');
+  ok(eocd >= 0 && (zip[eocd + 10] | (zip[eocd + 11] << 8)) === 2, 'EOCD central-directory count = 2');
+  try {
+    const os = require('os'), fs = require('fs'), cp = require('child_process'), path = require('path');
+    let haveUnzip = true; try { cp.execSync('unzip -v', { stdio: 'pipe' }); } catch (e) { if (e.code === 'ENOENT') haveUnzip = false; }
+    if (!haveUnzip) { console.log('  (note: system unzip not installed — skipped unzip -t)'); }
+    else { const tmp = path.join(os.tmpdir(), 'cl-ziptest-' + process.pid + '.zip'); fs.writeFileSync(tmp, Buffer.from(zip)); let good = true; try { cp.execSync('unzip -t ' + tmp, { stdio: 'pipe' }); } catch (e) { good = false; } fs.unlinkSync(tmp); ok(good, 'system unzip -t validates the archive'); }
+  } catch (e) { console.log('  (note: unzip -t check skipped: ' + e.message + ')'); }
 }
 
 // ---- P0-3: index.html の ?v= キャッシュバスター整合 ----

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>輪郭ラボ — 手描き領域マスク (P1)</title>
-<link rel="stylesheet" href="./styles.css?v=10">
+<link rel="stylesheet" href="./styles.css?v=11">
 </head>
 <body>
 <header id="topbar">
@@ -105,8 +105,21 @@
     </section>
 
     <section class="psec">
+      <h3>読み込み（下描き取込）</h3>
+      <label class="btn wide" for="importMask">マスクPNGを読み込む</label>
+      <input type="file" id="importMask" accept="image/png,image/*" multiple hidden>
+      <label class="row"><span class="lbl">しきい値</span><input type="range" id="importThresh" min="1" max="254" step="1" value="127"></label>
+      <label class="row"><span class="lbl">合成</span>
+        <select id="importMode" class="num"><option value="replace">置換</option><option value="or">追加(OR)</option></select>
+      </label>
+      <p class="note small">選択中の色へ取込みます。ファイル名の f00000 でフレーム対応（無ければ現在フレームから連番）。SAM等の下描きの受け口。</p>
+    </section>
+
+    <section class="psec">
       <h3>書き出し</h3>
       <button id="exportPng" class="btn wide">このフレームのマスクをPNG保存</button>
+      <button id="exportMasksZip" class="btn wide">全マスクを書き出し（ZIP）</button>
+      <p class="note small">ZIPは所有フレーム×色を白黒PNG＋manifest.jsonで出力します。</p>
     </section>
 
     <section class="psec help">
@@ -132,8 +145,10 @@
   </main>
 </div>
 
-<script src="../icm.js?v=10"></script>
-<script src="./contour-lab.js?v=10"></script>
-<script src="./storage.js?v=10"></script>
+<script src="../icm.js?v=11"></script>
+<script src="./contour-lab.js?v=11"></script>
+<script src="./morpho.js?v=11"></script>
+<script src="./storage.js?v=11"></script>
+<script src="./io.js?v=11"></script>
 </body>
 </html>
