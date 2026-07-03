@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>輪郭ラボ — 手描き領域マスク (P1)</title>
+<link rel="stylesheet" href="./styles.css?v=7">
+</head>
+<body>
+<header id="topbar">
+  <div class="grp">
+    <label class="btn primary" for="fileInput">動画を開く</label>
+    <input type="file" id="fileInput" accept="video/*" hidden>
+    <span id="videoInfo" class="muted">動画未読込</span>
+  </div>
+  <div class="grp" id="frameNav" hidden>
+    <button id="firstFrame" class="btn icon" title="先頭 (Home)">⏮</button>
+    <button id="prevFrame" class="btn icon" title="前フレーム (←)">◀</button>
+    <span id="frameLabel" class="mono">0 / 0</span>
+    <button id="nextFrame" class="btn icon" title="次フレーム (→)">▶</button>
+    <button id="lastFrame" class="btn icon" title="末尾 (End)">⏭</button>
+    <input type="range" id="frameSlider" min="0" max="0" value="0" step="1">
+  </div>
+  <div class="grp" id="zoomGrp" hidden>
+    <button id="zoomFit" class="btn" title="全体表示 (F)">全体</button>
+    <button id="zoom100" class="btn" title="等倍 (1)">等倍</button>
+  </div>
+</header>
+
+<div id="body">
+  <aside id="panel" hidden>
+    <section class="psec">
+      <h3>動画</h3>
+      <div class="row">
+        <label class="lbl">fps</label>
+        <input type="number" id="fpsInput" class="num" min="1" max="120" step="0.001" value="30">
+        <span id="fpsDetected" class="muted small"></span>
+      </div>
+      <p class="note small">fpsは自動計測を試みます。ズレる場合は手入力で上書き（フレーム番号と書き出しの整合に効きます）。</p>
+    </section>
+
+    <section class="psec">
+      <h3>ツール</h3>
+      <div class="row btns">
+        <button id="toolPen" class="btn tool active" title="ペン (B)">✎ ペン</button>
+        <button id="toolEraser" class="btn tool" title="消しゴム (E)">◧ 消しゴム</button>
+      </div>
+      <label class="row check"><input type="checkbox" id="snapToggle" checked> 端点スナップ (S)</label>
+      <label class="row"><span class="lbl">消しゴム幅</span><input type="range" id="eraserSize" min="1" max="15" step="2" value="3"><span id="eraserSizeLabel" class="mono small">3</span></label>
+      <label class="row check"><input type="checkbox" id="objectEraser"> オブジェクト消しゴム（ドラッグで触れた塊ごと消去）</label>
+    </section>
+
+    <section class="psec">
+      <h3>色（マスク）</h3>
+      <div id="layerList" class="layerlist"></div>
+      <button id="addLayer" class="btn wide">＋ 色を追加</button>
+      <p class="note small">各色＝別マスク。名前欄はクリックで編集可。キャラを囲うと未割当の残りが自動で背景になります（P1では表示のみ）。</p>
+    </section>
+
+    <section class="psec">
+      <h3>領域整形（選択色）</h3>
+      <button id="cleanInterior" class="btn wide">内部の線を掃除（輪郭だけ残す）</button>
+      <button id="removeStray" class="btn wide">未使用の線を削除（塗りに無関係）</button>
+      <button id="clearColor" class="btn wide danger">この色の線を全消去</button>
+      <p class="note small">「内部の線を掃除」は塗りの内側に埋もれた線だけ消し、外側と穴（ドーナツ）の輪郭は残します。</p>
+    </section>
+
+    <section class="psec">
+      <h3>マスク表示</h3>
+      <label class="row check"><input type="checkbox" id="maskHidden"> 全マスクを隠す</label>
+      <label class="row"><span class="lbl">全体の濃さ</span><input type="range" id="maskOpacity" min="0" max="100" step="1" value="55"></label>
+    </section>
+
+    <section class="psec">
+      <h3>参照・補助</h3>
+      <label class="row check"><input type="checkbox" id="edgeToggle"> エッジ参照を表示 (D)</label>
+      <label class="row"><span class="lbl">エッジ濃さ</span><input type="range" id="edgeOpacity" min="0" max="100" step="1" value="70"></label>
+      <label class="row"><span class="lbl">元画像の濃さ</span><input type="range" id="srcOpacity" min="0" max="100" step="1" value="100"></label>
+      <label class="row check"><input type="checkbox" id="gridToggle" checked> 画素グリッド (G)</label>
+    </section>
+
+    <section class="psec">
+      <h3>フレーム引き継ぎ</h3>
+      <label class="row check"><input type="checkbox" id="carryToggle" checked> 次フレームへ引き継ぐ</label>
+      <p class="note small">空フレームへ移動すると前フレームの線をそのまま複製します（通常表示）。消しゴム/加筆で部分編集できます。</p>
+    </section>
+
+    <section class="psec">
+      <h3>編集</h3>
+      <div class="row btns">
+        <button id="undoBtn" class="btn" title="元に戻す (Ctrl+Z)">↶ 戻す</button>
+        <button id="redoBtn" class="btn" title="やり直し (Ctrl+Y)">↷ やり直し</button>
+      </div>
+      <button id="clearFrame" class="btn wide danger">このフレームの全色を消去</button>
+    </section>
+
+    <section class="psec">
+      <h3>書き出し</h3>
+      <button id="exportPng" class="btn wide">このフレームのマスクをPNG保存</button>
+    </section>
+
+    <section class="psec help">
+      <h3>操作</h3>
+      <ul class="small">
+        <li>左ドラッグ＝描画／消去</li>
+        <li>右・中・Space+ドラッグ＝移動</li>
+        <li>ホイール＝カーソル中心ズーム</li>
+        <li>B ペン / E 消しゴム / S スナップ / G グリッド / D エッジ</li>
+        <li>← → フレーム送り / F 全体 / 1 等倍</li>
+        <li>Ctrl+Z 戻す / Ctrl+Y やり直し</li>
+      </ul>
+    </section>
+  </aside>
+
+  <main id="stage">
+    <canvas id="view"></canvas>
+    <div id="empty" class="empty">
+      <p>「動画を開く」から動画を読み込んでください。</p>
+      <p class="small muted">100%ブラウザ内で動作します（アップロードなし）。カット検出・領域別パレットは次段階で追加予定。</p>
+    </div>
+    <div id="hint" class="hint" hidden></div>
+  </main>
+</div>
+
+<script src="./contour-lab.js?v=7"></script>
+</body>
+</html>

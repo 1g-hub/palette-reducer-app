@@ -1,0 +1,9 @@
+# テスト依存・出力
+test/node_modules/
+test/out/
+test/package-lock.json
+
+# モデル本体（重い・ライセンス別管理）。README と download.sh だけ追跡する。
+models/*
+!models/README.md
+!models/download.sh
