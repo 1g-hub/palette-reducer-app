@@ -111,3 +111,14 @@ Workflow（5次元レビュー→各所見を独立エージェントが反証�
 - **#4 [medium] OR取込が未訪問復元フレームでゼロと合成**（io.js）: → OR基点を `getLines(f,lid)`（savedFrames も見る）に変更（#3の復元と二重の保険）。
 - 反証された2件（記録）: applyProjectObject 前の debounce flush 競合（到達不能）／fps ガードが savedFrames を無視（軽微、ただし `anyOwned()` に `savedFrames.size` を追加して塞いだ）。
 - 版 12。**全回帰**: unit 52/0、e2e smoke11/cow15/persist11/io-roundtrip9/restore-merge11、すべて 0 FAIL。
+
+---
+
+## P2. カット検出・タイムライン（完了 2026-07-03）
+- `timeline.js`（新規）: 純関数 `detectCuts(dists, sens)`（`min(0.82, max(sens, median+3MAD))`、連続超過は先頭のみ。ContourLab に co-attach、unit 5件追加 → **unit 57/0**）。解析は**再生パス(rVFC)**で各フレームの HSV ヒスト距離（`ICM.hsvHist`/`histIntersectionDistance`、短辺96）。タイムライン canvas（シーン交互塗り/カット線/所有=実ティック・借用=淡ティック/再生ヘッド、クリック/ドラッグでシーク、右クリックでカット手動追加/削除）。
+- contour-lab.js: `sceneIndexOf(f)`、**maybeCarry にカット跨ぎガード**（P2-3）、`onTimelineRefresh`/`onSceneJump` フック、Shift+←→でシーン移動。storage は `cuts`＋`cutDists` を永続。
+- index.html: タイムライン帯＋「シーン/カット」節（カット検出ボタン・感度スライダ）。版 13。
+- **e2e `cuts` → 10/0**: 解析が距離配列生成、detectCuts の感度単調性、**手動カットで carry 跨ぎガード**（cut-3〜cut-1 は引き継ぎ、cut で遮断）。
+
+**重要な実測所見（正直な記録）**: テストクリップ `0513_03_moto.mp4` では**意味的シーン境界(≈505/600)での HSV 距離が小さく(≈0.03)**、**シーン内モーション(男子が頭を上げる frame106 で 0.17)が最大**になる。さらに再生サンプリングは run 毎にばらつく（343〜601 nonzero, max 0.17〜0.63）。→ **この AI 素材では HSV 自動カットは弱い**。detectCuts ロジック自体は正しい（合成データで検証済み）。実用は**感度スライダ＋タイムライン右クリックの手動カット編集**が本線。将来 P3 のエッジ場や色ベースの併用で改善余地。
+- 版 13。**全回帰**: unit 57/0、e2e smoke11/cow15/persist11/io-roundtrip9/restore-merge11/cuts10、すべて 0 FAIL。

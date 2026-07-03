@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>輪郭ラボ — 手描き領域マスク (P1)</title>
-<link rel="stylesheet" href="./styles.css?v=12">
+<link rel="stylesheet" href="./styles.css?v=13">
 </head>
 <body>
 <header id="topbar">
@@ -27,6 +27,8 @@
   </div>
 </header>
 
+<div id="timeline" hidden><canvas id="tlCanvas" title="クリック/ドラッグでシーク・右クリックでカット追加/削除"></canvas></div>
+
 <div id="body">
   <aside id="panel" hidden>
     <section class="psec">
@@ -37,6 +39,13 @@
         <span id="fpsDetected" class="muted small"></span>
       </div>
       <p class="note small">fpsは自動計測を試みます。ズレる場合は手入力で上書き（フレーム番号と書き出しの整合に効きます）。</p>
+    </section>
+
+    <section class="psec">
+      <h3>シーン / カット</h3>
+      <button id="analyzeCuts" class="btn wide">カット検出</button>
+      <label class="row"><span class="lbl">感度</span><input type="range" id="cutSens" min="0.1" max="0.82" step="0.01" value="0.5"><span id="cutProgress" class="muted small"></span></label>
+      <p class="note small">再生して色変化からカットを検出。タイムライン右クリックで手動追加/削除、Shift+←→でシーン移動。カット跨ぎは線を引き継ぎません。</p>
     </section>
 
     <section class="psec">
@@ -145,10 +154,11 @@
   </main>
 </div>
 
-<script src="../icm.js?v=12"></script>
-<script src="./contour-lab.js?v=12"></script>
-<script src="./morpho.js?v=12"></script>
-<script src="./storage.js?v=12"></script>
-<script src="./io.js?v=12"></script>
+<script src="../icm.js?v=13"></script>
+<script src="./contour-lab.js?v=13"></script>
+<script src="./morpho.js?v=13"></script>
+<script src="./storage.js?v=13"></script>
+<script src="./io.js?v=13"></script>
+<script src="./timeline.js?v=13"></script>
 </body>
 </html>

@@ -154,6 +154,8 @@
   }
   // 所有フレーム = 借用でない lines を1色でも実体で持つ（タイムライン/保存/書き出しの対象）。
   function owned(f) { const d = S.frames.get(f); if (!d) return false; for (const lid of d.lines.keys()) if (!d.sharedLids.has(lid)) return true; return false; }
+  // シーン番号 = f 以下のカット数（P2）。カット未検出なら全体で1シーン(0)。
+  function sceneIndexOf(f) { const cuts = S.cuts; if (!cuts || !cuts.length) return 0; let n = 0; for (let i = 0; i < cuts.length; i++) if (cuts[i] <= f) n++; return n; }
   // fill は導出物。現在フレーム＋直近数枚だけ保持し、それ以外は捨てる（再訪時に lines から再計算）。
   function retainFillsFor(f) {
     const lru = S.fillLRU, i = lru.indexOf(f); if (i >= 0) lru.splice(i, 1); lru.push(f);
@@ -227,7 +229,7 @@
         S.cur = f;
         if (S.onFrameEnter) S.onFrameEnter(f); // 保存済みフレームを遅延復元（carry より優先）
         if (S.carry && prev >= 0 && prev !== f) maybeCarry(prev, f);
-        ensureFills(f); retainFillsFor(f); S.maskDirty = true; updateUndoButtons(); render();
+        ensureFills(f); retainFillsFor(f); S.maskDirty = true; updateUndoButtons(); render(); if (S.onTimelineRefresh) S.onTimelineRefresh();
       }
     } finally { loading = false; }
   }
@@ -256,6 +258,7 @@
   }
   function maybeCarry(prev, f) {
     const dp = S.frames.get(prev); if (!dp || !dp.lines.size) return;
+    if (sceneIndexOf(prev) !== sceneIndexOf(f)) return; // カット跨ぎは引き継がない（P2-3）
     const df = fdata(f);
     // 追加式: 既にある色(所有/復元済み)は保持し、無い色だけ引き継ぐ。all-or-nothing だと復元フレームの
     // 所有レイヤが carry を丸ごと止め、他レイヤが消える（レビュー指摘#2）。
@@ -264,7 +267,7 @@
   }
   function ensureFills(f) { const d = S.frames.get(f); if (!d) return; for (const [lid, arr] of d.lines) if (!d.fill.has(lid)) d.fill.set(lid, newFill(arr)); }
   // 保存フック（storage.js が S.onFrameChanged/onMetaChanged/onFrameEnter/onVideoLoaded を差し込む。未ロード時は no-op）。
-  function notifyFrameChanged(f) { if (S.onFrameChanged) S.onFrameChanged(f); }
+  function notifyFrameChanged(f) { if (S.onFrameChanged) S.onFrameChanged(f); if (S.onTimelineRefresh) S.onTimelineRefresh(); }
   function notifyMetaChanged() { if (S.onMetaChanged) S.onMetaChanged(); }
   function anyOwned() { for (const f of S.frames.keys()) if (owned(f)) return true; return !!(S.savedFrames && S.savedFrames.size); }
 
@@ -547,8 +550,8 @@
       case 'd': S.edgeOn = !S.edgeOn; dom.edgeToggle.checked = S.edgeOn; render(); break;
       case 'f': fitView(); break;
       case '1': zoom100(); break;
-      case 'arrowleft': requestFrame(S.want - 1); e.preventDefault(); break;
-      case 'arrowright': requestFrame(S.want + 1); e.preventDefault(); break;
+      case 'arrowleft': if (e.shiftKey && S.onSceneJump) S.onSceneJump(-1); else requestFrame(S.want - 1); e.preventDefault(); break;
+      case 'arrowright': if (e.shiftKey && S.onSceneJump) S.onSceneJump(1); else requestFrame(S.want + 1); e.preventDefault(); break;
       case 'home': requestFrame(0); break;
       case 'end': requestFrame(S.total - 1); break;
       default: return;
@@ -561,7 +564,7 @@
   window.CL = {
     S, dom,
     requestFrame, scheduleRender, render, toast,
-    fdata, layerLines, writableLines, newFill, ensureFills, owned, anyOwned, retainFillsFor,
+    fdata, layerLines, writableLines, newFill, ensureFills, owned, anyOwned, sceneIndexOf, retainFillsFor,
     activeLayer, setActive, addLayer, setTool, renderLayers,
     commitChanges, pushUndo, updateUndoButtons,
     rebuildMask, exportPng,

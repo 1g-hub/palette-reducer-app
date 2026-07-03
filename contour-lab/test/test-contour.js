@@ -1,5 +1,6 @@
 const A = require('../contour-lab.js');
 const M = require('../morpho.js');
+const T = require('../timeline.js');
 let pass = 0, fail = 0;
 function ok(cond, msg) { if (cond) { pass++; } else { fail++; console.log('  FAIL:', msg); } }
 const at = (arr, W, x, y) => arr[y * W + x];
@@ -201,6 +202,28 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
     if (!haveUnzip) { console.log('  (note: system unzip not installed — skipped unzip -t)'); }
     else { const tmp = path.join(os.tmpdir(), 'cl-ziptest-' + process.pid + '.zip'); fs.writeFileSync(tmp, Buffer.from(zip)); let good = true; try { cp.execSync('unzip -t ' + tmp, { stdio: 'pipe' }); } catch (e) { good = false; } fs.unlinkSync(tmp); ok(good, 'system unzip -t validates the archive'); }
   } catch (e) { console.log('  (note: unzip -t check skipped: ' + e.message + ')'); }
+}
+
+// ---- detectCuts（P2 カット検出） ----
+{
+  // ノイズ0.1 + frame10 で大きなジャンプ0.9 → cut=[10]
+  const d = new Float32Array(20); for (let i = 1; i < 20; i++) d[i] = 0.1; d[10] = 0.9;
+  const c = T.detectCuts(d, 0.5);
+  ok(c.length === 1 && c[0] === 10, 'detectCuts finds the single spike at frame 10 (got ' + JSON.stringify(Array.from(c)) + ')');
+  // 全て平坦(0.1) → カット無し（0.1 < threshold 0.5）
+  const flat = new Float32Array(20).fill(0.1); flat[0] = 0;
+  ok(T.detectCuts(flat, 0.5).length === 0, 'detectCuts: flat distances -> no cuts');
+  // 連続超過は先頭のみ
+  const run = new Float32Array(20); for (let i = 1; i < 20; i++) run[i] = 0.1; run[8] = 0.9; run[9] = 0.9;
+  const cr = T.detectCuts(run, 0.5);
+  ok(cr.length === 1 && cr[0] === 8, 'detectCuts: consecutive over-threshold counts once at the start (got ' + JSON.stringify(Array.from(cr)) + ')');
+  // しきい値は 0.82 で上限（med+3MAD が大きくても 0.85 のスパイクは拾える）
+  const hi = new Float32Array(30); for (let i = 1; i < 30; i++) hi[i] = 0.3; hi[15] = 0.85;
+  const chi = T.detectCuts(hi, 0.5);
+  ok(chi.includes(15), 'detectCuts: 0.82 cap lets a 0.85 spike through even with elevated baseline');
+  // 2シーンの模擬（前半0.05, カット0.95, 後半0.05）
+  const two = new Float32Array(40); for (let i = 1; i < 40; i++) two[i] = 0.05; two[25] = 0.95;
+  ok(JSON.stringify(Array.from(T.detectCuts(two, 0.5))) === '[25]', 'detectCuts: two-scene clip -> cut at 25');
 }
 
 // ---- P0-3: index.html の ?v= キャッシュバスター整合 ----
