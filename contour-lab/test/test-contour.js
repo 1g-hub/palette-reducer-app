@@ -226,6 +226,21 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
   ok(JSON.stringify(Array.from(T.detectCuts(two, 0.5))) === '[25]', 'detectCuts: two-scene clip -> cut at 25');
 }
 
+// ---- sceneTarget（Shift+←→ シーン移動、次シーンの先頭へ） ----
+{
+  const st = T.sceneTarget;
+  ok(st([300], 100, 1) === 300, 'forward from mid scene0 -> next scene first frame (300)');
+  ok(st([300], 300, 1) === null, 'forward from last scene -> null (no jump to video end)');
+  ok(st([300], 400, 1) === null, 'forward in last scene -> null');
+  ok(st([], 100, 1) === null, 'forward with no cuts -> null (was jumping to last frame — the reported bug)');
+  ok(st([100, 300, 500], 350, 1) === 500, 'forward skips to the NEXT scene start (500), not current end');
+  ok(st([300], 400, -1) === 300, 'backward -> current scene first frame (300)');
+  ok(st([300], 300, -1) === 0, 'backward at scene start -> previous scene start (0)');
+  ok(st([300], 100, -1) === 0, 'backward in scene0 -> 0');
+  ok(st([300], 0, -1) === null, 'backward at very start -> null');
+  ok(st([100, 300, 500], 350, -1) === 300, 'backward -> current scene start (300)');
+}
+
 // ---- P0-3: index.html の ?v= キャッシュバスター整合 ----
 {
   const path = require('path');

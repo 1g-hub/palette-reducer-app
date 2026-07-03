@@ -24,6 +24,14 @@ module.exports = {
     const C = 300;
     await page.evaluate((c) => { window.CL.S.cuts = [c]; }, C);
     t.ok(await page.evaluate((c) => window.CL.sceneIndexOf(c - 1) !== window.CL.sceneIndexOf(c), C), 'sceneIndexOf changes across manual cut at ' + C);
+
+    // シーン移動: Shift+→ は「次シーンの最初のフレーム(300)」へ（動画末尾ではない）
+    await goto(100); await page.evaluate(() => window.CL.S.onSceneJump(1));
+    { const e2 = Date.now() + 8000; while (Date.now() < e2 && !(await page.evaluate(() => window.CL.S.cur === 300))) await sleep(60); }
+    t.ok(await page.evaluate(() => window.CL.S.cur === 300), 'Shift+→ jumps to NEXT scene first frame (300), not video end');
+    await goto(400); await page.evaluate(() => window.CL.S.onSceneJump(1)); await sleep(250);
+    t.ok(await page.evaluate(() => window.CL.S.cur === 400), 'Shift+→ in last scene stays put (does NOT jump to last frame)');
+
     await goto(C - 3);
     const box = await ctx.viewBox(); const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
     await page.mouse.move(cx, cy); await page.mouse.down(); await page.mouse.move(cx + 60, cy + 15); await page.mouse.up(); await sleep(120);

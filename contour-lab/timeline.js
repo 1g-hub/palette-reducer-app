@@ -17,7 +17,18 @@
     return cuts;
   }
 
-  const API = { detectCuts };
+  // シーン移動の目標フレーム（純関数）。starts=[0, ...cuts] が各シーンの先頭。
+  //  dir>0: cur より後の最初のシーン先頭（＝次シーンの最初のフレーム）。無ければ null。
+  //  dir<0: 現在シーンの先頭。既にそこなら前シーンの先頭。無ければ null。
+  function sceneTarget(cuts, cur, dir) {
+    const starts = [0, ...((cuts || []).slice().sort((a, b) => a - b))];
+    if (dir > 0) { for (const s of starts) if (s > cur) return s; return null; }
+    let idx = 0; for (let i = 0; i < starts.length; i++) if (starts[i] <= cur) idx = i;
+    const target = (starts[idx] === cur && idx > 0) ? starts[idx - 1] : starts[idx];
+    return target === cur ? null : target;
+  }
+
+  const API = { detectCuts, sceneTarget };
   if (typeof window !== 'undefined') window.ContourLab = Object.assign(window.ContourLab || {}, API);
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
   if (typeof document === 'undefined') return;
@@ -99,12 +110,11 @@
   }
   function seekFromEvent(e) { const cv = $('tlCanvas'); const r = cv.getBoundingClientRect(); const x = e.clientX - r.left; const f = Math.round((x / Math.max(1, r.width)) * (S.total - 1)); CL.requestFrame(f); }
 
-  // シーン頭/次シーンへ
+  // シーン頭/次シーンへ。Shift+→ は「次のシーンの最初のフレーム」、Shift+← は「現在(or前)シーンの先頭」。
   function sceneJump(dir) {
-    const cuts = (S.cuts || []); const bounds = [0, ...cuts, S.total];
-    const cur = S.cur < 0 ? 0 : S.cur;
-    if (dir < 0) { let target = 0; for (let i = 0; i < bounds.length - 1; i++) if (bounds[i] < cur) target = bounds[i]; else break; if (target === cur) { for (let i = bounds.length - 2; i >= 0; i--) if (bounds[i] < cur) { target = bounds[i]; break; } } CL.requestFrame(target); }
-    else { let target = S.total - 1; for (let i = 0; i < bounds.length - 1; i++) if (bounds[i] > cur) { target = bounds[i]; break; } CL.requestFrame(Math.min(S.total - 1, target)); }
+    const target = sceneTarget(S.cuts, S.cur < 0 ? 0 : S.cur, dir);
+    if (target == null) { CL.toast(dir > 0 ? '最後のシーンです（カット未検出ならタイムライン右クリックで追加）' : '最初のシーンです'); return; }
+    CL.requestFrame(target);
   }
 
   // ---- 配線 ----
