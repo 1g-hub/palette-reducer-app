@@ -41,7 +41,8 @@ async function run(scenario) {
     executablePath: CHROME,
     headless: 'new',
     args: ['--no-sandbox', '--disable-gpu', '--allow-file-access-from-files',
-      '--autoplay-policy=no-user-gesture-required', '--use-gl=swiftshader', '--window-size=1400,900'],
+      '--autoplay-policy=no-user-gesture-required', '--use-gl=swiftshader', '--window-size=1400,900',
+      '--js-flags=--expose-gc'], // window.gc() を許可（cow シナリオのヒープ計測を安定化）
   });
   let pass = 0, fail = 0;
   const errors = [];

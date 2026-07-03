@@ -88,8 +88,21 @@
     return out;
   }
 
-  const API = { snapFps, bresenham, computeFill, sobelRGBA, clamp };
-  if (typeof window !== 'undefined') window.ContourLab = API;
+  // ビットマップ(0/1) ⇄ RLE。RLE は線形インデックス上の [start,len, start,len, ...]（Int32Array）。
+  // スナップ型 Undo と保存でフルバッファの代わりに使い、一括操作のメモリ肥大を防ぐ。
+  function rleFromBitmap(u8) {
+    const runs = [], n = u8.length; let i = 0;
+    while (i < n) { if (u8[i]) { const s = i; i++; while (i < n && u8[i]) i++; runs.push(s, i - s); } else i++; }
+    return Int32Array.from(runs);
+  }
+  function bitmapFromRle(runs, N) {
+    const out = new Uint8Array(N); if (!runs) return out;
+    for (let k = 0; k < runs.length; k += 2) { const s = runs[k], len = runs[k + 1]; for (let j = 0; j < len; j++) out[s + j] = 1; }
+    return out;
+  }
+
+  const API = { snapFps, bresenham, computeFill, sobelRGBA, clamp, rleFromBitmap, bitmapFromRle };
+  if (typeof window !== 'undefined') window.ContourLab = Object.assign(window.ContourLab || {}, API);
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
   if (typeof document === 'undefined') return;
 
@@ -98,7 +111,7 @@
   const S = {
     video: null, url: null, W: 0, H: 0, fps: 30, duration: 0, total: 1, cur: -1, want: 0,
     frameBmp: null, frameImgData: null, bmpCache: new Map(), edgeCache: new Map(),
-    frames: new Map(), layers: [], activeLid: 0, nextLid: 1,
+    frames: new Map(), fillLRU: [], layers: [], activeLid: 0, nextLid: 1,
     tool: 'pen', snap: true, eraserSize: 3, objectEraser: false,
     showGrid: true, edgeOn: false, edgeOpacity: 0.7, srcOpacity: 1, maskOpacity: 0.55, maskHidden: false, carry: true,
     view: { scale: 1, tx: 0, ty: 0 }, minScale: 1,
@@ -121,8 +134,23 @@
 
   /* ============ 小物 ============ */
   const activeLayer = () => S.layers.find((l) => l.id === S.activeLid) || null;
-  function fdata(f) { let d = S.frames.get(f); if (!d) { d = { lines: new Map(), fill: new Map(), inherited: false, touched: new Set() }; S.frames.set(f, d); } return d; }
+  function fdata(f) { let d = S.frames.get(f); if (!d) { d = { lines: new Map(), fill: new Map(), sharedLids: new Set(), inherited: false, touched: new Set() }; S.frames.set(f, d); } return d; }
   function layerLines(f, lid, create) { const d = fdata(f); let a = d.lines.get(lid); if (!a && create) { a = new Uint8Array(S.W * S.H); d.lines.set(lid, a); } return a; }
+  // COW: 書き込み可能な lines を返す。maybeCarry で共有(借用)された配列は初回書込前にクローンして所有化する。
+  // 全ての書込経路（pen/erase/object/shape/clearColor/applyCh/取込）はこれ経由で lines を得ること。
+  function writableLines(f, lid) {
+    const d = fdata(f); let a = d.lines.get(lid);
+    if (a && d.sharedLids.has(lid)) { a = Uint8Array.from(a); d.lines.set(lid, a); d.sharedLids.delete(lid); d.fill.delete(lid); } // 借用→複製、派生の fill は破棄して再計算に回す
+    else if (!a) { a = new Uint8Array(S.W * S.H); d.lines.set(lid, a); d.sharedLids.delete(lid); }
+    return a;
+  }
+  // 所有フレーム = 借用でない lines を1色でも実体で持つ（タイムライン/保存/書き出しの対象）。
+  function owned(f) { const d = S.frames.get(f); if (!d) return false; for (const lid of d.lines.keys()) if (!d.sharedLids.has(lid)) return true; return false; }
+  // fill は導出物。現在フレーム＋直近数枚だけ保持し、それ以外は捨てる（再訪時に lines から再計算）。
+  function retainFillsFor(f) {
+    const lru = S.fillLRU, i = lru.indexOf(f); if (i >= 0) lru.splice(i, 1); lru.push(f);
+    while (lru.length > 3) { const g = lru.shift(); const d = S.frames.get(g); if (d) d.fill = new Map(); }
+  }
   function newFill(lines) { return lines ? computeFill(lines, S.W, S.H, S.comp, S.st) : new Uint8Array(S.W * S.H); }
   function toWorld(sx, sy) { const v = S.view; return [(sx - v.tx) / v.scale, (sy - v.ty) / v.scale]; }
   function stackOf(map, f) { let a = map.get(f); if (!a) { a = []; map.set(f, a); } return a; }
@@ -188,7 +216,7 @@
         try { await captureFrame(f); } catch (e) { toast('シーク失敗'); break; }
         S.cur = f;
         if (S.carry && prev >= 0 && prev !== f) maybeCarry(prev, f);
-        ensureFills(f); S.maskDirty = true; updateUndoButtons(); render();
+        ensureFills(f); retainFillsFor(f); S.maskDirty = true; updateUndoButtons(); render();
       }
     } finally { loading = false; }
   }
@@ -218,7 +246,7 @@
   function maybeCarry(prev, f) {
     const dp = S.frames.get(prev); if (!dp || !dp.lines.size) return;
     const df = fdata(f); if (df.lines.size) return;
-    for (const [lid, arr] of dp.lines) df.lines.set(lid, Uint8Array.from(arr));
+    for (const [lid, arr] of dp.lines) { df.lines.set(lid, arr); df.sharedLids.add(lid); } // COW: 参照共有（複製しない）。初回書込時に writableLines が複製する
     df.inherited = false; df.touched = new Set(); // 引き継ぎは通常表示（薄くしない）
   }
   function ensureFills(f) { const d = S.frames.get(f); if (!d) return; for (const [lid, arr] of d.lines) if (!d.fill.has(lid)) d.fill.set(lid, newFill(arr)); }
@@ -294,8 +322,8 @@
   }
 
   /* ============ 描画・消去（データのみ操作。表示は rebuildMask が担当＝選択色のみ演出） ============ */
-  function penInto(x0, y0, x1, y1) { const arr = layerLines(S.cur, S.activeLid, true); bresenham(arr, S.W, S.H, x0, y0, x1, y1, 1, S.strokeOld); }
-  function eraseInto(cx, cy) { const arr = layerLines(S.cur, S.activeLid, true), rr = S.eraserSize / 2, r = Math.ceil(rr), r2 = rr * rr, W = S.W, H = S.H; for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) { if (dx * dx + dy * dy > r2) continue; const x = cx + dx, y = cy + dy; if (x < 0 || y < 0 || x >= W || y >= H) continue; const i = y * W + x; if (arr[i]) { if (!S.strokeOld.has(i)) S.strokeOld.set(i, arr[i]); arr[i] = 0; } } }
+  function penInto(x0, y0, x1, y1) { const arr = writableLines(S.cur, S.activeLid); bresenham(arr, S.W, S.H, x0, y0, x1, y1, 1, S.strokeOld); }
+  function eraseInto(cx, cy) { const arr = writableLines(S.cur, S.activeLid), rr = S.eraserSize / 2, r = Math.ceil(rr), r2 = rr * rr, W = S.W, H = S.H; for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) { if (dx * dx + dy * dy > r2) continue; const x = cx + dx, y = cy + dy; if (x < 0 || y < 0 || x >= W || y >= H) continue; const i = y * W + x; if (arr[i]) { if (!S.strokeOld.has(i)) S.strokeOld.set(i, arr[i]); arr[i] = 0; } } }
   function eraseSeg(x0, y0, x1, y1) { let dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, err = dx - dy; for (;;) { eraseInto(x0, y0); if (x0 === x1 && y0 === y1) break; const e2 = 2 * err; if (e2 > -dy) { err -= dy; x0 += sx; } if (e2 < dx) { err += dx; y0 += sy; } } }
 
   /* ============ 入力（ポインタ） ============ */
@@ -335,7 +363,7 @@
     const f = S.cur, lid = S.activeLid, d = fdata(f);
     if (S.snap && S.tool === 'pen') { const snap = findSnap(f, lid, S.cursorWX, S.cursorWY); if (snap && (snap[0] !== S.lastPX || snap[1] !== S.lastPY)) penInto(S.lastPX, S.lastPY, snap[0], snap[1]); }
     if (S.strokeOld && S.strokeOld.size) {
-      const arr = layerLines(f, lid, true), before = pop(d.fill.get(lid)), n = S.strokeOld.size;
+      const arr = writableLines(f, lid), before = pop(d.fill.get(lid)), n = S.strokeOld.size;
       d.fill.set(lid, newFill(arr));
       commitChanges(f, lid, S.strokeOld);
       if (S.tool === 'pen' && pop(d.fill.get(lid)) - before > 0) toast('閉領域を検出：塗りました');
@@ -355,12 +383,13 @@
     pushUndo(f, { lid, idx, old, neu });
   }
   function shapeEdit(pred, msg) {
-    const f = S.cur, lid = S.activeLid, d = fdata(f), lines = d.lines.get(lid); if (!lines) { toast('この色に線がありません'); return; }
-    const fill = d.fill.get(lid) || newFill(lines), W = S.W, H = S.H, N = W * H, rm = [];
+    const f = S.cur, lid = S.activeLid, d = fdata(f), lines0 = d.lines.get(lid); if (!lines0) { toast('この色に線がありません'); return; }
+    const fill = d.fill.get(lid) || newFill(lines0), W = S.W, H = S.H, N = W * H, rm = [];
     // 判定は「元の」lines/fill だけを参照して消す画素を先に集める。走査中に lines を書き換えると、
     // 消したばかりの画素が「空き」に見え隣の内部線を輪郭と誤判定→1つ飛ばしで点線が残る（連打が要る）。
-    for (let p = 0; p < N; p++) { if (lines[p] && pred(lines, fill, p, p % W, (p / W) | 0)) rm.push(p); }
+    for (let p = 0; p < N; p++) { if (lines0[p] && pred(lines0, fill, p, p % W, (p / W) | 0)) rm.push(p); }
     if (!rm.length) { toast('対象なし'); return; }
+    const lines = writableLines(f, lid); // COW: 所有化してから一括適用
     const changed = new Map();
     for (let k = 0; k < rm.length; k++) { const p = rm[k]; changed.set(p, lines[p]); lines[p] = 0; }
     d.fill.set(lid, newFill(lines)); d.touched.add(lid); commitChanges(f, lid, changed); S.maskDirty = true; render(); updateUndoButtons(); toast(msg + `（${changed.size}px）`);
@@ -373,16 +402,18 @@
   // 1回の flood は commit せず strokeOld に累積し、線・塗りとも即0にして見た目を即反映。
   // 確定 fill と undo(線のみ) は指を離した時=endStroke で処理する。
   function objectFloodAt(px, py) {
-    const f = S.cur, lid = S.activeLid, d = fdata(f), lines = d.lines.get(lid); if (!lines || !S.strokeOld) return;
-    const fill = d.fill.get(lid), W = S.W, H = S.H;
+    const f = S.cur, lid = S.activeLid, d = fdata(f); if (!d.lines.get(lid) || !S.strokeOld) return;
+    const lines = writableLines(f, lid); // COW: 所有化してから塊を消す
+    let fill = d.fill.get(lid); if (!fill) { fill = newFill(lines); d.fill.set(lid, fill); }
+    const W = S.W, H = S.H;
     if (px < 0 || py < 0 || px >= W || py >= H) return;
-    const start = py * W + px, inR = (i) => (lines[i] || (fill && fill[i]));
+    const start = py * W + px, inR = (i) => (lines[i] || fill[i]);
     if (!inR(start)) return; // マスク外に触れても何もしない
     const seen = S.comp; seen.fill(0); const stk = S.st; let sp = 0; stk[sp++] = start; seen[start] = 1;
     while (sp) {
       const p = stk[--sp];
       if (lines[p]) { if (!S.strokeOld.has(p)) S.strokeOld.set(p, lines[p]); lines[p] = 0; }
-      if (fill && fill[p]) fill[p] = 0; // 塗りも即0（見た目のため。確定fillはendStrokeで再計算）
+      if (fill[p]) fill[p] = 0; // 塗りも即0（見た目のため。確定fillはendStrokeで再計算）
       const x = p % W, y = (p / W) | 0;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; const q = yy * W + xx; if (!seen[q] && inR(q)) { seen[q] = 1; stk[sp++] = q; } }
     }
@@ -391,9 +422,10 @@
   function objectEraseSeg(x0, y0, x1, y1) { let dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, err = dx - dy; for (;;) { objectFloodAt(x0, y0); if (x0 === x1 && y0 === y1) break; const e2 = 2 * err; if (e2 > -dy) { err -= dy; x0 += sx; } if (e2 < dx) { err += dx; y0 += sy; } } }
   // 要望2追加: 選択色の線だけを全消去。
   function clearColorAction() {
-    const f = S.cur, lid = S.activeLid, d = S.frames.get(f); if (!d) return; const arr = d.lines.get(lid); if (!arr) { toast('この色に線がありません'); return; }
-    const changed = new Map(); for (let i = 0; i < arr.length; i++) if (arr[i]) { changed.set(i, arr[i]); arr[i] = 0; }
+    const f = S.cur, lid = S.activeLid, d = S.frames.get(f); if (!d) return; const arr0 = d.lines.get(lid); if (!arr0) { toast('この色に線がありません'); return; }
+    const changed = new Map(); for (let i = 0; i < arr0.length; i++) if (arr0[i]) changed.set(i, arr0[i]);
     if (!changed.size) { toast('対象なし'); return; }
+    const arr = writableLines(f, lid); for (const [i] of changed) arr[i] = 0; // COW: 所有化してから消去
     d.fill.set(lid, newFill(arr)); commitChanges(f, lid, changed); S.maskDirty = true; render(); updateUndoButtons(); toast('この色の線を全消去');
   }
 
@@ -401,16 +433,16 @@
   function pushUndo(f, ch) { stackOf(S.undo, f).push(ch); S.redo.set(f, []); }
   function applyCh(f, ch, which) {
     const d = fdata(f);
-    if (ch.type === 'snap') { d.lines = new Map(); d.fill = new Map(); const m = which === 'old' ? ch.before : ch.after; for (const [lid, arr] of m) d.lines.set(lid, Uint8Array.from(arr)); ensureFills(f); return; }
-    const arr = layerLines(f, ch.lid, true); for (let k = 0; k < ch.idx.length; k++) arr[ch.idx[k]] = which === 'old' ? ch.old[k] : ch.neu[k]; d.fill.set(ch.lid, newFill(arr));
+    if (ch.type === 'snap') { d.lines = new Map(); d.fill = new Map(); d.sharedLids = new Set(); const m = which === 'old' ? ch.before : ch.after; for (const [lid, runs] of m) d.lines.set(lid, bitmapFromRle(runs, S.W * S.H)); ensureFills(f); return; }
+    const arr = writableLines(f, ch.lid); for (let k = 0; k < ch.idx.length; k++) arr[ch.idx[k]] = which === 'old' ? ch.old[k] : ch.neu[k]; d.fill.set(ch.lid, newFill(arr));
   }
   function doUndo() { const f = S.cur, st = S.undo.get(f); if (!st || !st.length) return; const ch = st.pop(); applyCh(f, ch, 'old'); stackOf(S.redo, f).push(ch); S.maskDirty = true; render(); updateUndoButtons(); }
   function doRedo() { const f = S.cur, st = S.redo.get(f); if (!st || !st.length) return; const ch = st.pop(); applyCh(f, ch, 'new'); stackOf(S.undo, f).push(ch); S.maskDirty = true; render(); updateUndoButtons(); }
   function updateUndoButtons() { const u = S.undo.get(S.cur), r = S.redo.get(S.cur); dom.undoBtn.disabled = !(u && u.length); dom.redoBtn.disabled = !(r && r.length); }
   function clearFrameAction() {
     const f = S.cur, d = S.frames.get(f); if (!d || !d.lines.size) return;
-    const before = new Map(); for (const [lid, arr] of d.lines) before.set(lid, Uint8Array.from(arr));
-    d.lines = new Map(); d.fill = new Map(); d.touched = new Set(); d.inherited = false;
+    const before = new Map(); for (const [lid, arr] of d.lines) before.set(lid, rleFromBitmap(arr));
+    d.lines = new Map(); d.fill = new Map(); d.sharedLids = new Set(); d.touched = new Set(); d.inherited = false;
     pushUndo(f, { type: 'snap', before, after: new Map() }); S.maskDirty = true; render(); updateUndoButtons(); toast('このフレームの全色を消去');
   }
 
@@ -420,7 +452,7 @@
   function delLayer(id) {
     if (S.layers.length <= 1) { toast('最低1色は必要です'); return; }
     S.layers = S.layers.filter((l) => l.id !== id);
-    for (const d of S.frames.values()) { d.lines.delete(id); d.fill.delete(id); }
+    for (const d of S.frames.values()) { d.lines.delete(id); d.fill.delete(id); if (d.sharedLids) d.sharedLids.delete(id); }
     if (S.activeLid === id) S.activeLid = S.layers[0].id;
     renderLayers(); S.maskDirty = true; render();
   }
@@ -501,4 +533,15 @@
     }
   });
   window.addEventListener('keyup', (e) => { if (e.code === 'Space') { S.space = false; dom.view.classList.remove('pan'); } });
+
+  /* ============ 内部API公開（P1-0）。テスト・後続フェーズ用。挙動は変えない。 ============ */
+  // 後続フェーズが必要とする既存の内部関数・状態を window.CL に載せる（P1-1以降が随時追記）。
+  window.CL = {
+    S, dom,
+    requestFrame, scheduleRender, render, toast,
+    fdata, layerLines, writableLines, newFill, ensureFills, owned, retainFillsFor,
+    activeLayer, setActive, addLayer, setTool,
+    commitChanges, pushUndo, updateUndoButtons,
+    rebuildMask, exportPng,
+  };
 })();

@@ -123,6 +123,25 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
   ok(fixed[1 * W + 1] === 1, 'FIX: outer contour preserved');
 }
 
+// ---- RLE roundtrip (rleFromBitmap / bitmapFromRle) — P1-1 のスナップUndo/保存の要 ----
+{
+  let seed = 12345; const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }; // 決定的PRNG（再現性）
+  let allEq = true, worst = '';
+  for (let t = 0; t < 100 && allEq; t++) {
+    const N = 1 + ((rnd() * 500) | 0), b = new Uint8Array(N), density = rnd() * 0.5;
+    for (let i = 0; i < N; i++) if (rnd() < density) b[i] = 1;
+    const back = A.bitmapFromRle(A.rleFromBitmap(b), N);
+    for (let i = 0; i < N; i++) if (b[i] !== back[i]) { allEq = false; worst = 'N=' + N + ' i=' + i; break; }
+  }
+  ok(allEq, 'RLE roundtrip on 100 random sparse bitmaps' + (allEq ? '' : ' FAIL@' + worst));
+  ok(A.rleFromBitmap(new Uint8Array(10)).length === 0, 'RLE of empty bitmap = no runs');
+  const fr = A.rleFromBitmap(new Uint8Array(8).fill(1));
+  ok(fr.length === 2 && fr[0] === 0 && fr[1] === 8, 'RLE of all-set = one run [0,8]');
+  const single = new Uint8Array(5); single[3] = 1; const sr = A.rleFromBitmap(single);
+  ok(sr.length === 2 && sr[0] === 3 && sr[1] === 1, 'RLE of single px = run [3,1]');
+  ok(A.bitmapFromRle(null, 5).every((v) => v === 0), 'bitmapFromRle(null) = all zeros');
+}
+
 // ---- P0-3: index.html の ?v= キャッシュバスター整合 ----
 {
   const path = require('path');

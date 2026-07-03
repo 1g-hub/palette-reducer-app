@@ -43,3 +43,30 @@ cd contour-lab/test && node e2e.js smoke    # → 9 PASS / 0 FAIL（要 npm inst
 **未検証・既知**
 - e2e は headless（`--use-gl=swiftshader`）。実ブラウザの対話操作は依然ユーザ未検証（メモリの但し書きは有効）。
 - `canvasPct` の getImageData は file:// + `--allow-file-access-from-files` 前提。
+
+---
+
+## P1. 安全網
+
+### P1-0 内部API（完了 2026-07-03）
+- index.html に `<script src="../icm.js?v=8">` を contour-lab.js の前に追加。全 `?v=` を 8 に統一。
+- IIFE 末尾で `window.CL`（S/dom + 既存内部関数群）を公開。挙動不変。
+- `window.ContourLab` のエクスポートを `Object.assign` に変更（後続モジュールが同名前空間に co-attach できるように）。
+- 検証: unit 34/0、smoke に CL/ICM 存在アサート追加 → **smoke 11/0**（icm.js が `../icm.js` から読める、window.CL/ICM 有り、描画/Undo/Redo 不変）。
+
+### P1-1 COW メモリ（完了 2026-07-03）
+- 純関数 `rleFromBitmap`/`bitmapFromRle`（線形index の [start,len,...]）を追加。unit に往復テスト（乱数疎ビットマップ100件＋端点）→ **unit 39/0**。
+- `maybeCarry` を**参照共有**化（複製せず sharedLids に記録）。`writableLines(f,lid)` を新設し、借用配列は初回書込前にクローン→所有化＋派生 fill 破棄。**全書込経路**（penInto/eraseInto/objectFloodAt/shapeEdit/clearColorAction/endStroke/applyCh-diff）を writableLines 経由に統一。
+- `fill` は導出物として現在＋直近3枚のみ保持（`retainFillsFor`、pumpLoad に組込）。`owned(f)` 追加。
+- スナップ型 Undo（clearFrameAction / applyCh type:'snap'）のフルバッファを **RLE 化**。delLayer は sharedLids も掃除。
+- 版を 9 に更新。`node --check` clean。
+- **e2e `cow` → 13/0**（実測値）:
+  - 40 フレーム carry スクラブでヒープ増加 **0.0MB**（非COW射影 ~158MB）。
+  - fill 保持フレーム = 3（≤3）。
+  - **エイリアシング無し**: f20 加筆後 f0/f19/f21 の line 画素数不変（174 のまま）。f20 は 174→314。Undo で 174 復帰。
+  - page errors 0。
+
+**設計判断（計画からの逸脱・記録）**
+- `rleFromBitmap`/`bitmapFromRle` は計画では morpho.js だが、contour-lab.js の Undo 機構と密結合＆ロード順依存を避けるため **contour-lab.js の純関数セクションに配置**（ContourLab 経由でテスト可能）。morpho.js は P1-4 の maskToLines/形態素用に新設予定。
+- carry は **lines のみ参照共有**（fill は共有しない）。ensureFills が現在フレームの fill を都度計算し retainFillsFor で 3 枚に制限 → fill エイリアシングの可能性自体を排除。
+- `cow` の規模は計画の 300 フレームではなく **40 フレーム1枚ずつ**（実 seek コストとのトレードオフ）。ヒープ判定は絶対値<60MB＋非COW射影のログで弁別。エイリアシングは少数フレームで厳密検証。

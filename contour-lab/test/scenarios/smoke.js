@@ -6,8 +6,10 @@ module.exports = {
   async fn(ctx) {
     const { page, t, sleep } = ctx;
 
-    const hasAPI = await page.evaluate(() => !!window.ContourLab);
-    t.ok(hasAPI, 'window.ContourLab present (api=yes)');
+    const api = await page.evaluate(() => ({ contourLab: !!window.ContourLab, cl: !!(window.CL && window.CL.S), icm: !!(window.ICM && window.ICM.hsvHist) }));
+    t.ok(api.contourLab, 'window.ContourLab present (api=yes)');
+    t.ok(api.cl, 'window.CL internal API present (P1-0)');
+    t.ok(api.icm, 'window.ICM loaded from ../icm.js (P1-0)');
 
     t.ok(await page.$eval('#undoBtn', (e) => e.disabled) === true, 'undo disabled before any stroke');
 
