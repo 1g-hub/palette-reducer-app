@@ -70,3 +70,16 @@ cd contour-lab/test && node e2e.js smoke    # → 9 PASS / 0 FAIL（要 npm inst
 - `rleFromBitmap`/`bitmapFromRle` は計画では morpho.js だが、contour-lab.js の Undo 機構と密結合＆ロード順依存を避けるため **contour-lab.js の純関数セクションに配置**（ContourLab 経由でテスト可能）。morpho.js は P1-4 の maskToLines/形態素用に新設予定。
 - carry は **lines のみ参照共有**（fill は共有しない）。ensureFills が現在フレームの fill を都度計算し retainFillsFor で 3 枚に制限 → fill エイリアシングの可能性自体を排除。
 - `cow` の規模は計画の 300 フレームではなく **40 フレーム1枚ずつ**（実 seek コストとのトレードオフ）。ヒープ判定は絶対値<60MB＋非COW射影のログで弁別。エイリアシングは少数フレームで厳密検証。
+
+### P1-2 保存/復元（完了 2026-07-03）
+- `storage.js`（新規）: IndexedDB(`contour-lab` v1, stores `meta`[keyPath sig] / `frames`[keyPath [sig,f]]) 自動保存＋復元。所有フレームのみ RLE 保存（fill/Undo/carry は非保存）。
+- contour-lab.js に保存フック（全て `if(S.onX)` ガードで未ロード時 no-op）: `notifyFrameChanged`（commitChanges/undo/redo/clearFrame）、`notifyMetaChanged`（addLayer/delLayer/レイヤ名・表示・濃さ/fps変更）、`onFrameEnter`（pumpLoad で carry より先に遅延復元）、`onVideoLoaded`（loadVideo で await 復元）。fps 変更ガード（所有フレーム有りで confirm）。
+- デバウンス 800ms 自動保存。プロジェクト JSON 書き出し/読み込み（`*.contourlab.json`）＋保存済み一覧UI＋保存ステータス表示。index.html に「プロジェクト」節、styles.css に対応CSS。
+- **e2e 基盤拡張**: driver に **http 静的配信**（`serve:true`）を追加。IndexedDB は **file:// 不透明オリジンでは使用不可**なので persist は http で実行。storage は file:// では `dbBroken` にフォールバック（描画機能自体は動く）。
+- 版 10。`window.CLStore`（buildProjectObject/applyProjectObject 等）をテスト用に公開。
+- **e2e `persist` → 11/0**: IndexedDB usable(http)、f0描画(192px)→flush→**リロード→再オープンで 192→192 復元**、**JSON 往復 192→192**、errs 0。smoke も storage.js 込みで 11/0（回帰なし）。
+
+**設計判断（P1-2）**
+- 復元はメタ即時＋フレーム RLE を `savedFrames` に読み込み、**デコードは初訪時に遅延**（大量所有フレームでも復元が軽い）。削除レイヤの残骸は onFrameEnter で現行 layer id にフィルタして無視。
+- 保存ステータスは計画のヘッダではなく**パネル内**に配置。
+- IndexedDB 不可オリジン（file://直開き）では自動保存を無効化しトースト表示のみ。JSON 入出力は file:// でも動作。

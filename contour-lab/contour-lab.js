@@ -174,10 +174,12 @@
     dom.fpsInput.value = (+S.fps.toFixed(3)).toString();
     dom.fpsDetected.textContent = fps > 0 ? `自動:${(+fps.toFixed(3))}` : '（自動計測不可・手入力）';
     S.total = Math.max(1, Math.round(S.duration * S.fps));
-    S.frames.clear(); S.undo.clear(); S.redo.clear(); S.bmpCache.clear(); S.edgeCache.clear();
+    S.frames.clear(); S.undo.clear(); S.redo.clear(); S.bmpCache.clear(); S.edgeCache.clear(); S.fillLRU = [];
     S.comp = new Int32Array(S.W * S.H); S.st = new Int32Array(S.W * S.H); S.maskImg = null;
     S.scr = document.createElement('canvas'); S.scr.width = S.W; S.scr.height = S.H; S.scrCtx = S.scr.getContext('2d', { willReadFrequently: true });
     S.maskCanvas = document.createElement('canvas'); S.maskCanvas.width = S.W; S.maskCanvas.height = S.H; S.maskCtx = S.maskCanvas.getContext('2d');
+    S.file = file; S.savedFrames = new Map(); S.sig = null;
+    if (S.onVideoLoaded) { try { await S.onVideoLoaded(file); } catch (e) { console.warn('project restore failed', e); } } // 保存済みプロジェクトの復元（layers/fps/cuts/savedFrames）
     if (!S.layers.length) addLayer();
     dom.videoInfo.textContent = `${S.W}×${S.H} / ${S.duration.toFixed(2)}s / ${S.total}フレーム`;
     dom.frameNav.hidden = false; dom.zoomGrp.hidden = false; dom.panel.hidden = false; dom.empty.style.display = 'none';
@@ -215,6 +217,7 @@
         const f = S.want, prev = S.cur;
         try { await captureFrame(f); } catch (e) { toast('シーク失敗'); break; }
         S.cur = f;
+        if (S.onFrameEnter) S.onFrameEnter(f); // 保存済みフレームを遅延復元（carry より優先）
         if (S.carry && prev >= 0 && prev !== f) maybeCarry(prev, f);
         ensureFills(f); retainFillsFor(f); S.maskDirty = true; updateUndoButtons(); render();
       }
@@ -250,6 +253,10 @@
     df.inherited = false; df.touched = new Set(); // 引き継ぎは通常表示（薄くしない）
   }
   function ensureFills(f) { const d = S.frames.get(f); if (!d) return; for (const [lid, arr] of d.lines) if (!d.fill.has(lid)) d.fill.set(lid, newFill(arr)); }
+  // 保存フック（storage.js が S.onFrameChanged/onMetaChanged/onFrameEnter/onVideoLoaded を差し込む。未ロード時は no-op）。
+  function notifyFrameChanged(f) { if (S.onFrameChanged) S.onFrameChanged(f); }
+  function notifyMetaChanged() { if (S.onMetaChanged) S.onMetaChanged(); }
+  function anyOwned() { for (const f of S.frames.keys()) if (owned(f)) return true; return false; }
 
   /* ============ マスク合成（ネイティブ解像度・バッファ再利用） ============ */
   function rebuildMask() {
@@ -381,6 +388,7 @@
     const arr = layerLines(f, lid, true), n = changed.size, idx = new Int32Array(n), old = new Uint8Array(n), neu = new Uint8Array(n);
     let k = 0; for (const [i, o] of changed) { idx[k] = i; old[k] = o; neu[k] = arr[i]; k++; }
     pushUndo(f, { lid, idx, old, neu });
+    notifyFrameChanged(f);
   }
   function shapeEdit(pred, msg) {
     const f = S.cur, lid = S.activeLid, d = fdata(f), lines0 = d.lines.get(lid); if (!lines0) { toast('この色に線がありません'); return; }
@@ -436,25 +444,25 @@
     if (ch.type === 'snap') { d.lines = new Map(); d.fill = new Map(); d.sharedLids = new Set(); const m = which === 'old' ? ch.before : ch.after; for (const [lid, runs] of m) d.lines.set(lid, bitmapFromRle(runs, S.W * S.H)); ensureFills(f); return; }
     const arr = writableLines(f, ch.lid); for (let k = 0; k < ch.idx.length; k++) arr[ch.idx[k]] = which === 'old' ? ch.old[k] : ch.neu[k]; d.fill.set(ch.lid, newFill(arr));
   }
-  function doUndo() { const f = S.cur, st = S.undo.get(f); if (!st || !st.length) return; const ch = st.pop(); applyCh(f, ch, 'old'); stackOf(S.redo, f).push(ch); S.maskDirty = true; render(); updateUndoButtons(); }
-  function doRedo() { const f = S.cur, st = S.redo.get(f); if (!st || !st.length) return; const ch = st.pop(); applyCh(f, ch, 'new'); stackOf(S.undo, f).push(ch); S.maskDirty = true; render(); updateUndoButtons(); }
+  function doUndo() { const f = S.cur, st = S.undo.get(f); if (!st || !st.length) return; const ch = st.pop(); applyCh(f, ch, 'old'); stackOf(S.redo, f).push(ch); S.maskDirty = true; render(); updateUndoButtons(); notifyFrameChanged(f); }
+  function doRedo() { const f = S.cur, st = S.redo.get(f); if (!st || !st.length) return; const ch = st.pop(); applyCh(f, ch, 'new'); stackOf(S.undo, f).push(ch); S.maskDirty = true; render(); updateUndoButtons(); notifyFrameChanged(f); }
   function updateUndoButtons() { const u = S.undo.get(S.cur), r = S.redo.get(S.cur); dom.undoBtn.disabled = !(u && u.length); dom.redoBtn.disabled = !(r && r.length); }
   function clearFrameAction() {
     const f = S.cur, d = S.frames.get(f); if (!d || !d.lines.size) return;
     const before = new Map(); for (const [lid, arr] of d.lines) before.set(lid, rleFromBitmap(arr));
     d.lines = new Map(); d.fill = new Map(); d.sharedLids = new Set(); d.touched = new Set(); d.inherited = false;
-    pushUndo(f, { type: 'snap', before, after: new Map() }); S.maskDirty = true; render(); updateUndoButtons(); toast('このフレームの全色を消去');
+    pushUndo(f, { type: 'snap', before, after: new Map() }); S.maskDirty = true; render(); updateUndoButtons(); notifyFrameChanged(f); toast('このフレームの全色を消去');
   }
 
   /* ============ レイヤ（色）UI ============ */
-  function addLayer() { const id = S.nextLid++; const color = DEFAULT_COLORS[(id - 1) % DEFAULT_COLORS.length].slice(); S.layers.push({ id, name: '', color, visible: true, opacity: 1 }); S.activeLid = id; renderLayers(); S.maskDirty = true; render(); }
+  function addLayer() { const id = S.nextLid++; const color = DEFAULT_COLORS[(id - 1) % DEFAULT_COLORS.length].slice(); S.layers.push({ id, name: '', color, visible: true, opacity: 1 }); S.activeLid = id; renderLayers(); S.maskDirty = true; render(); notifyMetaChanged(); }
   function setActive(id) { S.activeLid = id; renderLayers(); render(); }
   function delLayer(id) {
     if (S.layers.length <= 1) { toast('最低1色は必要です'); return; }
     S.layers = S.layers.filter((l) => l.id !== id);
     for (const d of S.frames.values()) { d.lines.delete(id); d.fill.delete(id); if (d.sharedLids) d.sharedLids.delete(id); }
     if (S.activeLid === id) S.activeLid = S.layers[0].id;
-    renderLayers(); S.maskDirty = true; render();
+    renderLayers(); S.maskDirty = true; render(); notifyMetaChanged();
   }
   function renderLayers() {
     dom.layerList.innerHTML = '';
@@ -463,9 +471,9 @@
       row.addEventListener('click', (e) => { if (e.target.closest('input,button')) return; setActive(L.id); });
       const sw = document.createElement('span'); sw.className = 'sw'; sw.style.background = `rgb(${L.color[0]},${L.color[1]},${L.color[2]})`; sw.title = '選択'; sw.addEventListener('click', () => setActive(L.id));
       const nm = document.createElement('input'); nm.className = 'nm'; nm.type = 'text'; nm.value = L.name; nm.placeholder = `色${pos + 1}`; nm.title = '名前（クリックで編集）';
-      nm.addEventListener('input', () => { L.name = nm.value; }); nm.addEventListener('focus', () => setActive(L.id));
-      const vis = document.createElement('input'); vis.type = 'checkbox'; vis.className = 'vis'; vis.checked = L.visible; vis.title = '表示'; vis.addEventListener('change', () => { L.visible = vis.checked; S.maskDirty = true; render(); });
-      const op = document.createElement('input'); op.type = 'range'; op.className = 'op'; op.min = 0; op.max = 100; op.value = Math.round(L.opacity * 100); op.title = '濃さ'; op.addEventListener('input', () => { L.opacity = op.value / 100; S.maskDirty = true; render(); });
+      nm.addEventListener('input', () => { L.name = nm.value; notifyMetaChanged(); }); nm.addEventListener('focus', () => setActive(L.id));
+      const vis = document.createElement('input'); vis.type = 'checkbox'; vis.className = 'vis'; vis.checked = L.visible; vis.title = '表示'; vis.addEventListener('change', () => { L.visible = vis.checked; S.maskDirty = true; render(); notifyMetaChanged(); });
+      const op = document.createElement('input'); op.type = 'range'; op.className = 'op'; op.min = 0; op.max = 100; op.value = Math.round(L.opacity * 100); op.title = '濃さ'; op.addEventListener('input', () => { L.opacity = op.value / 100; S.maskDirty = true; render(); notifyMetaChanged(); });
       const del = document.createElement('button'); del.className = 'del'; del.textContent = '✕'; del.title = '削除'; del.addEventListener('click', () => delLayer(L.id));
       row.append(sw, nm, vis, op, del); dom.layerList.appendChild(row);
     });
@@ -497,7 +505,11 @@
   dom.srcOpacity.addEventListener('input', () => { S.srcOpacity = dom.srcOpacity.value / 100; render(); });
   dom.gridToggle.addEventListener('change', () => { S.showGrid = dom.gridToggle.checked; render(); });
   dom.carryToggle.addEventListener('change', () => { S.carry = dom.carryToggle.checked; });
-  dom.fpsInput.addEventListener('change', () => { const f = parseFloat(dom.fpsInput.value); if (f > 0) { S.fps = f; S.total = Math.max(1, Math.round(S.duration * S.fps)); dom.frameSlider.max = S.total - 1; S.bmpCache.clear(); S.edgeCache.clear(); dom.frameLabel.textContent = `${S.cur} / ${S.total - 1}`; } });
+  dom.fpsInput.addEventListener('change', () => {
+    const f = parseFloat(dom.fpsInput.value); if (!(f > 0)) return;
+    if (anyOwned() && !confirm('描画済みフレームがあります。fpsを変えるとフレーム番号がズレる可能性があります。続けますか？')) { dom.fpsInput.value = (+S.fps.toFixed(3)).toString(); return; }
+    S.fps = f; S.total = Math.max(1, Math.round(S.duration * S.fps)); dom.frameSlider.max = S.total - 1; S.bmpCache.clear(); S.edgeCache.clear(); dom.frameLabel.textContent = `${S.cur} / ${S.total - 1}`; notifyMetaChanged();
+  });
   dom.undoBtn.addEventListener('click', doUndo);
   dom.redoBtn.addEventListener('click', doRedo);
   dom.clearFrame.addEventListener('click', clearFrameAction);
@@ -539,8 +551,8 @@
   window.CL = {
     S, dom,
     requestFrame, scheduleRender, render, toast,
-    fdata, layerLines, writableLines, newFill, ensureFills, owned, retainFillsFor,
-    activeLayer, setActive, addLayer, setTool,
+    fdata, layerLines, writableLines, newFill, ensureFills, owned, anyOwned, retainFillsFor,
+    activeLayer, setActive, addLayer, setTool, renderLayers,
     commitChanges, pushUndo, updateUndoButtons,
     rebuildMask, exportPng,
   };

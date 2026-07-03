@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>輪郭ラボ — 手描き領域マスク (P1)</title>
-<link rel="stylesheet" href="./styles.css?v=9">
+<link rel="stylesheet" href="./styles.css?v=10">
 </head>
 <body>
 <header id="topbar">
@@ -95,6 +95,16 @@
     </section>
 
     <section class="psec">
+      <h3>プロジェクト</h3>
+      <div class="row"><span id="saveStatus" class="muted small">—</span></div>
+      <button id="exportProject" class="btn wide">プロジェクトを書き出し（JSON）</button>
+      <label class="btn wide" for="importProject">プロジェクトを読み込み（JSON）</label>
+      <input type="file" id="importProject" accept=".json,application/json" hidden>
+      <div id="projectList" class="projlist small"></div>
+      <p class="note small">編集はブラウザ内(IndexedDB)に自動保存されます。書き出しは別PCへ移す用。</p>
+    </section>
+
+    <section class="psec">
       <h3>書き出し</h3>
       <button id="exportPng" class="btn wide">このフレームのマスクをPNG保存</button>
     </section>
@@ -122,7 +132,8 @@
   </main>
 </div>
 
-<script src="../icm.js?v=9"></script>
-<script src="./contour-lab.js?v=9"></script>
+<script src="../icm.js?v=10"></script>
+<script src="./contour-lab.js?v=10"></script>
+<script src="./storage.js?v=10"></script>
 </body>
 </html>

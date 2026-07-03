@@ -6,6 +6,7 @@ const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const http = require('http');
 
 const CLDIR = path.resolve(__dirname, '..');            // .../contour-lab
 const REPO = path.resolve(CLDIR, '..');                 // .../palette-reducer-app
@@ -34,9 +35,25 @@ function stageFiles() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// IndexedDB は file:// 不透明オリジンでは使えないので、必要なシナリオ(serve:true)は http で配信する。
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png' };
+function startServer(root) {
+  return new Promise((res) => {
+    const server = http.createServer((rq, rp) => {
+      let p = decodeURIComponent(rq.url.split('?')[0]); if (p === '/') p = '/contour-lab/index.html';
+      const fp = path.normalize(path.join(root, p));
+      if (!fp.startsWith(root)) { rp.writeHead(403); rp.end(); return; }
+      fs.readFile(fp, (err, data) => { if (err) { rp.writeHead(404); rp.end(); return; } rp.writeHead(200, { 'Content-Type': MIME[path.extname(fp)] || 'application/octet-stream' }); rp.end(data); });
+    });
+    server.listen(0, '127.0.0.1', () => res({ server, port: server.address().port }));
+  });
+}
+
 async function run(scenario) {
   const staged = stageFiles();
   fs.mkdirSync(OUT, { recursive: true });
+  let server = null, indexUrl = staged.indexUrl;
+  if (scenario.serve) { const s = await startServer(staged.base); server = s.server; indexUrl = 'http://127.0.0.1:' + s.port + '/contour-lab/index.html'; }
   const browser = await puppeteer.launch({
     executablePath: CHROME,
     headless: 'new',
@@ -63,7 +80,7 @@ async function run(scenario) {
       if (!benign) errors.push(s);
     });
 
-    await page.goto(staged.indexUrl, { waitUntil: 'domcontentloaded' });
+    await page.goto(indexUrl, { waitUntil: 'domcontentloaded' });
 
     const t = {
       ok(cond, msg) { if (cond) { pass++; console.log('  ok   ' + msg); } else { fail++; console.log('  FAIL ' + msg); } return !!cond; },
@@ -118,6 +135,7 @@ async function run(scenario) {
     fail++;
   } finally {
     try { await browser.close(); } catch (e) {}
+    try { if (server) server.close(); } catch (e) {}
     try { fs.rmSync(staged.base, { recursive: true, force: true }); } catch (e) {}
   }
 

@@ -93,3 +93,11 @@ body{
 }
 .help ul{margin:4px 0 0;padding-left:18px;color:var(--ink2)}
 .help li{margin:2px 0}
+
+/* project (P1-2) */
+.projlist{margin:6px 0;display:flex;flex-direction:column;gap:3px}
+.projrow{display:flex;align-items:center;gap:6px}
+.projname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink2)}
+.projname.cur{color:var(--ink)}
+.btn.xs{padding:1px 6px;font-size:11px}
+#saveStatus.danger{color:var(--danger)}
