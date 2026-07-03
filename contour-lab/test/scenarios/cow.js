@@ -61,6 +61,13 @@ module.exports = {
     await page.$eval('#undoBtn', (e) => e.click()); await sleep(120);
     t.ok(await linePop(20) === pop0, 'Undo restores f20 to f0 line count');
 
+    // bug#1 regression: 編集を carry 元(source)フレームに行っても、まだ借用している frame は不変
+    await goto(0);
+    await page.evaluate(() => window.CL.setTool('pen'));
+    await page.mouse.move(cx - 40, cy - 40); await page.mouse.down(); await page.mouse.move(cx - 90, cy - 20); await page.mouse.up(); await sleep(120);
+    t.ok(await linePop(0) > pop0, 'f0 (carry source) gained pixels after editing');
+    t.ok(await linePop(30) === pop0, 'f30 (still borrowing) UNCHANGED after editing SOURCE f0 (refcount COW, bug#1)');
+
     await ctx.shot('final');
     t.ok(ctx.errors.length === 0, 'no page errors (errs=0)' + (ctx.errors.length ? ': ' + ctx.errors.join(' | ') : ''));
   },

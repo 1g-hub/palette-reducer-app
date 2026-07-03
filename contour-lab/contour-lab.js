@@ -111,7 +111,7 @@
   const S = {
     video: null, url: null, W: 0, H: 0, fps: 30, duration: 0, total: 1, cur: -1, want: 0,
     frameBmp: null, frameImgData: null, bmpCache: new Map(), edgeCache: new Map(),
-    frames: new Map(), fillLRU: [], layers: [], activeLid: 0, nextLid: 1,
+    frames: new Map(), fillLRU: [], arrRefs: new WeakMap(), layers: [], activeLid: 0, nextLid: 1,
     tool: 'pen', snap: true, eraserSize: 3, objectEraser: false,
     showGrid: true, edgeOn: false, edgeOpacity: 0.7, srcOpacity: 1, maskOpacity: 0.55, maskHidden: false, carry: true,
     view: { scale: 1, tx: 0, ty: 0 }, minScale: 1,
@@ -138,10 +138,18 @@
   function layerLines(f, lid, create) { const d = fdata(f); let a = d.lines.get(lid); if (!a && create) { a = new Uint8Array(S.W * S.H); d.lines.set(lid, a); } return a; }
   // COW: 書き込み可能な lines を返す。maybeCarry で共有(借用)された配列は初回書込前にクローンして所有化する。
   // 全ての書込経路（pen/erase/object/shape/clearColor/applyCh/取込）はこれ経由で lines を得ること。
+  // 参照カウント(arrRefs)で「2フレーム以上が同じ配列を参照中か」を判定して複製する。sharedLids(借用マーカ)
+  // だけでは source 側(所有として貸出中)の編集を捕捉できず、借用フレームを in-place で壊す（レビュー指摘#1）。
   function writableLines(f, lid) {
     const d = fdata(f); let a = d.lines.get(lid);
-    if (a && d.sharedLids.has(lid)) { a = Uint8Array.from(a); d.lines.set(lid, a); d.sharedLids.delete(lid); d.fill.delete(lid); } // 借用→複製、派生の fill は破棄して再計算に回す
-    else if (!a) { a = new Uint8Array(S.W * S.H); d.lines.set(lid, a); d.sharedLids.delete(lid); }
+    if (a) {
+      const rc = S.arrRefs.get(a) || 1;
+      if (rc > 1) { // 他フレームと共有中 → 複製してから書く（source/borrower どちらの編集でも安全）
+        if (rc - 1 <= 1) S.arrRefs.delete(a); else S.arrRefs.set(a, rc - 1);
+        a = Uint8Array.from(a); d.lines.set(lid, a); d.fill.delete(lid);
+      }
+      d.sharedLids.delete(lid); // 書込後は所有（複製 or 単独参照）
+    } else { a = new Uint8Array(S.W * S.H); d.lines.set(lid, a); d.sharedLids.delete(lid); }
     return a;
   }
   // 所有フレーム = 借用でない lines を1色でも実体で持つ（タイムライン/保存/書き出しの対象）。
@@ -174,7 +182,7 @@
     dom.fpsInput.value = (+S.fps.toFixed(3)).toString();
     dom.fpsDetected.textContent = fps > 0 ? `自動:${(+fps.toFixed(3))}` : '（自動計測不可・手入力）';
     S.total = Math.max(1, Math.round(S.duration * S.fps));
-    S.frames.clear(); S.undo.clear(); S.redo.clear(); S.bmpCache.clear(); S.edgeCache.clear(); S.fillLRU = [];
+    S.frames.clear(); S.undo.clear(); S.redo.clear(); S.bmpCache.clear(); S.edgeCache.clear(); S.fillLRU = []; S.arrRefs = new WeakMap();
     S.comp = new Int32Array(S.W * S.H); S.st = new Int32Array(S.W * S.H); S.maskImg = null;
     S.scr = document.createElement('canvas'); S.scr.width = S.W; S.scr.height = S.H; S.scrCtx = S.scr.getContext('2d', { willReadFrequently: true });
     S.maskCanvas = document.createElement('canvas'); S.maskCanvas.width = S.W; S.maskCanvas.height = S.H; S.maskCtx = S.maskCanvas.getContext('2d');
@@ -248,15 +256,17 @@
   }
   function maybeCarry(prev, f) {
     const dp = S.frames.get(prev); if (!dp || !dp.lines.size) return;
-    const df = fdata(f); if (df.lines.size) return;
-    for (const [lid, arr] of dp.lines) { df.lines.set(lid, arr); df.sharedLids.add(lid); } // COW: 参照共有（複製しない）。初回書込時に writableLines が複製する
-    df.inherited = false; df.touched = new Set(); // 引き継ぎは通常表示（薄くしない）
+    const df = fdata(f);
+    // 追加式: 既にある色(所有/復元済み)は保持し、無い色だけ引き継ぐ。all-or-nothing だと復元フレームの
+    // 所有レイヤが carry を丸ごと止め、他レイヤが消える（レビュー指摘#2）。
+    for (const [lid, arr] of dp.lines) if (!df.lines.has(lid)) { df.lines.set(lid, arr); df.sharedLids.add(lid); S.arrRefs.set(arr, (S.arrRefs.get(arr) || 1) + 1); }
+    df.inherited = false;
   }
   function ensureFills(f) { const d = S.frames.get(f); if (!d) return; for (const [lid, arr] of d.lines) if (!d.fill.has(lid)) d.fill.set(lid, newFill(arr)); }
   // 保存フック（storage.js が S.onFrameChanged/onMetaChanged/onFrameEnter/onVideoLoaded を差し込む。未ロード時は no-op）。
   function notifyFrameChanged(f) { if (S.onFrameChanged) S.onFrameChanged(f); }
   function notifyMetaChanged() { if (S.onMetaChanged) S.onMetaChanged(); }
-  function anyOwned() { for (const f of S.frames.keys()) if (owned(f)) return true; return false; }
+  function anyOwned() { for (const f of S.frames.keys()) if (owned(f)) return true; return !!(S.savedFrames && S.savedFrames.size); }
 
   /* ============ マスク合成（ネイティブ解像度・バッファ再利用） ============ */
   function rebuildMask() {

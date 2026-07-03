@@ -102,3 +102,12 @@ cd contour-lab/test && node e2e.js <smoke|cow|persist|io-roundtrip>  # 11/13/11/
 - `maskToLines`/`zipStore` は計画どおり `morpho.js`（RLE は P1-1 で contour-lab.js に置いた）。
 - ZIP 書き出しは v1 では**所有フレームのみ**（carry 実体化した「全フレーム」出力は後回し）。PNG は白黒 RGBA（厳密な8bitグレースケールではないが機能的に等価、取込は輝度しきい値）。
 - ダウンロード捕捉に依存しないよう `buildExportFiles()`/`maskPngBytes()` を公開し、PNG往復を実ブラウザのコーデックで検証。
+
+### P1 レビュー（多エージェント敵対的レビュー）と修正（完了 2026-07-03）
+Workflow（5次元レビュー→各所見を独立エージェントが反証試行）で **6件中4件が確定**（2件反証）。全て**データ損失系**。修正＋各バグの回帰テストを追加し、**旧コードで FAIL・新コードで PASS を git stash で実証**。
+- **#1 [high] COW source側エイリアシング**（contour-lab.js）: carry 元フレームを編集/Undoすると共有配列を in-place 破壊し借用フレームが壊れる。sharedLids は borrower しか印を付けないため。→ **参照カウント `S.arrRefs`(WeakMap)** を導入。writableLines は「2フレーム以上が参照中(rc>1)」なら複製。maybeCarry で bump。回帰: cow に「source f0 編集後 f30 不変」を追加（旧コードで FAIL 確認）。
+- **#2 [high] 復元時に carry レイヤ消失**（maybeCarry の all-or-nothing）: 所有レイヤ1つ持つ復元フレームが carry を丸ごと止め他レイヤ喪失。→ **maybeCarry を追加式**（無い lid だけ引き継ぐ）。回帰: restore-merge の「f5 L1(carried)+L2(owned) 共存」。
+- **#3 [critical] 未訪問フレームへの import が他レイヤ破壊**（io.js）: fdata が空フレーム生成→自動保存が行を上書き。→ applyMaskToLayer 冒頭で `S.onFrameEnter(f)` を呼び保存レイヤを先に復元。回帰: restore-merge の「未訪問 f10 へ import→L2 保持」。
+- **#4 [medium] OR取込が未訪問復元フレームでゼロと合成**（io.js）: → OR基点を `getLines(f,lid)`（savedFrames も見る）に変更（#3の復元と二重の保険）。
+- 反証された2件（記録）: applyProjectObject 前の debounce flush 競合（到達不能）／fps ガードが savedFrames を無視（軽微、ただし `anyOwned()` に `savedFrames.size` を追加して塞いだ）。
+- 版 12。**全回帰**: unit 52/0、e2e smoke11/cow15/persist11/io-roundtrip9/restore-merge11、すべて 0 FAIL。

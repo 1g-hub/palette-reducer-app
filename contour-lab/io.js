@@ -66,8 +66,9 @@
   }
   // マスクをレイヤに適用（mode: 'replace' | 'or'）。差分 Undo。lines=maskToLines(mask)、fill 再計算。
   function applyMaskToLayer(f, lid, mask, mode) {
+    if (S.onFrameEnter) S.onFrameEnter(f); // 未訪問の保存フレームを先に復元（他レイヤの上書き喪失を防ぐ, レビュー指摘#3）
     const N = S.W * S.H, d = CL.fdata(f), newLines = CLab.maskToLines(mask, S.W, S.H);
-    const old = d.lines.get(lid) || new Uint8Array(N), target = new Uint8Array(N);
+    const old = getLines(f, lid) || new Uint8Array(N), target = new Uint8Array(N); // OR基点は savedFrames も見る getLines（レビュー指摘#4）
     for (let i = 0; i < N; i++) target[i] = ((mode === 'or' ? (old[i] || newLines[i]) : newLines[i]) ? 1 : 0);
     const changed = new Map();
     for (let i = 0; i < N; i++) if ((old[i] ? 1 : 0) !== target[i]) changed.set(i, old[i] || 0);
