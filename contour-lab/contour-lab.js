@@ -300,6 +300,7 @@
     if (!S.frameBmp) return;
     ctx.setTransform(dpr * v.scale, 0, 0, dpr * v.scale, dpr * v.tx, dpr * v.ty); ctx.imageSmoothingEnabled = false;
     ctx.globalAlpha = S.srcOpacity; ctx.drawImage(S.frameBmp, 0, 0); ctx.globalAlpha = 1;
+    if (S.onAfterSource) S.onAfterSource(ctx, v); // 量子化ビュー/スクリブルプレビュー等の描画フック（P4）
     if (S.edgeOn) { const ec = getEdge(S.cur); if (ec) { ctx.globalAlpha = S.edgeOpacity; ctx.drawImage(ec, 0, 0); ctx.globalAlpha = 1; } }
     if (!S.maskHidden) { if (S.maskDirty) rebuildMask(); ctx.globalAlpha = S.maskOpacity; ctx.drawImage(S.maskCanvas, 0, 0); ctx.globalAlpha = 1; }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -355,6 +356,7 @@
     if (e.button !== 0) return;
     const [wx, wy] = toWorld(sx, sy); let px = clamp(Math.floor(wx), 0, S.W - 1), py = clamp(Math.floor(wy), 0, S.H - 1);
     const L = activeLayer(); if (!L) return;
+    if (S.tool !== 'pen' && S.tool !== 'eraser') { if (S.onToolDown) S.onToolDown(e, px, py, wx, wy); return; } // カスタムツール(ワンド/スクリブル等, P4)は完全委譲
     if (S.tool === 'eraser' && S.objectEraser) { // ドラッグで塊ごと消す：開始点で最初の flood
       S.drawing = true; S.strokeOld = new Map(); S.startPX = px; S.startPY = py; S.lastPX = px; S.lastPY = py;
       objectFloodAt(px, py); S.maskDirty = true; render(); return;
@@ -501,7 +503,8 @@
   }
 
   /* ============ コントロール配線 ============ */
-  function setTool(t) { S.tool = t; dom.toolPen.classList.toggle('active', t === 'pen'); dom.toolEraser.classList.toggle('active', t === 'eraser'); S.snapPt = null; render(); }
+  function setTool(t) { S.tool = t; dom.toolPen.classList.toggle('active', t === 'pen'); dom.toolEraser.classList.toggle('active', t === 'eraser'); S.snapPt = null; if (S.onToolChange) S.onToolChange(t); render(); }
+  function eventToPixel(e) { const rect = dom.view.getBoundingClientRect(); const [wx, wy] = toWorld(e.clientX - rect.left, e.clientY - rect.top); return [clamp(Math.floor(wx), 0, S.W - 1), clamp(Math.floor(wy), 0, S.H - 1), wx, wy]; }
   dom.toolPen.addEventListener('click', () => setTool('pen'));
   dom.toolEraser.addEventListener('click', () => setTool('eraser'));
   dom.snapToggle.addEventListener('change', () => { S.snap = dom.snapToggle.checked; });
@@ -565,7 +568,7 @@
     S, dom,
     requestFrame, scheduleRender, render, toast,
     fdata, layerLines, writableLines, newFill, ensureFills, owned, anyOwned, sceneIndexOf, retainFillsFor,
-    activeLayer, setActive, addLayer, setTool, renderLayers,
+    activeLayer, setActive, addLayer, setTool, renderLayers, eventToPixel,
     commitChanges, pushUndo, updateUndoButtons,
     rebuildMask, exportPng,
   };

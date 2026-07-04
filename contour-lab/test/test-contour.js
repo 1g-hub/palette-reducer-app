@@ -1,6 +1,7 @@
 const A = require('../contour-lab.js');
 const M = require('../morpho.js');
 const T = require('../timeline.js');
+const Q = require('../quantize.js');
 let pass = 0, fail = 0;
 function ok(cond, msg) { if (cond) { pass++; } else { fail++; console.log('  FAIL:', msg); } }
 const at = (arr, W, x, y) => arr[y * W + x];
@@ -239,6 +240,37 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
   ok(st([300], 100, -1) === 0, 'backward in scene0 -> 0');
   ok(st([300], 0, -1) === null, 'backward at very start -> null');
   ok(st([100, 300, 500], 350, -1) === 300, 'backward -> current scene start (300)');
+}
+
+// ---- guidedFilterRGB（P4-1: エッジ保存平滑化） ----
+{
+  const W = 20, H = 20, N = W * H;
+  // ステップエッジ + 平坦部にノイズ
+  const rgba = new Uint8ClampedArray(N * 4);
+  let seed = 7; const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const p = (y * W + x) * 4; let v = x < 10 ? 50 : 200; v += (rnd() - 0.5) * 30; rgba[p] = rgba[p + 1] = rgba[p + 2] = v; rgba[p + 3] = 255; }
+  const g = Q.guidedFilterRGB(rgba, W, H, 3, 0.005);
+  const at = (x, y) => g[(y * W + x) * 4];
+  ok(at(10, 10) - at(9, 10) > 100, 'guided filter keeps the step edge sharp (jump ' + (at(10, 10) - at(9, 10)).toFixed(0) + ' > 100)');
+  // 平坦部の分散が下がる（左半分 x<10 の生 vs 平滑後）
+  const varOf = (arr, raw) => { let s = 0, s2 = 0, n = 0; for (let y = 2; y < H - 2; y++) for (let x = 2; x < 8; x++) { const v = raw ? arr[(y * W + x) * 4] : arr[y * W + x]; s += v; s2 += v * v; n++; } return s2 / n - (s / n) * (s / n); };
+  ok(varOf(g, true) < varOf(rgba, true), 'guided filter reduces flat-region noise variance (' + varOf(rgba, true).toFixed(0) + '->' + varOf(g, true).toFixed(0) + ')');
+  ok(g.length === N * 4 && g[3] === 255, 'guided filter output is RGBA, opaque');
+}
+
+// ---- quantizeLabels（P4-2） ----
+{
+  const W = 12, H = 12, N = W * H, rgba = new Uint8ClampedArray(N * 4);
+  const pal = [[220, 30, 30], [30, 200, 40], [40, 60, 210], [230, 210, 40]];
+  for (let i = 0, p = 0; i < N; i++, p += 4) { const c = pal[i % 4]; rgba[p] = c[0]; rgba[p + 1] = c[1]; rgba[p + 2] = c[2]; rgba[p + 3] = 255; }
+  const r4 = Q.quantizeLabels(rgba, W, H, 4, 10);
+  ok(new Set(r4.labels).size <= 4 && r4.centers.length === 4, 'quantize K=4 on 4-color image -> <=4 labels, 4 centers');
+  const r2 = Q.quantizeLabels(rgba, W, H, 2, 10);
+  ok(new Set(r2.labels).size <= 2, 'quantize K=2 merges to <=2 labels');
+  ok(r2.labels.length === N, 'labels cover every pixel');
+  // 各ラベルの中心が実在色に近い
+  const near = r4.centers.every((c) => pal.some((p) => (c[0] - p[0]) ** 2 + (c[1] - p[1]) ** 2 + (c[2] - p[2]) ** 2 < 400));
+  ok(near, 'quantize centers land on the true palette colors');
 }
 
 // ---- P0-3: index.html の ?v= キャッシュバスター整合 ----
