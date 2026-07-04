@@ -97,9 +97,30 @@
     CL.toast('マスクを取込みました（' + applied + '枚）');
   }
 
+  // ---- 本体(palette-reducer)取込用 JSON（P7: 形式凍結） ----
+  // フレームキー = 整数フレーム番号（本体規約 floor(at*fps) と一致）。lid ごとに線形RLE [start,len,...]。
+  // scenes は S.cuts から [{startF,endF}]。本体は bitmapFromRle で復号→自前の rleEncodeMask 機構で扱える（test で往復検証済み）。
+  function buildMainAppExport() {
+    const frames = {}, list = exportFrameList();
+    for (const f of list) { const rec = {}; let any = false; for (const L of S.layers) { const lines = getLines(f, L.id); if (!lines) continue; const runs = CLab.rleFromBitmap(lines); if (runs.length) { rec[L.id] = Array.from(runs); any = true; } } if (any) frames[f] = rec; }
+    const cuts = (S.cuts || []).slice().sort((a, b) => a - b), bounds = [0, ...cuts, S.total], scenes = [];
+    for (let i = 0; i < bounds.length - 1; i++) scenes.push({ startF: bounds[i], endF: bounds[i + 1] });
+    return { format: 'contour-lab-mainapp', version: 1, fps: S.fps, W: S.W, H: S.H, total: S.total,
+      layers: S.layers.map((l) => ({ id: l.id, name: l.name, color: l.color.slice() })), scenes, frames };
+  }
+  function exportMainAppJSON() {
+    if (!S.W) { CL.toast('動画が読み込まれていません'); return; }
+    const obj = buildMainAppExport();
+    if (!Object.keys(obj.frames).length) { CL.toast('書き出す所有フレームがありません'); return; }
+    const blob = new Blob([JSON.stringify(obj)], { type: 'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = (S.file ? S.file.name.replace(/\.[^.]+$/, '') : 'masks') + '.mainapp.json'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    CL.toast('本体用JSONを書き出しました（' + Object.keys(obj.frames).length + 'フレーム）');
+  }
+
   // ---- UI 配線 ----
   if ($('exportMasksZip')) $('exportMasksZip').addEventListener('click', exportMasksZip);
+  if ($('exportMainApp')) $('exportMainApp').addEventListener('click', exportMainAppJSON);
   const imp = $('importMask'); if (imp) imp.addEventListener('change', (e) => { const fs = e.target.files; if (fs && fs.length) importMaskFiles([...fs]); imp.value = ''; });
 
-  window.CLIO = { buildExportFiles, exportFrameList, maskPngBytes, imageToMask, applyMaskToLayer, importMaskFiles, decodeImage, getLines };
+  window.CLIO = { buildExportFiles, exportFrameList, maskPngBytes, imageToMask, applyMaskToLayer, importMaskFiles, decodeImage, getLines, buildMainAppExport };
 })();

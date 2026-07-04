@@ -301,6 +301,34 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
   ok(c3[0] === 7 && c3[2] === 9, 'Dijkstra line graph: endpoints keep their seed class');
 }
 
+// ---- P7: 本体(app.js)の RLE 機構と往復互換（contour-lab の線形RLE → ビットマップ → app.js の行RLE） ----
+{
+  // app.js:3423 rleEncodeMask / :3437 rleMaskForEach の参照実装（コピー）。本体が読める形かを担保。
+  function appRleEncode(bytes, w, h) {
+    let y0 = h, y1 = -1, pop = 0; const rows = new Array(h);
+    for (let y = 0; y < h; y++) { const base = y * w; let runs = null, x = 0;
+      while (x < w) { if (bytes[base + x]) { const s = x; x++; while (x < w && bytes[base + x]) x++; (runs || (runs = [])).push(s, x); pop += x - s; } else x++; }
+      rows[y] = runs ? Int32Array.from(runs) : null; if (runs) { if (y < y0) y0 = y; if (y > y1) y1 = y; } }
+    return { w, h, y0, y1, rows, pop };
+  }
+  function appRleForEach(rle, cb) { if (!rle || rle.y1 < rle.y0) return; for (let y = rle.y0; y <= rle.y1; y++) { const runs = rle.rows[y]; if (!runs) continue; for (let i = 0; i < runs.length; i += 2) for (let x = runs[i]; x < runs[i + 1]; x++) cb(x, y); } }
+
+  const w = 24, h = 18, N = w * h;
+  let seed = 555; const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  let okAll = true, popOk = true;
+  for (let t = 0; t < 40 && okAll; t++) {
+    const B = new Uint8Array(N); for (let i = 0; i < N; i++) if (rnd() < 0.35) B[i] = 1;
+    const clRuns = A.rleFromBitmap(B);          // contour-lab の線形RLE（書き出し形式）
+    const B2 = A.bitmapFromRle(clRuns, N);       // 本体が復号する想定
+    const appRle = appRleEncode(B2, w, h);       // 本体の RLE 機構へ
+    const B3 = new Uint8Array(N); appRleForEach(appRle, (x, y) => { B3[y * w + x] = 1; });
+    let pc = 0; for (let i = 0; i < N; i++) { pc += B[i]; if (B[i] !== B2[i] || B[i] !== B3[i]) okAll = false; }
+    if (appRle.pop !== pc) popOk = false;
+  }
+  ok(okAll, 'P7: contour-lab RLE -> bitmap -> app.js rleEncodeMask round-trips identically (40 random masks)');
+  ok(popOk, 'P7: app.js rle.pop matches popcount (mask is losslessly consumable by the main app)');
+}
+
 // ---- P0-3: index.html の ?v= キャッシュバスター整合 ----
 {
   const path = require('path');

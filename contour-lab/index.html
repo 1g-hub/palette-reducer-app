@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>輪郭ラボ — 手描き領域マスク (P1)</title>
-<link rel="stylesheet" href="./styles.css?v=16">
+<link rel="stylesheet" href="./styles.css?v=17">
 </head>
 <body>
 <header id="topbar">
@@ -147,7 +147,8 @@
       <h3>書き出し</h3>
       <button id="exportPng" class="btn wide">このフレームのマスクをPNG保存</button>
       <button id="exportMasksZip" class="btn wide">全マスクを書き出し（ZIP）</button>
-      <p class="note small">ZIPは所有フレーム×色を白黒PNG＋manifest.jsonで出力します。</p>
+      <button id="exportMainApp" class="btn wide">本体用に書き出し（JSON）</button>
+      <p class="note small">ZIPは所有フレーム×色を白黒PNG＋manifest.json。本体用JSONは減色アプリへの取込用（RLE＋シーン情報、往復検証済み）。</p>
     </section>
 
     <section class="psec help">
@@ -173,13 +174,13 @@
   </main>
 </div>
 
-<script src="../icm.js?v=16"></script>
-<script src="./contour-lab.js?v=16"></script>
-<script src="./morpho.js?v=16"></script>
-<script src="./storage.js?v=16"></script>
-<script src="./io.js?v=16"></script>
-<script src="./timeline.js?v=16"></script>
-<script src="./quantize.js?v=16"></script>
-<script src="./slic.js?v=16"></script>
+<script src="../icm.js?v=17"></script>
+<script src="./contour-lab.js?v=17"></script>
+<script src="./morpho.js?v=17"></script>
+<script src="./storage.js?v=17"></script>
+<script src="./io.js?v=17"></script>
+<script src="./timeline.js?v=17"></script>
+<script src="./quantize.js?v=17"></script>
+<script src="./slic.js?v=17"></script>
 </body>
 </html>
