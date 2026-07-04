@@ -124,3 +124,12 @@ Workflow（5次元レビュー→各所見を独立エージェントが反証�
 - 版 13。**全回帰**: unit 57/0、e2e smoke11/cow15/persist11/io-roundtrip9/restore-merge11/cuts10、すべて 0 FAIL。
 
 **P2 追修正（ユーザ報告、2026-07-04）**: Shift+→ が「次シーンが無いとき動画末尾(last frame)へ飛ぶ」→「次シーンの最初のフレームへ、無ければ何もしない(トースト)」に変更。純関数 `sceneTarget(cuts,cur,dir)` を新設（timeline.js、unit 10件追加 → unit 67/0）、sceneJump がそれを使用。help に Shift+←→ を追記。版14。e2e cuts に統合検証追加（12/0）: Shift+→ が 300 へ、最終シーンでは据え置き。
+
+**ユーザ未検証項目の代行検証（2026-07-04）— 実ファイルの流れ**: ユーザ手動検証で「マスクPNG取込／ZIP書き出し／プロジェクトJSON」が未確認だったため、**実ブラウザのダウンロード＋実ファイル入力**で e2e 化。
+- driver に CDP ダウンロード捕捉（`enableDownloads`/`waitDownload`）を追加。
+- `test/scenarios/file-io.js`（新規, serve:true）→ **17/0**:
+  - ① `#exportMasksZip` を実クリック→ `0513_03_moto_masks.zip` が実ダウンロード→ system `unzip -l/-o` で `mask_L1_f00000.png`/`mask_L2_f00000.png`/`mask_L1_f00005.png`/`manifest.json` を検証。`file` で **1920×1080 8-bit RGBA PNG** と確認。manifest の frames=[0,5]・layers・W/H 一致。
+  - ② 展開した PNG を **実UI `#importMask`** で読み戻し→ f0 をクリア済みの色1へ取込→ **元マスクと画素完全一致（19154→19154）**＝マスクPNG取込の実証。
+  - ③ `#exportProject` 実ダウンロード→JSON 解析（frames に "5" 有り）→ f0/f5 全消し→ **実UI `#importProject`** で読込→ f5 色1 復元（24754）。
+- 成果物は `contour-lab/samples/`（gitignore）に保存：ユーザが中身を確認可能。ZIP 133KB・JSON 7KB・PNG各44KB。
+- **結論: 3流れとも実ファイルで正常動作を確認**（ユーザの手動確認を代行）。全回帰 unit 67/0＋e2e 7シナリオ 0 FAIL。

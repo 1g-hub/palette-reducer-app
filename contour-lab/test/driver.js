@@ -121,6 +121,19 @@ async function run(scenario) {
       async shot(name) { await page.screenshot({ path: path.join(OUT, (scenario.name || 'scn') + '_' + name + '.png') }); },
       eval: (fn, ...a) => page.evaluate(fn, ...a),
       $eval: (sel, fn, ...a) => page.$eval(sel, fn, ...a),
+      downloadDir: path.join(staged.base, 'downloads'),
+      async enableDownloads() { fs.mkdirSync(ctx.downloadDir, { recursive: true }); const c = await page.target().createCDPSession(); await c.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: ctx.downloadDir, eventsEnabled: true }); },
+      // 実ブラウザの a.download クリックで落ちたファイルを待つ（.crdownload が消え、完全なファイルになるまで）
+      async waitDownload(re, timeout = 20000) {
+        const end = Date.now() + timeout;
+        while (Date.now() < end) {
+          const names = fs.existsSync(ctx.downloadDir) ? fs.readdirSync(ctx.downloadDir) : [];
+          const hit = names.find((n) => re.test(n) && !n.endsWith('.crdownload'));
+          if (hit) { const p = path.join(ctx.downloadDir, hit); const sz = fs.statSync(p).size; if (sz > 0) return p; }
+          await sleep(150);
+        }
+        return null;
+      },
     };
 
     if (scenario.video !== false) {
