@@ -2,6 +2,7 @@ const A = require('../contour-lab.js');
 const M = require('../morpho.js');
 const T = require('../timeline.js');
 const Q = require('../quantize.js');
+const SL = require('../slic.js');
 let pass = 0, fail = 0;
 function ok(cond, msg) { if (cond) { pass++; } else { fail++; console.log('  FAIL:', msg); } }
 const at = (arr, W, x, y) => arr[y * W + x];
@@ -271,6 +272,33 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
   // 各ラベルの中心が実在色に近い
   const near = r4.centers.every((c) => pal.some((p) => (c[0] - p[0]) ** 2 + (c[1] - p[1]) ** 2 + (c[2] - p[2]) ** 2 < 400));
   ok(near, 'quantize centers land on the true palette colors');
+}
+
+// ---- SLIC superpixels + Dijkstra assignment（P4-4） ----
+{
+  const W = 48, H = 48, N = W * H, rgba = new Uint8ClampedArray(N * 4);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const p = (y * W + x) * 4; const c = x < 24 ? [220, 40, 40] : [40, 60, 220]; rgba[p] = c[0]; rgba[p + 1] = c[1]; rgba[p + 2] = c[2]; rgba[p + 3] = 255; }
+  const r = SL.slicSuperpixels(rgba, W, H, 12, 10, 5);
+  ok(r.count > 0 && r.labels.length === N, 'SLIC labels every pixel (' + r.count + ' superpixels)');
+  ok(r.count >= 9 && r.count <= 25, 'SLIC count ~ (W/cell)*(H/cell)=16 (got ' + r.count + ')');
+  let allLabeled = true; for (let i = 0; i < N; i++) if (r.labels[i] < 0 || r.labels[i] >= r.count) allLabeled = false;
+  ok(allLabeled, 'SLIC labels are all in [0,count)');
+  // 純度: 各SPが単色（境界のSP以外）
+  const cnt = []; for (let c = 0; c < r.count; c++) cnt[c] = [0, 0];
+  for (let i = 0; i < N; i++) cnt[r.labels[i]][(i % W) < 24 ? 0 : 1]++;
+  let pure = 0; for (let c = 0; c < r.count; c++) { const t = cnt[c][0] + cnt[c][1]; if (t && Math.max(cnt[c][0], cnt[c][1]) / t > 0.9) pure++; }
+  ok(pure >= r.count - 2, 'most SLIC superpixels are single-color (' + pure + '/' + r.count + ' pure)');
+  // Dijkstra: 左右に種→左は class1・右は class2
+  const adj = SL.buildAdjacency(r.labels, W, H, r.count);
+  const cls = SL.assignByDijkstra(adj, r.labMeans, [{ sp: r.labels[24 * W + 6], cls: 1 }, { sp: r.labels[24 * W + 42], cls: 2 }]);
+  ok(cls[r.labels[24 * W + 10]] === 1 && cls[r.labels[24 * W + 38]] === 2, 'Dijkstra assigns left->1, right->2');
+  // 全SPが割当済み（未到達なし）
+  let assigned = true; for (let c = 0; c < r.count; c++) if (cls[c] === SL.SLIC_UNSEEN) assigned = false;
+  ok(assigned, 'Dijkstra reaches every superpixel');
+  // 3ノード直線グラフ: 端に種→中間は近い側
+  const adj3 = [[1], [0, 2], [1]], lab3 = new Float32Array([0, 0, 0, 10, 0, 0, 20, 0, 0]);
+  const c3 = SL.assignByDijkstra(adj3, lab3, [{ sp: 0, cls: 7 }, { sp: 2, cls: 9 }]);
+  ok(c3[0] === 7 && c3[2] === 9, 'Dijkstra line graph: endpoints keep their seed class');
 }
 
 // ---- P0-3: index.html の ?v= キャッシュバスター整合 ----

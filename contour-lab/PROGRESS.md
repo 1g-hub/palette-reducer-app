@@ -125,6 +125,29 @@ Workflow（5次元レビュー→各所見を独立エージェントが反証�
 
 **P2 追修正（ユーザ報告、2026-07-04）**: Shift+→ が「次シーンが無いとき動画末尾(last frame)へ飛ぶ」→「次シーンの最初のフレームへ、無ければ何もしない(トースト)」に変更。純関数 `sceneTarget(cuts,cur,dir)` を新設（timeline.js、unit 10件追加 → unit 67/0）、sceneJump がそれを使用。help に Shift+←→ を追記。版14。e2e cuts に統合検証追加（12/0）: Shift+→ が 300 へ、最終シーンでは据え置き。
 
+---
+
+## P4. 領域選択パラダイム（「描く」→「選ぶ」）（2026-07-04）
+
+**注: P3（手描き効率化＝確定エッジスナップ等）はユーザ指示で飛ばし、P4 から実装。**
+
+### P4-1/2/3 ガイデッドフィルタ・量子化ビュー・ワンド（完了、コミット d3745d2）
+- `quantize.js`（新規）: 純関数 `guidedFilterRGB`（積分画像ボックス平均でエッジ保存平滑化）/ `quantizeLabels`（worker.js の k-means を移植: バケツ候補＋k-means++シード＋重み付きLloyd）/ `boxMean`。ContourLab に co-attach。
+- ビュー: 現在フレームを縮小(短辺270)でパレット導出→ネイティブ最近傍ラベル＋ポスタライズ canvas を `onAfterSource` フックで重畳。Qトグル。
+- ワンド(A): クリック→同ラベル4連結 flood→`CLIO.applyMaskToLayer('or')`（maskToLines 経由で封止・Undo可）。
+- contour-lab.js に無害フック追加（未登録時 no-op）: `onAfterSource`（描画重畳）/`onToolDown`・`onToolChange`（カスタムツール）/`eventToPixel`。
+- unit +6（guided filter エッジ保存・分散低下、quantize ラベル数≤K・中心が実色）。**e2e `quantize` 8/0**（ビュー≤K色、ワンドで封止領域追加、Undo）。
+
+### P4-4 SLIC＋スクリブル＋グラフ割当 v1（完了、本コミット）
+- `slic.js`（新規）: 純関数 `rgbToLab`/`slicSuperpixels`（Lab空間SLIC、labMeans返す）/`buildAdjacency`（SP隣接）/`assignByDijkstra`（多始点Dijkstra、辺重み=ΔLab²、二分ヒープ）。
+- スクリブルツール(X): 前景(選択色)・背景を太ブラシで塗る→縮小(短辺360)でSLIC→種SPから Dijkstra 割当→プレビュー重畳→「確定」で各色マスク→ネイティブ upsample→maskToLines→レイヤ置換（Undo可）。粒度スライダ、スクリブル消去。
+- unit +8（SLIC: 全画素ラベル・数≈grid・単色純度、Dijkstra: 左右分離・全SP到達・直線グラフ）。**e2e `scribble` 9/0**: 前景左/背景右に塗る→割当736SP→確定で封止領域→**左(前景)充填432 vs 右(背景)0＝fg/bg正しく分離**→Undo。
+- **DEFERRED（記録）**: グラフカット(maxflow)v2、スクリブルの次フレーム伝播(P4-4b)、SLIC連結性強制（v1は非連結片を許容、実害小）。ラベルマップは元画像から算出（平滑化はパレット/SLIC入力のみに適用）。
+
+**P4 全回帰**: unit 81/0、e2e smoke11/cow15/persist11/io-roundtrip9/restore-merge11/cuts12/file-io17/quantize8/scribble9、すべて 0 FAIL。版16。
+
+---
+
 **ユーザ未検証項目の代行検証（2026-07-04）— 実ファイルの流れ**: ユーザ手動検証で「マスクPNG取込／ZIP書き出し／プロジェクトJSON」が未確認だったため、**実ブラウザのダウンロード＋実ファイル入力**で e2e 化。
 - driver に CDP ダウンロード捕捉（`enableDownloads`/`waitDownload`）を追加。
 - `test/scenarios/file-io.js`（新規, serve:true）→ **17/0**:

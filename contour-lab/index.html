@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>輪郭ラボ — 手描き領域マスク (P1)</title>
-<link rel="stylesheet" href="./styles.css?v=15">
+<link rel="stylesheet" href="./styles.css?v=16">
 </head>
 <body>
 <header id="topbar">
@@ -66,6 +66,16 @@
       <label class="row check"><input type="checkbox" id="quantSmooth"> 平滑化（AAつぶし）</label>
       <button id="toolWand" class="btn wide">🪄 ワンド (A)：同色領域をクリックで選択色へ追加</button>
       <p class="note small">量子化で境界をはっきりさせ、ワンドで領域をクリック取込。選択中の色へ「追加」します（除去はオブジェクト消しゴム）。</p>
+      <div class="row btns" style="margin-top:6px">
+        <button id="scribFg" class="btn tool">🖊 前景スクリブル (X)</button>
+        <button id="scribBg" class="btn tool">🩶 背景スクリブル</button>
+      </div>
+      <label class="row"><span class="lbl">粒度</span><input type="range" id="slicCell" min="6" max="28" step="2" value="12"><span id="slicCellLabel" class="mono small">12</span></label>
+      <div class="row btns">
+        <button id="slicConfirm" class="btn">確定（領域化）</button>
+        <button id="slicClear" class="btn">スクリブル消去</button>
+      </div>
+      <p class="note small">前景（選択色）と背景を太ブラシで雑に塗る→自動で境界を推定→「確定」でマスク化。前景・背景の両方を塗ると精度が上がります（β：グラフカット/伝播は後日）。</p>
     </section>
 
     <section class="psec">
@@ -146,7 +156,7 @@
         <li>左ドラッグ＝描画／消去</li>
         <li>右・中・Space+ドラッグ＝移動</li>
         <li>ホイール＝カーソル中心ズーム</li>
-        <li>B ペン / E 消しゴム / S スナップ / G グリッド / D エッジ / Q 量子化 / A ワンド</li>
+        <li>B ペン / E 消しゴム / S スナップ / G グリッド / D エッジ / Q 量子化 / A ワンド / X スクリブル</li>
         <li>← → フレーム送り / Shift+← → シーン移動（次/前シーンの先頭）/ F 全体 / 1 等倍</li>
         <li>Ctrl+Z 戻す / Ctrl+Y やり直し</li>
       </ul>
@@ -163,12 +173,13 @@
   </main>
 </div>
 
-<script src="../icm.js?v=15"></script>
-<script src="./contour-lab.js?v=15"></script>
-<script src="./morpho.js?v=15"></script>
-<script src="./storage.js?v=15"></script>
-<script src="./io.js?v=15"></script>
-<script src="./timeline.js?v=15"></script>
-<script src="./quantize.js?v=15"></script>
+<script src="../icm.js?v=16"></script>
+<script src="./contour-lab.js?v=16"></script>
+<script src="./morpho.js?v=16"></script>
+<script src="./storage.js?v=16"></script>
+<script src="./io.js?v=16"></script>
+<script src="./timeline.js?v=16"></script>
+<script src="./quantize.js?v=16"></script>
+<script src="./slic.js?v=16"></script>
 </body>
 </html>
