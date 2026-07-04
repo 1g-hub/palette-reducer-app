@@ -66,9 +66,12 @@
   }
   // マスクをレイヤに適用（mode: 'replace' | 'or'）。差分 Undo。lines=maskToLines(mask)、fill 再計算。
   function applyMaskToLayer(f, lid, mask, mode) {
-    if (S.onFrameEnter) S.onFrameEnter(f); // 未訪問の保存フレームを先に復元（他レイヤの上書き喪失を防ぐ, レビュー指摘#3）
+    if (S.onFrameEnter) S.onFrameEnter(f); // 未訪問の保存フレームを先に復元（他レイヤの上書き喪失を防ぐ）
     const N = S.W * S.H, d = CL.fdata(f), newLines = CLab.maskToLines(mask, S.W, S.H);
-    const old = getLines(f, lid) || new Uint8Array(N), target = new Uint8Array(N); // OR基点は savedFrames も見る getLines（レビュー指摘#4）
+    // 差分の基点は writableLines が複製する配列＝d.lines.get(lid)（借用/所有ともにこれ）と一致させる。
+    // getLines は借用(shared)配列を隠す(null)ため、それを基点にすると 'replace' で借用線が消えず union になる（P4レビュー#5）。
+    // 未訪問の保存フレームは直前の onFrameEnter で d.lines へ復元済みなので、d.lines.get(lid) で足りる。
+    const old = d.lines.get(lid) || new Uint8Array(N), target = new Uint8Array(N);
     for (let i = 0; i < N; i++) target[i] = ((mode === 'or' ? (old[i] || newLines[i]) : newLines[i]) ? 1 : 0);
     const changed = new Map();
     for (let i = 0; i < N; i++) if ((old[i] ? 1 : 0) !== target[i]) changed.set(i, old[i] || 0);

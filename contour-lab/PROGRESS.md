@@ -146,6 +146,16 @@ Workflow（5次元レビュー→各所見を独立エージェントが反証�
 
 **P4 全回帰**: unit 81/0、e2e smoke11/cow15/persist11/io-roundtrip9/restore-merge11/cuts12/file-io17/quantize8/scribble9、すべて 0 FAIL。版16。
 
+### P4 レビュー（多エージェント敵対的レビュー）と修正（完了 2026-07-04）
+Workflow（4次元）で **6件確定・0反証**（全データ破損系）。修正＋回帰テスト `region-fixes`（旧コードで FAIL・新コードで PASS を git stash で実証）。
+- **#5 [high] io.js applyMaskToLayer('replace') が借用フレームで union になる**: `getLines` は借用(shared)配列を隠す(null)ため差分基点がゼロ→writableLines のクローン(借用線を保持)に新線を OR するだけで借用線が消えない。→ 基点を `d.lines.get(lid)`（writableLines が複製する配列と一致、onFrameEnter 後なので savedFrames も反映済み）に変更。
+- **#1 [high] slic 別フレームの割当を今のフレームへ確定→既存マスク破壊**: assignCls/preview/seeds が paintAt 内でしかリセットされずフレーム移動で残る。→ commit 冒頭に `seedFrame !== S.cur` ガード（トースト）、onAfterSource のプレビュー描画も同ガード。
+- **#2 [medium] 前景スクリブルが色切替後も旧色へ**: `S.scribbleClass` が setClass 時のスナップショット。→ paintAt を `cls = S.scribbleClass === BG ? BG : S.activeLid`（前景は常にアクティブ色追従、BGのみ固定）。
+- **#3 [medium] quantize キャッシュが動画リロードで無効化されない**（キーに解像度なし）: → キーに `S.W×S.H` 追加＋`onVideoLoaded` チェーンで cache=null。
+- **#4 [low] slic 種/SPキャッシュが動画リロードで残る**（同フレーム番号で衝突）: → `onVideoLoaded` チェーンで sc/seeds/seedFrame/assignCls/preview を全リセット。
+- `onVideoLoaded` は storage→quantize→slic と**チェーン**（各 module が prev を await）。版18。
+- **e2e `region-fixes` → 17/0**（A借用replace #5 / B別フレーム確定ブロック #1 / C前景追従 #2 / D リロードリセット #3#4）。**全回帰**: unit 83/0、e2e 9シナリオ計103アサート 0 FAIL。
+
 ---
 
 **ユーザ未検証項目の代行検証（2026-07-04）— 実ファイルの流れ**: ユーザ手動検証で「マスクPNG取込／ZIP書き出し／プロジェクトJSON」が未確認だったため、**実ブラウザのダウンロード＋実ファイル入力**で e2e 化。

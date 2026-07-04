@@ -98,7 +98,7 @@
   function reducedSize() { const short = 270, s = short / Math.max(1, Math.min(S.W, S.H)); return { w: Math.max(1, Math.round(S.W * s)), h: Math.max(1, Math.round(S.H * s)) }; }
   function ensureQuant() {
     if (!S.frameBmp || !S.frameImgData) return null;
-    const key = S.cur + ':' + S.quantK + ':' + (S.quantSmooth ? 1 : 0);
+    const key = S.cur + ':' + S.quantK + ':' + (S.quantSmooth ? 1 : 0) + ':' + S.W + 'x' + S.H; // W×H を含め、別動画で同フレーム番号でも衝突しない（P4レビュー#3）
     if (cache && cache.key === key) return cache;
     const W = S.W, H = S.H, rs = reducedSize();
     const sc = document.createElement('canvas'); sc.width = rs.w; sc.height = rs.h;
@@ -154,5 +154,9 @@
     else if (k === 'a') { CL.setTool('wand'); CL.toast('ワンド'); }
   });
 
-  window.CLQuant = { ensureQuant, wandAt, setQuant, invalidate: () => { cache = null; } };
+  // 動画読込時にキャッシュをリセット（別動画の古いラベル/ポスタライズ canvas を消す, P4レビュー#3）。
+  const prevOVLq = S.onVideoLoaded;
+  S.onVideoLoaded = function (file) { cache = null; return prevOVLq ? prevOVLq(file) : undefined; };
+
+  window.CLQuant = { ensureQuant, wandAt, setQuant, invalidate: () => { cache = null; }, _cacheKey: () => (cache ? cache.key : null) };
 })(typeof self !== 'undefined' ? self : this);

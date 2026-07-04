@@ -108,7 +108,9 @@
 
   function paintAt(px, py) {
     const s = ensureSLIC(); if (!s) return; resetSeedsIfFrameChanged();
-    const rx = Math.floor(px * s.rw / S.W), ry = Math.floor(py * s.rh / S.H), rad = 3, cls = S.scribbleClass == null ? S.activeLid : S.scribbleClass;
+    // 前景は常に「現在のアクティブ色」に追従（BGだけ固定）。setClass のスナップショットのままだと、色を切替えても
+    // 旧色へ塗られる（P4レビュー#2）。
+    const rx = Math.floor(px * s.rw / S.W), ry = Math.floor(py * s.rh / S.H), rad = 3, cls = S.scribbleClass === BG ? BG : S.activeLid;
     for (let dy = -rad; dy <= rad; dy++) for (let dx = -rad; dx <= rad; dx++) { if (dx * dx + dy * dy > rad * rad) continue; const x = rx + dx, y = ry + dy; if (x < 0 || y < 0 || x >= s.rw || y >= s.rh) continue; seeds[y * s.rw + x] = cls; }
   }
   function recompute() {
@@ -128,6 +130,9 @@
   }
 
   function commit() {
+    // 割当が「今表示中のフレーム」のものでなければ確定しない。別フレームの割当を今のフレームへ 'replace' で
+    // 書くと、そのフレームの既存マスクを壊す（P4レビュー#1/#5）。
+    if (seedFrame !== S.cur) { assignCls = null; previewCanvas = null; CL.toast('このフレームにスクリブルの割当がありません'); return; }
     const s = ensureSLIC(); if (!s || !assignCls) { CL.toast('先にスクリブルしてください'); return; }
     const lids = new Set(); for (let c = 0; c < s.count; c++) { const cl = assignCls[c]; if (cl > 0) lids.add(cl); }
     if (!lids.size) { CL.toast('前景スクリブルがありません'); return; }
@@ -147,6 +152,7 @@
   S.onAfterSource = function (ctx, v) {
     if (prevAfter) prevAfter(ctx, v);
     if (S.tool !== 'scribble') return;
+    if (seedFrame !== S.cur) return; // 別フレームのプレビュー/種を今のフレームへ重ねない（P4レビュー#1）
     if (previewCanvas) { ctx.imageSmoothingEnabled = false; ctx.globalAlpha = 0.55; ctx.drawImage(previewCanvas, 0, 0, S.W, S.H); ctx.globalAlpha = 1; }
     // 種ストロークを点で表示
     if (seeds && seedFrame === S.cur && sc) {
@@ -181,5 +187,9 @@
     if (e.key.toLowerCase() === 'x') { setClass(S.activeLid); CL.toast('スクリブル（前景）'); }
   });
 
-  window.CLSlic = { ensureSLIC, recompute, commit, clearScribbles, paintAt, _seeds: () => seeds, _assign: () => assignCls };
+  // 動画読込時にモジュール状態を全リセット（別動画へ同じフレーム番号で残った種/割当/SPが混入するのを防ぐ, P4レビュー#4）。
+  const prevOVL = S.onVideoLoaded;
+  S.onVideoLoaded = function (file) { sc = null; seeds = null; seedFrame = -1; painting = false; assignCls = null; previewCanvas = null; S.scribbleClass = null; return prevOVL ? prevOVL(file) : undefined; };
+
+  window.CLSlic = { ensureSLIC, recompute, commit, clearScribbles, paintAt, _seeds: () => seeds, _assign: () => assignCls, _seedFrame: () => seedFrame };
 })(typeof self !== 'undefined' ? self : this);
