@@ -137,6 +137,14 @@ P4 の後に着手（ユーザ「全部あなたのおすすめで」）。**P3-
 - unit +9（costFromMag 単調、dijkstra が谷を辿る・回廊外 null、corridor 被覆・bbox、snapEndpoint）→ **unit 92/0**。版19。
 - **e2e `snap` → 9/0**: 雑な折れ線→W→線が変化＆**線上の平均勾配 23.1→39.8 に上昇（エッジに寄った）**→Undo1回でラフ線復元→消費後のWは安全な no-op。
 
+### P3 レビュー（多エージェント敵対的レビュー）と修正（完了 2026-07-05）
+Workflow（4次元）で **4件確定・1反証。全て low（データ損失なし・全て Undo 可・クラッシュ無し）**。共通根因＝ `S.lastStroke`/`magCache` が「スナップ以外の経路」でフレーム内容/レイヤが変わると陳腐化。各操作に `lastStroke=null` を撒くのは脆いので、**snapLastStroke に自己検証ガード**＋**magCache をオブジェクト同一性キー**に（レビュー推奨の堅牢版）。
+- **[low] 幻の線復活**（消しゴム/全消去/領域整形/レイヤ削除の後 W でラフ線が復活）: → snapLastStroke 冒頭で「ls.lid が生存レイヤか」「ls.added の画素が今も残るか」を検証し、無ければトースト＋消費。1箇所で全経路をカバー。
+- **[low] 削除レイヤへ孤児line復活**（同上ガードでカバー: 生存レイヤチェック）。
+- **[low] magCache 陳腐化**（fps変更で同フレーム番号が別画像に）: → `magCache.src === S.frameImgData`（captureFrame は訪問毎に新規生成）で判定＝fps変更/別動画/同番号別画像を自動で作り直す。先の frame+wh キーより厳密。
+- 先回り修正（`8fcf1a0`）の doUndo/doRedo・onVideoLoaded リセットは高速パス/保険として残置。版21。
+- **e2e `snap` に回帰追加 → 13/0**: 描く→この色を全消去→W が**幻の線を復活させない**（旧コードで FAIL を git stash 実証）。**全回帰**: unit 92/0、e2e smoke11/cow15/region-fixes17/scribble9/snap13、0 FAIL。
+
 ---
 
 ## P4. 領域選択パラダイム（「描く」→「選ぶ」）（2026-07-04）

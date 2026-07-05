@@ -57,14 +57,15 @@
 
   /* ============ ハンドラ ============ */
   const CL = window.CL, S = CL.S, CLab = window.ContourLab, $ = (id) => document.getElementById(id);
-  let magCache = null; // {frame, wh, mag, magMax}
+  let magCache = null; // {src, mag, magMax}
   function getMag() {
     if (!S.frameImgData) return null;
-    const wh = S.W + 'x' + S.H;
-    if (magCache && magCache.frame === S.cur && magCache.wh === wh) return magCache; // wh を含め別動画の同フレーム番号で使い回さない
+    // captureFrame は訪問毎に新しい frameImgData を作る。オブジェクト同一性で判定すれば、
+    // fps変更/別動画/同フレーム番号の別画像でも自動で作り直す（P3レビュー: フレーム番号キーは陳腐化）。
+    if (magCache && magCache.src === S.frameImgData) return magCache;
     const mag = window.ICM.colorSobelMag({ width: S.W, height: S.H, data: S.frameImgData.data });
     let mx = 0; for (let i = 0; i < mag.length; i++) if (mag[i] > mx) mx = mag[i];
-    magCache = { frame: S.cur, wh, mag, magMax: mx }; return magCache;
+    magCache = { src: S.frameImgData, mag, magMax: mx }; return magCache;
   }
 
   function snapLastStroke() {
@@ -72,6 +73,12 @@
     if (!ls || ls.frame !== S.cur) { CL.toast('直前に描いた線がありません（このフレームで描いてください）'); return; }
     if (ls.closed) { CL.toast('閉じた線は対象外です'); return; }
     if (!ls.pts || ls.pts.length < 2) { CL.toast('点が少なく吸着できません'); return; }
+    // 自己検証: レイヤ削除・消しゴム・全消去・領域整形・fps変更など「スナップ以外の経路」でストロークが
+    // 消えていたら、幻の線を復活させない（P3レビュー: 各操作で lastStroke を消すより堅牢）。
+    const cd = S.frames.get(S.cur), arr0 = cd && cd.lines.get(ls.lid);
+    if (!S.layers.some((l) => l.id === ls.lid) || !arr0 || !ls.added.length || !ls.added.some((i) => arr0[i])) {
+      CL.toast('直前に描いた線が見つかりません'); S.lastStroke = null; return;
+    }
     const mg = getMag(); if (!mg) { CL.toast('エッジ場が使えません'); return; }
     const W = S.W, H = S.H, R = +($('snapRadius') ? $('snapRadius').value : 6);
     const cor = buildCorridor(ls.pts, W, H, R);

@@ -51,6 +51,16 @@ module.exports = {
     const hint2 = await page.$eval('#hint', (e) => e.textContent);
     t.ok(/直前に描いた線がありません/.test(hint2), 'W after undo is a safe no-op (lastStroke consumed)');
 
+    // P3レビュー回帰: 描く→この色を全消去→W は幻の線を復活させない（自己検証ガード）
+    await page.mouse.move(cx - 100, cy + 60); await page.mouse.down(); await page.mouse.move(cx - 40, cy + 70); await page.mouse.move(cx + 30, cy + 55); await page.mouse.up(); await sleep(150);
+    t.ok(await linePop() > 0, 'phantom-guard setup: fresh stroke drawn');
+    await page.$eval('#clearColor', (e) => e.click()); await sleep(150);
+    t.ok(await linePop() === 0, 'phantom-guard setup: color cleared to 0');
+    await page.evaluate(() => window.CLSnap.snapLastStroke()); await sleep(150);
+    const hint3 = await page.$eval('#hint', (e) => e.textContent);
+    t.ok(await linePop() === 0, 'W after clearColor does NOT resurrect a phantom line [P3 review]');
+    t.ok(/見つかりません/.test(hint3), 'W after clear reports the stroke is gone (self-validating guard)');
+
     await ctx.shot('final');
     t.ok(ctx.errors.length === 0, 'no page errors' + (ctx.errors.length ? ': ' + ctx.errors.join(' | ') : ''));
   },
