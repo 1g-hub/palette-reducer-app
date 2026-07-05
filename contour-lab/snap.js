@@ -57,13 +57,14 @@
 
   /* ============ ハンドラ ============ */
   const CL = window.CL, S = CL.S, CLab = window.ContourLab, $ = (id) => document.getElementById(id);
-  let magCache = null; // {frame, mag, magMax}
+  let magCache = null; // {frame, wh, mag, magMax}
   function getMag() {
     if (!S.frameImgData) return null;
-    if (magCache && magCache.frame === S.cur) return magCache;
+    const wh = S.W + 'x' + S.H;
+    if (magCache && magCache.frame === S.cur && magCache.wh === wh) return magCache; // wh を含め別動画の同フレーム番号で使い回さない
     const mag = window.ICM.colorSobelMag({ width: S.W, height: S.H, data: S.frameImgData.data });
     let mx = 0; for (let i = 0; i < mag.length; i++) if (mag[i] > mx) mx = mag[i];
-    magCache = { frame: S.cur, mag, magMax: mx }; return magCache;
+    magCache = { frame: S.cur, wh, mag, magMax: mx }; return magCache;
   }
 
   function snapLastStroke() {
@@ -100,5 +101,9 @@
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key.toLowerCase() === 'w') { e.preventDefault(); snapLastStroke(); }
   });
+  // 動画読込で mag キャッシュ＋直前ストロークをリセット（別動画の残留を防ぐ、P4 と同クラス）。
+  const prevOVL = S.onVideoLoaded;
+  S.onVideoLoaded = function (file) { magCache = null; S.lastStroke = null; S.strokePts = null; return prevOVL ? prevOVL(file) : undefined; };
+
   window.CLSnap = { snapLastStroke, getMag, _magCache: () => magCache };
 })(typeof self !== 'undefined' ? self : this);

@@ -462,8 +462,8 @@
     if (ch.type === 'snap') { d.lines = new Map(); d.fill = new Map(); d.sharedLids = new Set(); const m = which === 'old' ? ch.before : ch.after; for (const [lid, runs] of m) d.lines.set(lid, bitmapFromRle(runs, S.W * S.H)); ensureFills(f); return; }
     const arr = writableLines(f, ch.lid); for (let k = 0; k < ch.idx.length; k++) arr[ch.idx[k]] = which === 'old' ? ch.old[k] : ch.neu[k]; d.fill.set(ch.lid, newFill(arr));
   }
-  function doUndo() { const f = S.cur, st = S.undo.get(f); if (!st || !st.length) return; const ch = st.pop(); applyCh(f, ch, 'old'); stackOf(S.redo, f).push(ch); S.maskDirty = true; render(); updateUndoButtons(); notifyFrameChanged(f); }
-  function doRedo() { const f = S.cur, st = S.redo.get(f); if (!st || !st.length) return; const ch = st.pop(); applyCh(f, ch, 'new'); stackOf(S.undo, f).push(ch); S.maskDirty = true; render(); updateUndoButtons(); notifyFrameChanged(f); }
+  function doUndo() { const f = S.cur, st = S.undo.get(f); if (!st || !st.length) return; const ch = st.pop(); applyCh(f, ch, 'old'); stackOf(S.redo, f).push(ch); S.lastStroke = null; S.maskDirty = true; render(); updateUndoButtons(); notifyFrameChanged(f); }
+  function doRedo() { const f = S.cur, st = S.redo.get(f); if (!st || !st.length) return; const ch = st.pop(); applyCh(f, ch, 'new'); stackOf(S.undo, f).push(ch); S.lastStroke = null; S.maskDirty = true; render(); updateUndoButtons(); notifyFrameChanged(f); }
   function updateUndoButtons() { const u = S.undo.get(S.cur), r = S.redo.get(S.cur); dom.undoBtn.disabled = !(u && u.length); dom.redoBtn.disabled = !(r && r.length); }
   function clearFrameAction() {
     const f = S.cur, d = S.frames.get(f); if (!d || !d.lines.size) return;
