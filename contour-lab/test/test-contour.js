@@ -302,6 +302,22 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
   ok(c3[0] === 7 && c3[2] === 9, 'Dijkstra line graph: endpoints keep their seed class');
 }
 
+// ---- cleanInterior が画面端に沿う輪郭を消さない（OOB=外部扱い） ----
+{
+  // 実アプリの cleanInterior 判定（修正後: OOB は return false = 残す）を再現
+  const pred = (lines, fill, W, H, x, y) => { for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) return false; const q = yy * W + xx; if (!lines[q] && !fill[q]) return false; } return true; };
+  const clean = (lines, W, H) => { const fill = A.computeFill(lines, W, H), out = Uint8Array.from(lines); for (let p = 0; p < W * H; p++) if (lines[p] && pred(lines, fill, W, H, p % W, (p / W) | 0)) out[p] = 0; return out; };
+  // 左辺が画面端(x=0)の四角
+  const W = 9, H = 9, a = new Uint8Array(W * H); rect(a, W, H, 0, 2, 6, 6);
+  const out = clean(a, W, H);
+  let edgeKept = true; for (let y = 2; y <= 6; y++) if (a[y * W + 0] && !out[y * W + 0]) edgeKept = false;
+  ok(edgeKept, 'cleanInterior keeps a contour running along the image edge (x=0) [verified fix]');
+  // 内部に埋もれた線は依然として消える（機能維持）
+  const b = new Uint8Array(W * H); rect(b, W, H, 2, 2, 6, 6); A.bresenham(b, W, H, 3, 4, 5, 4, 1, null);
+  const out2 = clean(b, W, H);
+  ok(!out2[4 * W + 4] && out2[2 * W + 2] === 1, 'cleanInterior still removes a buried interior line, keeps the outer contour');
+}
+
 // ---- 確定エッジスナップ（P3-2: costFromMag / dijkstraPath / buildCorridor / snapEndpoint） ----
 {
   // costFromMag: 勾配高→低コスト
@@ -326,6 +342,29 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
   ok(cor.allowed[0] === 0, 'buildCorridor leaves far pixels out');
   // snapEndpoint: 半径内の最大勾配へ
   const sp = SN.snapEndpoint(m, W, H, allowed, 4, 5, 2); ok(m[sp[1] * W + sp[0]] === 100, 'snapEndpoint moves to a max-gradient pixel');
+}
+
+// ---- traceChains / snapClosed（P3-3 全線再吸着） ----
+{
+  const line = (a, W, H, pts) => { for (let i = 1; i < pts.length; i++) A.bresenham(a, W, H, pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1], 1, null); };
+  const cov = (r) => { let c = 0; for (const ch of r.open) c += ch.length; for (const ch of r.closed) c += ch.length; return c; };
+  const cnt = (a) => { let c = 0; for (const v of a) c += v ? 1 : 0; return c; };
+  // L字 = open1
+  { const W = 10, H = 10, a = new Uint8Array(W * H); line(a, W, H, [[1, 1], [1, 7], [7, 7]]); const r = SN.traceChains(a, W, H); ok(r.open.length === 1 && r.closed.length === 0 && cov(r) === cnt(a), 'traceChains: L-shape = 1 open chain, full coverage'); }
+  // 閉じた四角 = closed1
+  { const W = 9, H = 9, a = new Uint8Array(W * H); rect(a, W, H, 2, 2, 6, 6); const r = SN.traceChains(a, W, H); ok(r.open.length === 0 && r.closed.length === 1 && cov(r) === cnt(a), 'traceChains: closed square = 1 closed loop, full coverage'); }
+  // 四角＋しっぽ = 端点あり→open
+  { const W = 11, H = 11, a = new Uint8Array(W * H); rect(a, W, H, 2, 2, 6, 6); A.bresenham(a, W, H, 6, 4, 9, 4, 1, null); const r = SN.traceChains(a, W, H); ok(r.open.length >= 1 && cov(r) === cnt(a), 'traceChains: square+tail has an endpoint -> open chain(s), full coverage'); }
+  // 2本の独立成分
+  { const W = 14, H = 8, a = new Uint8Array(W * H); A.bresenham(a, W, H, 1, 4, 5, 4, 1, null); A.bresenham(a, W, H, 8, 2, 12, 6, 1, null); const r = SN.traceChains(a, W, H); ok(r.open.length === 2, 'traceChains: two separate components -> two chains'); }
+  // snapClosed: 円状ループがエッジ(高勾配リング)へ寄る
+  { const W = 21, H = 21, mag = new Float32Array(W * H); const cx = 10, cy = 10, rr = 7;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { if (Math.abs(Math.hypot(x - cx, y - cy) - rr) < 0.7) mag[y * W + x] = 100; }
+    // 少し内側(半径5)の八角ループ
+    const loop = []; for (let k = 0; k < 16; k++) { const th = k / 16 * 2 * Math.PI; loop.push([Math.round(cx + 5 * Math.cos(th)), Math.round(cy + 5 * Math.sin(th))]); }
+    const avgR = (pts) => pts.reduce((s, p) => s + Math.hypot(p[0] - cx, p[1] - cy), 0) / pts.length;
+    const before = avgR(loop), after = avgR(SN.snapClosed(loop, mag, W, H, 3));
+    ok(after > before && after <= rr + 1, 'snapClosed pulls a loop outward toward the high-gradient ring (' + before.toFixed(1) + '->' + after.toFixed(1) + ', ring ' + rr + ')'); }
 }
 
 // ---- P7: 本体(app.js)の RLE 機構と往復互換（contour-lab の線形RLE → ビットマップ → app.js の行RLE） ----

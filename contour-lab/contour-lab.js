@@ -421,7 +421,9 @@
     d.fill.set(lid, newFill(lines)); d.touched.add(lid); commitChanges(f, lid, changed); S.maskDirty = true; render(); updateUndoButtons(); toast(msg + `（${changed.size}px）`);
   }
   // 要望1: 塗り内部に埋もれた線を消し、輪郭（外側＋穴の縁）だけ残す。＝空き画素(穴/外部)に接しない線を消す。
-  function cleanInterior() { const W = S.W, H = S.H; shapeEdit((lines, fill, p, x, y) => { for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; const q = yy * W + xx; if (!lines[q] && !fill[q]) return false; } return true; }, '内部の線を掃除'); }
+  // 画面外(OOB)は「外部（空き）」とみなす＝return false（残す）。skip すると画面端に沿う輪郭が
+  // 「埋もれている」と誤判定されて消える（キャラが枠に接する動画で頻発）。内部の埋もれ線の掃除は不変。
+  function cleanInterior() { const W = S.W, H = S.H; shapeEdit((lines, fill, p, x, y) => { for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) return false; const q = yy * W + xx; if (!lines[q] && !fill[q]) return false; } return true; }, '内部の線を掃除'); }
   // 要望3: 領域形成に使われていない線（塗りに一切接しない浮いた線）を削除。
   function removeStray() { const W = S.W, H = S.H; shapeEdit((lines, fill, p, x, y) => { for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; if (fill[yy * W + xx]) return false; } return true; }, '未使用の線を削除'); }
   // 要望: オブジェクト消しゴム＝ドラッグで、触れた同色マスク(塗り∪線)の塊をリアルタイムに一括消去。

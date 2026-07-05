@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>輪郭ラボ — 手描き領域マスク (P1)</title>
-<link rel="stylesheet" href="./styles.css?v=21">
+<link rel="stylesheet" href="./styles.css?v=22">
 </head>
 <body>
 <header id="topbar">
@@ -58,8 +58,9 @@
       <label class="row"><span class="lbl">消しゴム幅</span><input type="range" id="eraserSize" min="1" max="15" step="2" value="3"><span id="eraserSizeLabel" class="mono small">3</span></label>
       <label class="row check"><input type="checkbox" id="objectEraser"> オブジェクト消しゴム（ドラッグで触れた塊ごと消去）</label>
       <button id="snapStroke" class="btn wide">🧲 直前の線をエッジへ吸着 (W)</button>
+      <button id="resnapAll" class="btn wide">🧲 この色の全線をエッジへ再吸着 (R)</button>
       <label class="row"><span class="lbl">吸着半径</span><input type="range" id="snapRadius" min="2" max="16" step="1" value="6"><span id="snapRadiusLabel" class="mono small">6</span></label>
-      <p class="note small">雑にペンで描く→W（またはボタン）で、その線を近くの色エッジへ吸着します。1回のUndoでラフ線に戻せます。</p>
+      <p class="note small">雑にペンで描く→W（またはボタン）で、その線を近くの色エッジへ吸着します。1回のUndoでラフ線に戻せます。Rは選択色の全線を一括で再吸着（引き継ぎ後のズレ直し＝疑似トラッキング／β）。</p>
     </section>
 
     <section class="psec">
@@ -160,7 +161,7 @@
         <li>左ドラッグ＝描画／消去</li>
         <li>右・中・Space+ドラッグ＝移動</li>
         <li>ホイール＝カーソル中心ズーム</li>
-        <li>B ペン / E 消しゴム / S スナップ / W エッジ吸着 / G グリッド / D エッジ / Q 量子化 / A ワンド / X スクリブル</li>
+        <li>B ペン / E 消しゴム / S スナップ / W エッジ吸着 / R 全線再吸着 / G グリッド / D エッジ / Q 量子化 / A ワンド / X スクリブル</li>
         <li>← → フレーム送り / Shift+← → シーン移動（次/前シーンの先頭）/ F 全体 / 1 等倍</li>
         <li>Ctrl+Z 戻す / Ctrl+Y やり直し</li>
       </ul>
@@ -177,14 +178,14 @@
   </main>
 </div>
 
-<script src="../icm.js?v=21"></script>
-<script src="./contour-lab.js?v=21"></script>
-<script src="./morpho.js?v=21"></script>
-<script src="./storage.js?v=21"></script>
-<script src="./io.js?v=21"></script>
-<script src="./timeline.js?v=21"></script>
-<script src="./quantize.js?v=21"></script>
-<script src="./slic.js?v=21"></script>
-<script src="./snap.js?v=21"></script>
+<script src="../icm.js?v=22"></script>
+<script src="./contour-lab.js?v=22"></script>
+<script src="./morpho.js?v=22"></script>
+<script src="./storage.js?v=22"></script>
+<script src="./io.js?v=22"></script>
+<script src="./timeline.js?v=22"></script>
+<script src="./quantize.js?v=22"></script>
+<script src="./slic.js?v=22"></script>
+<script src="./snap.js?v=22"></script>
 </body>
 </html>
