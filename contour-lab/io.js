@@ -81,23 +81,42 @@
     return changed.size;
   }
   const frameFromName = (name) => { const m = /f(\d{3,6})/.exec(name); return m ? +m[1] : null; };
+  // 対象(オブジェクト/レイヤ)ID: `mask_L{N}_f#####.png`(本アプリ書き出し) / `obj{N}` / `L{N}_`（SAM等の複数対象）
+  const objFromName = (name) => { const m = /(?:^|[^a-z0-9])L(\d+)[_.]f\d/i.exec(name) || /obj(?:ect)?[_-]?(\d+)/i.exec(name); return m ? +m[1] : null; };
   async function decodeImage(fileOrBlob) { try { return await createImageBitmap(fileOrBlob); } catch (e) { return await new Promise((res, rej) => { const img = new Image(); img.onload = () => res(img); img.onerror = () => rej(new Error('画像デコード失敗')); img.src = URL.createObjectURL(fileOrBlob); }); } }
+  // 指定IDのレイヤを保証（無ければその id で作成）。SAM の obj id をそのまま色レイヤ id にする。
+  function ensureLayer(id, color, name) {
+    let L = S.layers.find((l) => l.id === id);
+    if (!L) { L = { id, name: name || '', color: (color && color.length ? color.slice() : [200, 200, 200]), visible: true, opacity: 1 }; S.layers.push(L); if (id >= S.nextLid) S.nextLid = id + 1; CL.renderLayers(); }
+    return L;
+  }
 
   async function importMaskFiles(files) {
     if (!S.W) { CL.toast('先に動画を読み込んでください'); return; }
-    const lid = S.activeLid, thr = +($('importThresh') ? $('importThresh').value : 127), mode = ($('importMode') && $('importMode').value) || 'replace';
+    const thr = +($('importThresh') ? $('importThresh').value : 127), modeSel = ($('importMode') && $('importMode').value) || 'replace';
+    const arr = [...files];
+    // manifest.json があればレイヤ(色/名前)を先に用意（本アプリ/SAM 書き出しの往復）
+    const manifestFile = arr.find((f) => /\.json$/i.test(f.name));
+    if (manifestFile) { try { const mani = JSON.parse(await manifestFile.text()); if (mani && Array.isArray(mani.layers)) for (const l of mani.layers) { const L = ensureLayer(l.id, l.color, l.name); if (l.name) L.name = l.name; if (l.color && l.color.length) L.color = l.color.slice(); } CL.renderLayers(); } catch (e) {} } // manifest は既存レイヤの名前/色も上書き（SAMの色と揃える）
+    const imgs = arr.filter((f) => f !== manifestFile && !/\.json$/i.test(f.name));
+    const multiObj = imgs.some((f) => objFromName(f.name) != null); // 複数対象＝各対象を別レイヤへ
     const startF = S.cur >= 0 ? S.cur : 0;
+    const usedLayers = new Set();
     let applied = 0, idx = 0;
-    const sorted = [...files].sort((a, b) => a.name.localeCompare(b.name));
+    const sorted = imgs.sort((a, b) => a.name.localeCompare(b.name));
     for (const file of sorted) {
       let bmp; try { bmp = await decodeImage(file); } catch (e) { continue; }
       const mask = imageToMask(bmp, thr);
-      let f = frameFromName(file.name); if (f == null) f = startF + idx; // 連番: ファイル名に f####### が無ければ現在フレームから順に
+      let f = frameFromName(file.name); if (f == null) f = startF + idx; // ファイル名に f##### が無ければ現在フレームから連番
       if (f < 0 || f >= S.total) { idx++; continue; }
-      applyMaskToLayer(f, lid, mask, mode); applied++; idx++;
+      let target = S.activeLid;
+      if (multiObj) { const o = objFromName(file.name); if (o != null) { ensureLayer(o); target = o; } }
+      applyMaskToLayer(f, target, mask, multiObj ? 'replace' : modeSel); // 複数対象は各フレーム置換（追跡結果をそのまま）
+      usedLayers.add(target); applied++; idx++;
     }
+    if (S.onMetaChanged) S.onMetaChanged();
     CL.S.cur = -1; CL.requestFrame(S.want || 0); // 取込結果を再描画
-    CL.toast('マスクを取込みました（' + applied + '枚）');
+    CL.toast('マスクを取込みました（' + applied + '枚' + (multiObj ? '・' + usedLayers.size + '色に振り分け' : '') + '）');
   }
 
   // ---- 本体(palette-reducer)取込用 JSON（P7: 形式凍結） ----
@@ -125,5 +144,5 @@
   if ($('exportMainApp')) $('exportMainApp').addEventListener('click', exportMainAppJSON);
   const imp = $('importMask'); if (imp) imp.addEventListener('change', (e) => { const fs = e.target.files; if (fs && fs.length) importMaskFiles([...fs]); imp.value = ''; });
 
-  window.CLIO = { buildExportFiles, exportFrameList, maskPngBytes, imageToMask, applyMaskToLayer, importMaskFiles, decodeImage, getLines, buildMainAppExport };
+  window.CLIO = { buildExportFiles, exportFrameList, maskPngBytes, imageToMask, applyMaskToLayer, importMaskFiles, decodeImage, getLines, buildMainAppExport, objFromName, ensureLayer };
 })();

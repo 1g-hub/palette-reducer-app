@@ -127,6 +127,14 @@ Workflow（5次元レビュー→各所見を独立エージェントが反証�
 
 ---
 
+## SAM 3.1 → contour-lab パイプライン（2026-07-05, ユーザ要望）
+要望: SAM3.1でシーン分割→点選択→自動追跡→マスク→**出力**→**contour-labで修正**。3ピースのうち2つは既存だった。
+- **①SAM追跡（既存）**: thxserv `~/sam3-bg/gradio_sam3_scene.py`（シーン検出/分割/結合・点±クリック・SAM2トラッカ・refine）。
+- **②マスク出力（新規・SAM側）**: 追跡結果を**contour-lab形式のZIP**（`mask_L{obj}_f{00000}.png` 0/255 + `manifest.json`）で書き出す `on_export_masks`＋`_scene_binary_masks`＋「💾 マスクを書き出し」ボタンを gradio_sam3_scene.py に追加（冪等パッチ、`.bak_export_*` バックアップ、py_compile 済み）。**GPU実行での end-to-end はユーザ検証待ち**（点クリック＋追跡が要るため私はヘッドレスで実行不可）。obj id = contour-lab のレイヤ id、色は OBJ_COLORS。
+- **③contour-labで修正（強化）**: `importMaskFiles` を**複数対象対応**に。`objFromName`（`mask_L{n}_f#####` / `obj{n}`）で対象IDを抽出→`ensureLayer` で対象ごとに別の色レイヤへ自動振り分け（複数対象は各フレーム 'replace'）。manifest.json があればレイヤの色/名前を適用（既存レイヤも上書き＝SAMの色と一致）。版23。
+- **e2e `sam-import` → 11/0**: mask_L1/L2＋manifest を実UIで取込→対象1/2が別レイヤ（manifest名『男の子』『女の子』・色適用）・フレーム対応（f0=両対象/f3=対象1のみ）・**両対象の非重複**。io-roundtrip/restore-merge/region-fixes 回帰なし。
+- パイプライン運用: SAMで追跡→「💾書き出し」でZIP DL→展開→contour-labの「マスクPNGを読み込む」でPNG群＋manifest.jsonをまとめて選択→対象別レイヤに入る→ペン/W/R/消しゴム等で修正→本体用JSON等で書き出し。
+
 ## cleanInterior 修正（2026-07-05, ユーザ検証依頼）
 - **検証結果**: 「内部の線を掃除」は画面**内部**の輪郭は安全（外周保持・埋もれ線のみ除去）だが、**画面端(枠)に沿う輪郭は消える**ことを実測確認（左辺x=0の四角で 5画素中3画素が消失）。原因＝OOB近傍を skip → 端の外部（空き）が見えず「埋もれ」と誤判定。キャラが枠に接する動画で頻発。
 - **修正**: cleanInterior 判定で OOB を `return false`（外部＝空き扱い→残す）に変更。内部埋もれ線の掃除は不変。unit +2（端の輪郭保持／内部掃除維持）→ **unit 94→（P3-3後）99**。

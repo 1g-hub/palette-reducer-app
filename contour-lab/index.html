@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>輪郭ラボ — 手描き領域マスク (P1)</title>
-<link rel="stylesheet" href="./styles.css?v=22">
+<link rel="stylesheet" href="./styles.css?v=23">
 </head>
 <body>
 <header id="topbar">
@@ -144,7 +144,7 @@
       <label class="row"><span class="lbl">合成</span>
         <select id="importMode" class="num"><option value="replace">置換</option><option value="or">追加(OR)</option></select>
       </label>
-      <p class="note small">選択中の色へ取込みます。ファイル名の f00000 でフレーム対応（無ければ現在フレームから連番）。SAM等の下描きの受け口。</p>
+      <p class="note small">選択中の色へ取込みます。ファイル名の f00000 でフレーム対応（無ければ現在フレームから連番）。SAM等の下描きの受け口。<br>複数対象は <code>mask_L{番号}_f00000.png</code>＋manifest.json をまとめて選ぶと、対象ごとに別の色レイヤへ自動振り分けします。</p>
     </section>
 
     <section class="psec">
@@ -178,14 +178,14 @@
   </main>
 </div>
 
-<script src="../icm.js?v=22"></script>
-<script src="./contour-lab.js?v=22"></script>
-<script src="./morpho.js?v=22"></script>
-<script src="./storage.js?v=22"></script>
-<script src="./io.js?v=22"></script>
-<script src="./timeline.js?v=22"></script>
-<script src="./quantize.js?v=22"></script>
-<script src="./slic.js?v=22"></script>
-<script src="./snap.js?v=22"></script>
+<script src="../icm.js?v=23"></script>
+<script src="./contour-lab.js?v=23"></script>
+<script src="./morpho.js?v=23"></script>
+<script src="./storage.js?v=23"></script>
+<script src="./io.js?v=23"></script>
+<script src="./timeline.js?v=23"></script>
+<script src="./quantize.js?v=23"></script>
+<script src="./slic.js?v=23"></script>
+<script src="./snap.js?v=23"></script>
 </body>
 </html>
