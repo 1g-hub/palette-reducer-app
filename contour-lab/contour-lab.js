@@ -363,6 +363,7 @@
     }
     const snap = findSnap(S.cur, S.activeLid, wx, wy); if (snap && S.tool === 'pen') { px = snap[0]; py = snap[1]; }
     S.drawing = true; S.strokeOld = new Map(); S.startPX = px; S.startPY = py; S.lastPX = px; S.lastPY = py;
+    S.strokePts = S.tool === 'pen' ? [[px, py]] : null; // 確定エッジスナップ(W)用の点列（P3-1）
     fdata(S.cur).touched.add(S.activeLid);
     if (S.tool === 'pen') penInto(px, py, px, py); else eraseInto(px, py);
     S.maskDirty = true; render();
@@ -374,7 +375,7 @@
     const [wx, wy] = toWorld(sx, sy); S.cursorWX = wx; S.cursorWY = wy;
     const px = clamp(Math.floor(wx), 0, S.W - 1), py = clamp(Math.floor(wy), 0, S.H - 1);
     if (S.drawing) {
-      if (S.tool === 'pen') penInto(S.lastPX, S.lastPY, px, py);
+      if (S.tool === 'pen') { penInto(S.lastPX, S.lastPY, px, py); if (S.strokePts && (px !== S.lastPX || py !== S.lastPY)) S.strokePts.push([px, py]); }
       else if (S.objectEraser) objectEraseSeg(S.lastPX, S.lastPY, px, py);
       else eraseSeg(S.lastPX, S.lastPY, px, py);
       S.lastPX = px; S.lastPY = py; S.snapPt = null; S.maskDirty = true; scheduleRender();
@@ -387,11 +388,13 @@
     if (S.strokeOld && S.strokeOld.size) {
       const arr = writableLines(f, lid), before = pop(d.fill.get(lid)), n = S.strokeOld.size;
       d.fill.set(lid, newFill(arr));
+      // ペンで新規に立てた画素(old=0→現在1)を記録＝W(確定スナップ)がこのストロークだけを差し替えるため（P3-1）
+      if (S.tool === 'pen') { const added = []; for (const [i, o] of S.strokeOld) if (o === 0 && arr[i]) added.push(i); S.lastStroke = { frame: f, lid, pts: (S.strokePts || []).slice(), added, closed: pop(d.fill.get(lid)) - before > 0 }; }
       commitChanges(f, lid, S.strokeOld);
       if (S.tool === 'pen' && pop(d.fill.get(lid)) - before > 0) toast('閉領域を検出：塗りました');
       else if (S.tool === 'eraser' && S.objectEraser) toast(`オブジェクトを消去（${n}px）`);
     }
-    S.strokeOld = null; S.maskDirty = true; render(); updateUndoButtons();
+    S.strokeOld = null; S.strokePts = null; S.maskDirty = true; render(); updateUndoButtons();
   }
   function pop(u8) { if (!u8) return 0; let c = 0; for (let i = 0; i < u8.length; i++) if (u8[i]) c++; return c; }
   dom.view.addEventListener('pointerup', () => { if (S.panning) { S.panning = false; dom.view.classList.remove('panning'); return; } endStroke(); });

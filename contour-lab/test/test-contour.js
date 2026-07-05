@@ -3,6 +3,7 @@ const M = require('../morpho.js');
 const T = require('../timeline.js');
 const Q = require('../quantize.js');
 const SL = require('../slic.js');
+const SN = require('../snap.js');
 let pass = 0, fail = 0;
 function ok(cond, msg) { if (cond) { pass++; } else { fail++; console.log('  FAIL:', msg); } }
 const at = (arr, W, x, y) => arr[y * W + x];
@@ -299,6 +300,32 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
   const adj3 = [[1], [0, 2], [1]], lab3 = new Float32Array([0, 0, 0, 10, 0, 0, 20, 0, 0]);
   const c3 = SL.assignByDijkstra(adj3, lab3, [{ sp: 0, cls: 7 }, { sp: 2, cls: 9 }]);
   ok(c3[0] === 7 && c3[2] === 9, 'Dijkstra line graph: endpoints keep their seed class');
+}
+
+// ---- 確定エッジスナップ（P3-2: costFromMag / dijkstraPath / buildCorridor / snapEndpoint） ----
+{
+  // costFromMag: 勾配高→低コスト
+  const mag = new Float32Array([0, 50, 100]); const cost = SN.costFromMag(mag, 3, 8, 100);
+  ok(Math.abs(cost[0] - 9) < 1e-6 && Math.abs(cost[2] - 1) < 1e-6 && cost[1] > cost[2] && cost[1] < cost[0], 'costFromMag: mag0->1+K, magMax->1, monotonic');
+  // dijkstraPath: 対角の高勾配の谷を辿る
+  const W = 12, H = 12, N = W * H, m = new Float32Array(N);
+  for (let i = 0; i < 12; i++) m[i * W + i] = 100;
+  const c = SN.costFromMag(m, N, 8, 100), allowed = new Uint8Array(N).fill(1);
+  const path = SN.dijkstraPath(c, W, H, allowed, 0, 0, 11, 11);
+  ok(path && path.length >= 12 && path[0][0] === 0 && path[path.length - 1][0] === 11, 'dijkstraPath reaches the target');
+  ok(path.every(([x, y]) => Math.abs(x - y) <= 1), 'dijkstraPath follows the low-cost diagonal valley');
+  // 谷から外れた直線経路（全部同コスト）より、谷を通る経路のほうがコスト小＝谷を選ぶことの確認
+  let onDiag = 0; for (const [x, y] of path) if (x === y) onDiag++; ok(onDiag >= 10, 'most path points lie on the edge (' + onDiag + ')');
+  // allowed 外の端点は null
+  const blocked = new Uint8Array(N); blocked[0] = 1; // 終点が許可されない
+  ok(SN.dijkstraPath(c, W, H, blocked, 0, 0, 11, 11) === null, 'dijkstraPath returns null when target not in corridor');
+  // buildCorridor: polyline を覆い、bbox が妥当
+  const cor = SN.buildCorridor([[3, 3], [8, 8]], W, H, 1);
+  ok(cor.allowed[3 * W + 3] === 1 && cor.allowed[8 * W + 8] === 1 && cor.allowed[5 * W + 5] === 1, 'buildCorridor covers the polyline path');
+  ok(cor.x0 <= 2 && cor.y0 <= 2 && cor.x1 >= 9 && cor.y1 >= 9, 'buildCorridor bbox includes dilation');
+  ok(cor.allowed[0] === 0, 'buildCorridor leaves far pixels out');
+  // snapEndpoint: 半径内の最大勾配へ
+  const sp = SN.snapEndpoint(m, W, H, allowed, 4, 5, 2); ok(m[sp[1] * W + sp[0]] === 100, 'snapEndpoint moves to a max-gradient pixel');
 }
 
 // ---- P7: 本体(app.js)の RLE 機構と往復互換（contour-lab の線形RLE → ビットマップ → app.js の行RLE） ----
