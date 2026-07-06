@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>輪郭ラボ — 手描き領域マスク (P1)</title>
-<link rel="stylesheet" href="./styles.css?v=28">
+<link rel="stylesheet" href="./styles.css?v=29">
 </head>
 <body>
 <header id="topbar">
@@ -85,7 +85,9 @@
       <h3>色（マスク）</h3>
       <div id="layerList" class="layerlist"></div>
       <button id="addLayer" class="btn wide">＋ 色を追加</button>
-      <p class="note small">各色＝別マスク。名前欄はクリックで編集可。キャラを囲うと未割当の残りが自動で背景になります（P1では表示のみ）。</p>
+      <button id="resolveFrame" class="btn wide">重なりを解消（前面優先・現フレーム）</button>
+      <button id="resolveScene" class="btn wide">→ このシーンの残りも解消</button>
+      <p class="note small">各色＝別マスク。<b>リストの上ほど前面</b>（重なると上に表示）。▲▼で順序変更。名前欄はクリックで編集可。<br>「重なりを解消」は各画素を前面の色だけに割当て、重なりを無くします（他の色から重複部分を削る）。Undo可。</p>
     </section>
 
     <section class="psec">
@@ -180,14 +182,14 @@
   </main>
 </div>
 
-<script src="../icm.js?v=28"></script>
-<script src="./contour-lab.js?v=28"></script>
-<script src="./morpho.js?v=28"></script>
-<script src="./storage.js?v=28"></script>
-<script src="./io.js?v=28"></script>
-<script src="./timeline.js?v=28"></script>
-<script src="./quantize.js?v=28"></script>
-<script src="./slic.js?v=28"></script>
-<script src="./snap.js?v=28"></script>
+<script src="../icm.js?v=29"></script>
+<script src="./contour-lab.js?v=29"></script>
+<script src="./morpho.js?v=29"></script>
+<script src="./storage.js?v=29"></script>
+<script src="./io.js?v=29"></script>
+<script src="./timeline.js?v=29"></script>
+<script src="./quantize.js?v=29"></script>
+<script src="./slic.js?v=29"></script>
+<script src="./snap.js?v=29"></script>
 </body>
 </html>

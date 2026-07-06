@@ -127,7 +127,7 @@
   const dom = {};
   ['fileInput', 'videoInfo', 'frameNav', 'firstFrame', 'prevFrame', 'frameLabel', 'nextFrame', 'lastFrame', 'frameSlider',
     'zoomGrp', 'zoomFit', 'zoom100', 'panel', 'fpsInput', 'fpsDetected', 'toolPen', 'toolEraser', 'snapToggle',
-    'eraserSize', 'eraserSizeLabel', 'objectEraser', 'layerList', 'addLayer', 'cleanInterior', 'removeStray', 'clearColor',
+    'eraserSize', 'eraserSizeLabel', 'objectEraser', 'layerList', 'addLayer', 'resolveFrame', 'resolveScene', 'cleanInterior', 'removeStray', 'clearColor',
     'maskHidden', 'maskOpacity', 'edgeToggle', 'edgeOpacity', 'srcOpacity', 'gridToggle', 'carryToggle', 'copyNext', 'copyScene',
     'undoBtn', 'redoBtn', 'clearFrame', 'exportPng', 'view', 'empty', 'hint',
   ].forEach((k) => { dom[k] = $(k); });
@@ -527,9 +527,45 @@
     if (mode === 'next') requestFrame(S.cur + 1); else render();
     toast(n ? (n + 'フレームへコピーしました') : '差分なし（同じでした）');
   }
+  // レイヤ順序変更。S.layers の後ろほど前面（合成で上に描かれる）。dir:+1=前面へ, -1=背面へ。
+  function moveLayer(id, dir) {
+    const i = S.layers.findIndex((l) => l.id === id); if (i < 0) return;
+    const j = i + dir; if (j < 0 || j >= S.layers.length) return;
+    const t = S.layers[i]; S.layers[i] = S.layers[j]; S.layers[j] = t;
+    renderLayers(); S.maskDirty = true; render(); notifyMetaChanged();
+  }
+  // 重なり解消: 各画素を「前面(配列後方)優先」で1色だけに割当て、負けた色の領域を削って非重複にする。
+  // scope: 'frame' | 'scene'。各フレーム snap undo。
+  function resolveOverlaps(scope) {
+    const maskToLines = window.ContourLab && window.ContourLab.maskToLines; if (!maskToLines) { toast('モジュール未ロード'); return; }
+    const W = S.W, H = S.H, N = W * H;
+    let frames = [S.cur];
+    if (scope === 'scene') { const sc = sceneIndexOf(S.cur); frames = []; for (let f = 0; f < S.total; f++) { if (sceneIndexOf(f) !== sc) continue; const has = (S.frames.get(f) && S.frames.get(f).lines.size) || (S.savedFrames && S.savedFrames.has(f)); if (has) frames.push(f); } }
+    if (frames.length > 60 && !confirm(frames.length + 'フレームの重なりを解消します。よろしいですか？')) return;
+    let touched = 0;
+    for (const f of frames) {
+      if (S.onFrameEnter) S.onFrameEnter(f);
+      const d = S.frames.get(f); if (!d || !d.lines.size) continue;
+      const before = new Map(); for (const [lid, arr] of d.lines) before.set(lid, rleFromBitmap(arr));
+      const claimed = new Uint8Array(N); let changed = false;
+      for (let li = S.layers.length - 1; li >= 0; li--) { // 前面(配列後方)から
+        const L = S.layers[li], lines = d.lines.get(L.id); if (!lines) continue;
+        const fill = d.fill.get(L.id) || newFill(lines);
+        const won = new Uint8Array(N); let lost = false;
+        for (let i = 0; i < N; i++) if (lines[i] || fill[i]) { if (!claimed[i]) { won[i] = 1; claimed[i] = 1; } else lost = true; }
+        if (lost) { const nl = maskToLines(won, W, H); d.lines.set(L.id, nl); d.fill.set(L.id, newFill(nl)); if (d.sharedLids) d.sharedLids.delete(L.id); changed = true; }
+      }
+      if (changed) { const after = new Map(); for (const [lid, arr] of d.lines) after.set(lid, rleFromBitmap(arr)); pushUndo(f, { type: 'snap', before, after }); notifyFrameChanged(f); touched++; }
+    }
+    ensureFills(S.cur); S.maskDirty = true; render(); updateUndoButtons();
+    toast(touched ? (touched + 'フレームの重なりを解消しました') : '重なりはありませんでした');
+  }
   function renderLayers() {
     dom.layerList.innerHTML = '';
-    S.layers.forEach((L, pos) => {
+    const n = S.layers.length;
+    // 表示は前面（配列後方）を上に。上ほど前面＝重なった時に上に表示。
+    for (let ai = n - 1; ai >= 0; ai--) {
+      const L = S.layers[ai], pos = ai;
       const row = document.createElement('div'); row.className = 'layer' + (L.id === S.activeLid ? ' active' : '');
       row.addEventListener('click', (e) => { if (e.target.closest('input,button')) return; setActive(L.id); });
       const sw = document.createElement('span'); sw.className = 'sw'; sw.style.background = `rgb(${L.color[0]},${L.color[1]},${L.color[2]})`; sw.title = '選択'; sw.addEventListener('click', () => setActive(L.id));
@@ -537,10 +573,12 @@
       nm.addEventListener('input', () => { L.name = nm.value; notifyMetaChanged(); }); nm.addEventListener('focus', () => setActive(L.id));
       const vis = document.createElement('input'); vis.type = 'checkbox'; vis.className = 'vis'; vis.checked = L.visible; vis.title = '表示'; vis.addEventListener('change', () => { L.visible = vis.checked; S.maskDirty = true; render(); notifyMetaChanged(); });
       const op = document.createElement('input'); op.type = 'range'; op.className = 'op'; op.min = 0; op.max = 100; op.value = Math.round(L.opacity * 100); op.title = '濃さ'; op.addEventListener('input', () => { L.opacity = op.value / 100; S.maskDirty = true; render(); notifyMetaChanged(); });
+      const up = document.createElement('button'); up.className = 'mv'; up.textContent = '▲'; up.title = '前面へ'; up.disabled = ai === n - 1; up.addEventListener('click', () => moveLayer(L.id, +1));
+      const dn = document.createElement('button'); dn.className = 'mv'; dn.textContent = '▼'; dn.title = '背面へ'; dn.disabled = ai === 0; dn.addEventListener('click', () => moveLayer(L.id, -1));
       const mrg = document.createElement('button'); mrg.className = 'mrg'; mrg.textContent = '⤵'; mrg.title = '選択中の色へ統合'; mrg.addEventListener('click', () => mergeLayers(L.id, S.activeLid));
       const del = document.createElement('button'); del.className = 'del'; del.textContent = '✕'; del.title = '削除'; del.addEventListener('click', () => delLayer(L.id));
-      row.append(sw, nm, vis, op, mrg, del); dom.layerList.appendChild(row);
-    });
+      row.append(sw, nm, vis, op, up, dn, mrg, del); dom.layerList.appendChild(row);
+    }
   }
 
   /* ============ 書き出し（PNG） ============ */
@@ -560,6 +598,8 @@
   dom.eraserSize.addEventListener('input', () => { S.eraserSize = +dom.eraserSize.value; dom.eraserSizeLabel.textContent = S.eraserSize; });
   dom.objectEraser.addEventListener('change', () => { S.objectEraser = dom.objectEraser.checked; if (S.objectEraser) setTool('eraser'); render(); });
   dom.addLayer.addEventListener('click', addLayer);
+  if (dom.resolveFrame) dom.resolveFrame.addEventListener('click', () => resolveOverlaps('frame'));
+  if (dom.resolveScene) dom.resolveScene.addEventListener('click', () => resolveOverlaps('scene'));
   dom.cleanInterior.addEventListener('click', cleanInterior);
   dom.removeStray.addEventListener('click', removeStray);
   dom.clearColor.addEventListener('click', clearColorAction);
@@ -619,7 +659,7 @@
     S, dom,
     requestFrame, scheduleRender, render, toast,
     fdata, layerLines, writableLines, newFill, ensureFills, owned, anyOwned, sceneIndexOf, retainFillsFor,
-    activeLayer, setActive, addLayer, setTool, renderLayers, eventToPixel, mergeLayers, copyFrameForward,
+    activeLayer, setActive, addLayer, setTool, renderLayers, eventToPixel, mergeLayers, copyFrameForward, moveLayer, resolveOverlaps,
     commitChanges, pushUndo, updateUndoButtons,
     rebuildMask, exportPng,
   };

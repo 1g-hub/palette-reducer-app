@@ -109,3 +109,8 @@ body{
 /* merge button (feature 1) */
 .layer .mrg{color:var(--ink2);border:none;background:none;cursor:pointer;font-size:14px;padding:0 2px}
 .layer .mrg:hover{color:var(--accent)}
+
+/* layer reorder buttons */
+.layer .mv{color:var(--ink2);border:none;background:none;cursor:pointer;font-size:10px;padding:0 1px;line-height:1}
+.layer .mv:hover:not(:disabled){color:var(--accent)}
+.layer .mv:disabled{opacity:.25;cursor:default}

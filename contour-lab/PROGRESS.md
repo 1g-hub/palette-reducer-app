@@ -141,6 +141,12 @@ Workflow（5次元レビュー→各所見を独立エージェントが反証�
 - そのZIPをDL・展開し **contour-lab へ実取込（e2e `sam-real` 7/0）→対象1レイヤ・封止復元 被覆35.9%（元と一致）・frame2も取込・UIスクショで男の子にマスク**。**実キャラマスク（枠端接触・複雑形状）が maskToLines→even-odd で完全復元されることを実証**。
 - **結論: SAM3.1 シーン→点→追跡→書き出し→contour-lab取込→修正 の一気通貫が実機で成立**。唯一私がGPU未検証だった SAM書き出しを検証・バグ修正済み。残るユーザ確認は対話UIでの点クリック体感のみ。
 
+## レイヤ順序変更 & 重なり解消（2026-07-06, ユーザ要望）
+要望「色ごとにレイヤ順序を変えたい／というかマスクがかぶらないようにしたい」。
+- **順序変更**: `moveLayer(id,dir)` ＋各レイヤ行に ▲(前面へ)/▼(背面へ)。renderLayers を**前面(配列後方)が上**に表示するよう反転（リスト上＝前面＝重なりで上）。合成順(rebuildMask)は不変（配列後方＝前面）。順序は meta 保存で永続。
+- **重なり解消**: `resolveOverlaps('frame'|'scene')` ＋ボタン2つ。各画素を**前面(配列後方)優先**で1色だけに割当て→負けた色は won領域を `maskToLines` で再構成して非重複化。各フレーム snap undo。順序変更で優先色を制御できる。
+- e2e `layers-order` 11/0（重なり→前面が保持/背面が失う・Undo復元・moveLayerで前面入替→resolveで優先色が変わる）。版29、unit 94/0、回帰なし（smoke/restore-merge/sam-import/merge-layers/copy-forward）。
+
 ## レイヤ統合 & フレーム前方コピー（2026-07-06, ユーザ要望2件）
 - **機能1 レイヤ統合**（2色→1色）: `mergeLayers(src,dst)`（contour-lab.js）— 全 in-memory フレームで src線を dst へ OR＋fill再計算＋src削除、`S.onMergeSaved`（storage.js）で未訪問の savedFrames(RLE)＋IDBも統合。各レイヤ行に「⤵（選択中の色へ統合）」ボタン。confirm ガード（Ctrl+Z不可を明記）。e2e `merge-layers` 9/0（色2→色1、色1が左右両方を含む・色2消滅・面積和）。
 - **機能2 現フレームを前方へ上書きコピー**（carryは空フレームのみ複製＝ZIP取込後は効かない、への対応）: `copyFrameForward('next'|'scene')`（contour-lab.js）— **選択色のみ**を次フレーム/同シーン残りへ上書き（他色=他対象は温存、per-layer diff undo）。「フレーム引き継ぎ」節にボタン2つ。e2e `copy-forward` 10/0（f0→f1上書き・f1がf0一致・**他対象保持**・Undoで復元）。版27。
