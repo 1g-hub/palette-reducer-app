@@ -141,6 +141,10 @@ Workflow（5次元レビュー→各所見を独立エージェントが反証�
 - そのZIPをDL・展開し **contour-lab へ実取込（e2e `sam-real` 7/0）→対象1レイヤ・封止復元 被覆35.9%（元と一致）・frame2も取込・UIスクショで男の子にマスク**。**実キャラマスク（枠端接触・複雑形状）が maskToLines→even-odd で完全復元されることを実証**。
 - **結論: SAM3.1 シーン→点→追跡→書き出し→contour-lab取込→修正 の一気通貫が実機で成立**。唯一私がGPU未検証だった SAM書き出しを検証・バグ修正済み。残るユーザ確認は対話UIでの点クリック体感のみ。
 
+## ZIP直接取込（2026-07-06, ユーザ「ZIPをどこに置く？」）
+- 回答＝どこにも置かなくてよい（ブラウザのファイル選択）。さらに **SAM書き出しZIPをそのまま `#importMask` で選べる**ように実装。io.js に `unzip`（EOCD→中央ディレクトリ解析、method0=store/method8=DEFLATEを `DecompressionStream('deflate-raw')` で展開）＋`expandZips`。`importMaskFiles` 冒頭で .zip を中身の File 群へ展開してから既存ロジック。accept に `.zip` 追加、note更新、大量取込に進捗トースト（>30枚で 25毎）。版25。
+- **e2e `sam-real` を ZIP直接取込に拡張** → 実SAM 2対象ZIP(DEFLATE, 63entries)をそのまま取込→ブラウザ内展開→対象1赤/対象2緑の別レイヤ・封止復元（9/0）。非zip取込(io-roundtrip/sam-import/restore-merge)は回帰なし。unit 94/0。
+
 ## ユーザ検証フィードバック反映（2026-07-06）
 - **R（全線再吸着）を削除**（ユーザ判断: 大きな動きで精度低・SAM追跡が上位互換）。resnapAll/Rキー/ボタン/help/未使用純関数 traceChains・snapClosed とそのテスト・resnap e2e を撤去。W（単ストローク吸着）は維持（snap 13/0）。版24、unit 94/0。
 - **複数種類のSAMマスク→色分け を実SAM 2対象で通し検証**: ヘッドレスで 男の子=対象1(シーン0)＋女の子=対象2(シーン540〜) を追跡→書き出し（`mask_L1_*`＋`mask_L2_*`＋manifest 2レイヤ 色[255,60,60]/[60,200,60]）→ contour-lab 取込（e2e `sam-real` を対象別対応に拡張, 9/0）→ **対象1→レイヤ1(赤,35.9%@f0)、対象2→レイヤ2(緑,35.0%@f540)＝別の色レイヤへ分離**。ユーザ要望「複数種類を色として分ける」を実SAM出力で実証。

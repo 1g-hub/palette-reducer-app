@@ -91,10 +91,41 @@
     return L;
   }
 
+  // ZIP を展開して File 群に（SAM書き出し等の DEFLATE zip をそのまま読めるように）。
+  async function inflateRaw(bytes) { const st = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw')); return new Uint8Array(await new Response(st).arrayBuffer()); }
+  async function unzip(buf) {
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    let eocd = -1; for (let i = buf.length - 22; i >= 0; i--) { if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; } }
+    if (eocd < 0) throw new Error('ZIPではありません');
+    const count = dv.getUint16(eocd + 10, true); let off = dv.getUint32(eocd + 16, true); const out = [];
+    for (let n = 0; n < count; n++) {
+      if (dv.getUint32(off, true) !== 0x02014b50) break;
+      const method = dv.getUint16(off + 10, true), compSize = dv.getUint32(off + 20, true);
+      const nameLen = dv.getUint16(off + 28, true), extraLen = dv.getUint16(off + 30, true), commentLen = dv.getUint16(off + 32, true), lho = dv.getUint32(off + 42, true);
+      const name = new TextDecoder().decode(buf.subarray(off + 46, off + 46 + nameLen));
+      const lNameLen = dv.getUint16(lho + 26, true), lExtraLen = dv.getUint16(lho + 28, true), dataStart = lho + 30 + lNameLen + lExtraLen;
+      const comp = buf.subarray(dataStart, dataStart + compSize);
+      let bytes; if (method === 0) bytes = comp.slice(); else if (method === 8) bytes = await inflateRaw(comp); else throw new Error('未対応の圧縮方式 ' + method);
+      if (!name.endsWith('/')) out.push({ name, bytes });
+      off += 46 + nameLen + extraLen + commentLen;
+    }
+    return out;
+  }
+  async function expandZips(files) {
+    const out = [];
+    for (const f of files) {
+      if (/\.zip$/i.test(f.name)) {
+        try { const entries = await unzip(new Uint8Array(await f.arrayBuffer())); for (const e of entries) { const base = e.name.split('/').pop(); out.push(new File([e.bytes], base, { type: /\.json$/i.test(base) ? 'application/json' : 'image/png' })); } }
+        catch (err) { CL.toast('ZIP展開に失敗: ' + err.message); }
+      } else out.push(f);
+    }
+    return out;
+  }
+
   async function importMaskFiles(files) {
     if (!S.W) { CL.toast('先に動画を読み込んでください'); return; }
     const thr = +($('importThresh') ? $('importThresh').value : 127), modeSel = ($('importMode') && $('importMode').value) || 'replace';
-    const arr = [...files];
+    const arr = await expandZips([...files]); // .zip はここで中身の File 群に展開
     // manifest.json があればレイヤ(色/名前)を先に用意（本アプリ/SAM 書き出しの往復）
     const manifestFile = arr.find((f) => /\.json$/i.test(f.name));
     if (manifestFile) { try { const mani = JSON.parse(await manifestFile.text()); if (mani && Array.isArray(mani.layers)) for (const l of mani.layers) { const L = ensureLayer(l.id, l.color, l.name); if (l.name) L.name = l.name; if (l.color && l.color.length) L.color = l.color.slice(); } CL.renderLayers(); } catch (e) {} } // manifest は既存レイヤの名前/色も上書き（SAMの色と揃える）
@@ -104,7 +135,9 @@
     const usedLayers = new Set();
     let applied = 0, idx = 0;
     const sorted = imgs.sort((a, b) => a.name.localeCompare(b.name));
+    if (sorted.length > 30) CL.toast('取込中… 0/' + sorted.length);
     for (const file of sorted) {
+      if (sorted.length > 30 && idx > 0 && idx % 25 === 0) CL.toast('取込中… ' + idx + '/' + sorted.length);
       let bmp; try { bmp = await decodeImage(file); } catch (e) { continue; }
       const mask = imageToMask(bmp, thr);
       let f = frameFromName(file.name); if (f == null) f = startF + idx; // ファイル名に f##### が無ければ現在フレームから連番
@@ -144,5 +177,5 @@
   if ($('exportMainApp')) $('exportMainApp').addEventListener('click', exportMainAppJSON);
   const imp = $('importMask'); if (imp) imp.addEventListener('change', (e) => { const fs = e.target.files; if (fs && fs.length) importMaskFiles([...fs]); imp.value = ''; });
 
-  window.CLIO = { buildExportFiles, exportFrameList, maskPngBytes, imageToMask, applyMaskToLayer, importMaskFiles, decodeImage, getLines, buildMainAppExport, objFromName, ensureLayer };
+  window.CLIO = { buildExportFiles, exportFrameList, maskPngBytes, imageToMask, applyMaskToLayer, importMaskFiles, decodeImage, getLines, buildMainAppExport, objFromName, ensureLayer, unzip, expandZips };
 })();
