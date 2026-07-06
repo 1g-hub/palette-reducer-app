@@ -143,7 +143,13 @@ Workflow（5次元レビュー→各所見を独立エージェントが反証�
 
 ## レイヤ統合 & フレーム前方コピー（2026-07-06, ユーザ要望2件）
 - **機能1 レイヤ統合**（2色→1色）: `mergeLayers(src,dst)`（contour-lab.js）— 全 in-memory フレームで src線を dst へ OR＋fill再計算＋src削除、`S.onMergeSaved`（storage.js）で未訪問の savedFrames(RLE)＋IDBも統合。各レイヤ行に「⤵（選択中の色へ統合）」ボタン。confirm ガード（Ctrl+Z不可を明記）。e2e `merge-layers` 9/0（色2→色1、色1が左右両方を含む・色2消滅・面積和）。
-- **機能2 現フレームを前方へ上書きコピー**（carryは空フレームのみ複製＝ZIP取込後は効かない、への対応）: `copyFrameForward('next'|'scene')`（contour-lab.js）— 現フレームの全レイヤ線を次フレーム/同シーン残りへ上書き（各フレーム snap undo・所有化して永続）。「フレーム引き継ぎ」節にボタン2つ。e2e `copy-forward` 9/0（f0→f1上書き・f1がf0一致・Undoで復元）。版26、unit 94/0、回帰なし（smoke/cow/persist/restore-merge/sam-import）。
+- **機能2 現フレームを前方へ上書きコピー**（carryは空フレームのみ複製＝ZIP取込後は効かない、への対応）: `copyFrameForward('next'|'scene')`（contour-lab.js）— **選択色のみ**を次フレーム/同シーン残りへ上書き（他色=他対象は温存、per-layer diff undo）。「フレーム引き継ぎ」節にボタン2つ。e2e `copy-forward` 10/0（f0→f1上書き・f1がf0一致・**他対象保持**・Undoで復元）。版27。
+
+### merge/copy 敵対的レビューと修正（完了 2026-07-06）
+Workflow（4次元）で **4件確定・1反証**。
+- **#1/#3/#4 [medium] 統合後の stale Undo でデータ破損**: mergeLayers が per-frame Undo/Redo を消さず、統合後 Ctrl+Z が統合済み画素を消す/幽霊レイヤ（削除済みsrc）を復活させ IDB へ保存。→ mergeLayers で `S.undo.clear();S.redo.clear()`（統合は非可逆＝loadVideo と同じ扱い）＋ applyCh を「S.layers に無い lid の diff/snap成分は無視」に硬化。
+- **#2 [high] dbBroken時に savedFrames の統合が漏れてデータ損失**: onMergeSaved が `dbBroken` で早期returnし、file://やJSON取込後（savedFrames主体）に未訪問フレームの src が dst へ統合されず、訪問時に onFrameEnter が無効lidとして捨てて消失。→ in-memory の savedFrames 統合は**常に実行**、IDB書込のみ dbBroken でスキップ。
+- 版28。**回帰**: unit 94/0、e2e merge-layers 13/0（Undo破棄・Ctrl+Z無害・**dbBroken強制で savedFrames統合**を検証、旧コードで FAIL を git stash実証）、copy-forward10/smoke11/cow15/persist11/restore-merge11、0 FAIL。テスト用 `CLStore._setDbBroken` 追加。
 
 ## ZIP直接取込（2026-07-06, ユーザ「ZIPをどこに置く？」）
 - 回答＝どこにも置かなくてよい（ブラウザのファイル選択）。さらに **SAM書き出しZIPをそのまま `#importMask` で選べる**ように実装。io.js に `unzip`（EOCD→中央ディレクトリ解析、method0=store/method8=DEFLATEを `DecompressionStream('deflate-raw')` で展開）＋`expandZips`。`importMaskFiles` 冒頭で .zip を中身の File 群へ展開してから既存ロジック。accept に `.zip` 追加、note更新、大量取込に進捗トースト（>30枚で 25毎）。版25。

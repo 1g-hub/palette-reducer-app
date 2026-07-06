@@ -31,6 +31,28 @@ module.exports = {
     const merged = await pop(0, lid1);
     t.ok(merged >= p1 + p2 * 0.9, 'merged region ~= color1 + color2 area (' + merged + ' >= ' + p1 + '+' + p2 + ')');
 
+    // 修正#1/#3/#4: 統合後は Undo/Redo 履歴が破棄され、Ctrl+Z が統合済み画素を壊さない
+    t.ok(await page.evaluate(() => window.CL.S.undo.size === 0 && window.CL.S.redo.size === 0), 'merge cleared undo/redo history (no stale diffs)');
+    t.ok(await page.$eval('#undoBtn', (e) => e.disabled) === true, 'undo button disabled after merge');
+    const beforeUndo = await pop(0, lid1);
+    await page.$eval('#undoBtn', (e) => e.click()); await sleep(120); // 無効なので何も起きないはず
+    t.ok(await pop(0, lid1) === beforeUndo, 'Ctrl+Z after merge does NOT erase merged pixels (bug#1/#3/#4)');
+
+    // 修正#2(HIGH): dbBroken(=IDB不可, file://等)でも savedFrames のみ（未訪問）フレームは in-memory で統合される
+    const setup = await page.evaluate(() => {
+      const S = window.CL.S, CLab = window.ContourLab, N = S.W * S.H;
+      window.CLStore._setDbBroken(true); // IDB不可を強制（旧コードはここで早期returnし統合漏れ＝データ損失）
+      window.CL.addLayer(); const A = S.activeLid; window.CL.addLayer(); const B = S.activeLid; // A=src(削除), B=dst
+      const mk = () => { const m = new Uint8Array(N); for (let y = 200; y < 260; y++) for (let x = 200; x < 260; x++) m[y * S.W + x] = 1; return CLab.rleFromBitmap(m); };
+      S.savedFrames = S.savedFrames || new Map();
+      S.savedFrames.set(7, { [A]: mk() }); // f7 は savedFrames のみ、src=A のみ（in-memory に無い）
+      return { A, B };
+    });
+    await page.evaluate((s, d) => { window.confirm = () => true; window.CL.mergeLayers(s, d); }, setup.A, setup.B);
+    await sleep(200);
+    const f7 = await page.evaluate((setup) => { const rec = window.CL.S.savedFrames.get(7); return rec ? { hasSrc: setup.A in rec, hasDst: setup.B in rec } : { norec: true }; }, setup);
+    t.ok(f7.hasSrc === false && f7.hasDst === true, 'un-visited savedFrames frame merged in-memory (bug#2 fix): src removed, dst present');
+
     await ctx.shot('final');
     t.ok(ctx.errors.length === 0, 'no page errors' + (ctx.errors.length ? ': ' + ctx.errors.join(' | ') : ''));
   },

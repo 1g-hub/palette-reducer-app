@@ -461,7 +461,8 @@
   function pushUndo(f, ch) { stackOf(S.undo, f).push(ch); S.redo.set(f, []); }
   function applyCh(f, ch, which) {
     const d = fdata(f);
-    if (ch.type === 'snap') { d.lines = new Map(); d.fill = new Map(); d.sharedLids = new Set(); const m = which === 'old' ? ch.before : ch.after; for (const [lid, runs] of m) d.lines.set(lid, bitmapFromRle(runs, S.W * S.H)); ensureFills(f); return; }
+    if (ch.type === 'snap') { d.lines = new Map(); d.fill = new Map(); d.sharedLids = new Set(); const m = which === 'old' ? ch.before : ch.after; for (const [lid, runs] of m) { if (!S.layers.some((l) => l.id === lid)) continue; d.lines.set(lid, bitmapFromRle(runs, S.W * S.H)); } ensureFills(f); return; }
+    if (!S.layers.some((l) => l.id === ch.lid)) return; // 削除/統合済みレイヤの stale diff は無視（幽霊レイヤ・マスク破損を防ぐ）
     const arr = writableLines(f, ch.lid); for (let k = 0; k < ch.idx.length; k++) arr[ch.idx[k]] = which === 'old' ? ch.old[k] : ch.neu[k]; d.fill.set(ch.lid, newFill(arr));
   }
   function doUndo() { const f = S.cur, st = S.undo.get(f); if (!st || !st.length) return; const ch = st.pop(); applyCh(f, ch, 'old'); stackOf(S.redo, f).push(ch); S.lastStroke = null; S.maskDirty = true; render(); updateUndoButtons(); notifyFrameChanged(f); }
@@ -498,6 +499,9 @@
     if (S.onMergeSaved) S.onMergeSaved(srcId, dstId); // 未訪問の保存フレーム(RLE)＋IDBも統合
     S.layers = S.layers.filter((l) => l.id !== srcId);
     if (S.activeLid === srcId) S.activeLid = dstId;
+    // 統合は非可逆。統合前の per-frame Undo/Redo は「統合後の現実」と食い違う（stale diff が統合済み画素を消す/
+    // 幽霊レイヤを復活させる）ので、履歴を破棄する（loadVideo と同じ扱い）。
+    S.undo.clear(); S.redo.clear(); S.lastStroke = null;
     renderLayers(); notifyMetaChanged(); ensureFills(S.cur); S.maskDirty = true; render(); updateUndoButtons();
     toast('色を統合しました');
   }
