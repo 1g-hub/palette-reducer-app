@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>輪郭ラボ — 手描き領域マスク (P1)</title>
-<link rel="stylesheet" href="./styles.css?v=26">
+<link rel="stylesheet" href="./styles.css?v=27">
 </head>
 <body>
 <header id="topbar">
@@ -114,9 +114,9 @@
       <h3>フレーム引き継ぎ</h3>
       <label class="row check"><input type="checkbox" id="carryToggle" checked> 次フレームへ引き継ぐ</label>
       <p class="note small">空フレームへ移動すると前フレームの線をそのまま複製します（通常表示）。消しゴム/加筆で部分編集できます。</p>
-      <button id="copyNext" class="btn wide">現在のマスクを次フレームへコピー（上書き）</button>
+      <button id="copyNext" class="btn wide">選択色のマスクを次フレームへコピー（上書き）</button>
       <button id="copyScene" class="btn wide">→ このシーンの残りへコピー（上書き）</button>
-      <p class="note small">SAM等で全フレームにマスクがある場合、修正した現フレームを次（や同シーンの残り）へ上書きコピーできます。各フレームでUndo可。</p>
+      <p class="note small">SAM等で全フレームにマスクがある場合、修正した現フレームの<b>選択色</b>を次（や同シーンの残り）へ上書きコピーできます。他の色（他対象）は温存。各フレームでUndo可。</p>
     </section>
 
     <section class="psec">
@@ -180,14 +180,14 @@
   </main>
 </div>
 
-<script src="../icm.js?v=26"></script>
-<script src="./contour-lab.js?v=26"></script>
-<script src="./morpho.js?v=26"></script>
-<script src="./storage.js?v=26"></script>
-<script src="./io.js?v=26"></script>
-<script src="./timeline.js?v=26"></script>
-<script src="./quantize.js?v=26"></script>
-<script src="./slic.js?v=26"></script>
-<script src="./snap.js?v=26"></script>
+<script src="../icm.js?v=27"></script>
+<script src="./contour-lab.js?v=27"></script>
+<script src="./morpho.js?v=27"></script>
+<script src="./storage.js?v=27"></script>
+<script src="./io.js?v=27"></script>
+<script src="./timeline.js?v=27"></script>
+<script src="./quantize.js?v=27"></script>
+<script src="./slic.js?v=27"></script>
+<script src="./snap.js?v=27"></script>
 </body>
 </html>

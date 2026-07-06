@@ -501,26 +501,27 @@
     renderLayers(); notifyMetaChanged(); ensureFills(S.cur); S.maskDirty = true; render(); updateUndoButtons();
     toast('色を統合しました');
   }
-  // 機能2: 現在フレームのマスクを次フレーム('next')/このシーンの残り('scene')へ上書きコピー。各フレーム snap undo。
+  // 機能2: 現在フレームの「選択色」のマスクを次フレーム('next')/このシーンの残り('scene')へ上書きコピー。
+  // 選択色のみを差し替える（他の色＝他対象のマスクは温存）。各フレームは per-layer diff で Undo 可。
   function copyFrameForward(mode) {
-    const srcD = S.frames.get(S.cur); if (!srcD || !srcD.lines.size) { toast('このフレームに線がありません'); return; }
-    const srcSnap = [...srcD.lines]; // [lid, arr]
+    const lid = S.activeLid, srcD = S.frames.get(S.cur), srcArr = srcD && srcD.lines.get(lid);
+    if (!srcArr) { toast('この色にこのフレームの線がありません'); return; }
+    const snap = Uint8Array.from(srcArr);
     let targets = [];
     if (mode === 'next') { if (S.cur + 1 < S.total) targets = [S.cur + 1]; }
     else { const sc = sceneIndexOf(S.cur); let f = S.cur + 1; while (f < S.total && sceneIndexOf(f) === sc) { targets.push(f); f++; } }
     if (!targets.length) { toast('コピー先のフレームがありません'); return; }
     if (targets.length > 60 && !confirm(targets.length + 'フレームに上書きコピーします。よろしいですか？')) return;
+    let n = 0;
     for (const f of targets) {
       if (S.onFrameEnter) S.onFrameEnter(f);
-      const d = fdata(f), before = new Map(); for (const [lid, arr] of d.lines) before.set(lid, rleFromBitmap(arr));
-      const nl = new Map(), after = new Map();
-      for (const [lid, arr] of srcSnap) { const cp = Uint8Array.from(arr); nl.set(lid, cp); after.set(lid, rleFromBitmap(cp)); }
-      d.lines = nl; d.fill = new Map(); d.sharedLids = new Set(); d.touched = new Set();
-      pushUndo(f, { type: 'snap', before, after }); notifyFrameChanged(f);
+      const arr = writableLines(f, lid), changed = new Map();
+      for (let i = 0; i < arr.length; i++) { const nv = snap[i] ? 1 : 0; if ((arr[i] ? 1 : 0) !== nv) { changed.set(i, arr[i]); arr[i] = nv; } }
+      if (changed.size) { fdata(f).fill.set(lid, newFill(arr)); commitChanges(f, lid, changed); n++; } // commitChanges が notifyFrameChanged
     }
     S.maskDirty = true; updateUndoButtons();
     if (mode === 'next') requestFrame(S.cur + 1); else render();
-    toast(targets.length + 'フレームへコピーしました');
+    toast(n ? (n + 'フレームへコピーしました') : '差分なし（同じでした）');
   }
   function renderLayers() {
     dom.layerList.innerHTML = '';

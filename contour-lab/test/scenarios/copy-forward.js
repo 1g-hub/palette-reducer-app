@@ -11,7 +11,14 @@ module.exports = {
     const at = (f, fx, fy) => page.evaluate((f, lid, fx, fy) => { const S = window.CL.S, CLIO = window.CLIO, CLab = window.ContourLab; const a = CLIO.getLines(f, lid); if (!a) return 0; const fl = CLab.computeFill(a, S.W, S.H); const x = fx * S.W | 0, y = fy * S.H | 0; return (a[y * S.W + x] || fl[y * S.W + x]) ? 1 : 0; }, f, lid, fx, fy);
     async function goto(f) { await page.evaluate((f) => window.CL.requestFrame(f), f); const end = Date.now() + 8000; while (Date.now() < end) { if (await page.evaluate((f) => window.CL.S.cur === f, f)) return; await sleep(50); } }
 
-    // f0=左, f1=右（SAM が両方に別マスクを付けた状況）
+    // 別対象（色2）を f1 に置く：copy-forward が色2を消さないこと（他対象温存）を確認するため
+    await page.evaluate(() => window.CL.addLayer()); const lid2 = await page.evaluate(() => window.CL.S.activeLid);
+    await page.evaluate((f, l2) => { const S = window.CL.S, W = S.W, H = S.H, m = new Uint8Array(W * H); for (let y = H * 0.75 | 0; y < H * 0.9; y++) for (let x = W * 0.4 | 0; x < W * 0.6; x++) m[y * W + x] = 1; window.CLIO.applyMaskToLayer(f, l2, m, 'replace'); }, 1, lid2);
+    const l2pop = () => page.evaluate((l2) => { const S = window.CL.S, d = S.frames.get(1), a = d && d.lines.get(l2); if (!a) return 0; let c = 0; for (let i = 0; i < a.length; i++) if (a[i]) c++; return c; }, lid2);
+    const l2before = await l2pop();
+    await page.evaluate((l) => window.CL.setActive(l), lid); // 色1を選択（コピー対象）
+
+    // f0=左, f1=右（SAM が両方に別マスクを付けた状況、色1）
     await rect(0, 'left'); await rect(1, 'right');
     await goto(0);
     const h0 = await hash(0), h1before = await hash(1);
@@ -24,6 +31,7 @@ module.exports = {
     t.ok(await page.evaluate(() => window.CL.S.cur === 1), 'advanced to f1 after copy');
     t.ok(await hash(1) === h0, 'f1 now equals f0 (corrected mask copied over the SAM mask)');
     t.ok(await at(1, 0.3, 0.5) === 1 && await at(1, 0.7, 0.5) === 0, 'after: f1 has LEFT (f0 copy), RIGHT gone');
+    t.ok(await l2pop() === l2before && l2before > 0, 'other colour (object 2) on f1 is PRESERVED (' + l2before + 'px) — active-layer-only copy');
 
     // Undo で f1 が元の右へ戻る
     await page.$eval('#undoBtn', (e) => e.click()); await sleep(150);
