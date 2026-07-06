@@ -128,7 +128,7 @@
   ['fileInput', 'videoInfo', 'frameNav', 'firstFrame', 'prevFrame', 'frameLabel', 'nextFrame', 'lastFrame', 'frameSlider',
     'zoomGrp', 'zoomFit', 'zoom100', 'panel', 'fpsInput', 'fpsDetected', 'toolPen', 'toolEraser', 'snapToggle',
     'eraserSize', 'eraserSizeLabel', 'objectEraser', 'layerList', 'addLayer', 'resolveFrame', 'resolveScene', 'cleanInterior', 'removeStray', 'clearColor',
-    'maskHidden', 'maskOpacity', 'edgeToggle', 'edgeOpacity', 'srcOpacity', 'gridToggle', 'carryToggle', 'copyNext', 'copyScene',
+    'maskHidden', 'maskOpacity', 'edgeToggle', 'edgeOpacity', 'srcOpacity', 'gridToggle', 'carryToggle', 'copyPrev', 'copyNext', 'copyScene',
     'undoBtn', 'redoBtn', 'clearFrame', 'exportPng', 'view', 'empty', 'hint',
   ].forEach((k) => { dom[k] = $(k); });
 
@@ -513,6 +513,7 @@
     const snap = Uint8Array.from(srcArr);
     let targets = [];
     if (mode === 'next') { if (S.cur + 1 < S.total) targets = [S.cur + 1]; }
+    else if (mode === 'prev') { if (S.cur - 1 >= 0) targets = [S.cur - 1]; }
     else { const sc = sceneIndexOf(S.cur); let f = S.cur + 1; while (f < S.total && sceneIndexOf(f) === sc) { targets.push(f); f++; } }
     if (!targets.length) { toast('コピー先のフレームがありません'); return; }
     if (targets.length > 60 && !confirm(targets.length + 'フレームに上書きコピーします。よろしいですか？')) return;
@@ -524,7 +525,7 @@
       if (changed.size) { fdata(f).fill.set(lid, newFill(arr)); commitChanges(f, lid, changed); n++; } // commitChanges が notifyFrameChanged
     }
     S.maskDirty = true; updateUndoButtons();
-    if (mode === 'next') requestFrame(S.cur + 1); else render();
+    if (mode === 'next') requestFrame(S.cur + 1); else if (mode === 'prev') requestFrame(S.cur - 1); else render();
     toast(n ? (n + 'フレームへコピーしました') : '差分なし（同じでした）');
   }
   // レイヤ順序変更。S.layers の後ろほど前面（合成で上に描かれる）。dir:+1=前面へ, -1=背面へ。
@@ -610,6 +611,7 @@
   dom.srcOpacity.addEventListener('input', () => { S.srcOpacity = dom.srcOpacity.value / 100; render(); });
   dom.gridToggle.addEventListener('change', () => { S.showGrid = dom.gridToggle.checked; render(); });
   dom.carryToggle.addEventListener('change', () => { S.carry = dom.carryToggle.checked; });
+  if (dom.copyPrev) dom.copyPrev.addEventListener('click', () => copyFrameForward('prev'));
   if (dom.copyNext) dom.copyNext.addEventListener('click', () => copyFrameForward('next'));
   if (dom.copyScene) dom.copyScene.addEventListener('click', () => copyFrameForward('scene'));
   dom.fpsInput.addEventListener('change', () => {

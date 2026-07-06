@@ -37,6 +37,13 @@ module.exports = {
     await page.$eval('#undoBtn', (e) => e.click()); await sleep(150);
     t.ok(await hash(1) === h1before, 'Undo restores f1 to its original SAM mask');
 
+    // 'prev': f2 に別内容→f2からf1へ1つ前コピー→f1がf2一致、現在フレームがf1に
+    await goto(2); await rect(2, 'left'); // f2=左（f1は右のまま）
+    const h2 = await hash(2);
+    await page.evaluate(() => window.CL.copyFrameForward('prev')); await sleep(250);
+    t.ok(await page.evaluate(() => window.CL.S.cur === 1), 'copy-prev moved to f1');
+    t.ok(await hash(1) === h2, 'f1 now equals f2 (copied to the PREVIOUS frame)');
+
     await ctx.shot('final');
     t.ok(ctx.errors.length === 0, 'no page errors' + (ctx.errors.length ? ': ' + ctx.errors.join(' | ') : ''));
   },
