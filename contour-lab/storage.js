@@ -62,6 +62,19 @@
   }
   S.onFrameChanged = (f) => { dirtyFrames.add(f); setStatus('保存中…'); if (frameTimer) clearTimeout(frameTimer); frameTimer = setTimeout(flushFrames, 800); };
   S.onMetaChanged = () => { setStatus('保存中…'); if (metaTimer) clearTimeout(metaTimer); metaTimer = setTimeout(flushMeta, 800); };
+  // 機能1(統合): 未訪問の保存フレーム(RLE)で src を dst に統合し IDB へ書き戻す（in-memory フレームは呼び出し側が処理）。
+  S.onMergeSaved = async (srcId, dstId) => {
+    if (!S.savedFrames || dbBroken) return; const N = S.W * S.H, list = [];
+    for (const [f, rec] of S.savedFrames) {
+      if (S.frames.has(f) || !rec[srcId]) continue; // in-memory は呼び出し側で処理済み
+      const s = CLab.bitmapFromRle(rec[srcId], N), d = rec[dstId] ? CLab.bitmapFromRle(rec[dstId], N) : new Uint8Array(N);
+      for (let i = 0; i < N; i++) if (s[i]) d[i] = 1;
+      const nrec = {}; for (const k in rec) if (+k !== srcId) nrec[k] = rec[k]; nrec[dstId] = CLab.rleFromBitmap(d);
+      S.savedFrames.set(f, nrec); list.push(f);
+    }
+    if (!S.sig || !list.length) return;
+    try { const st = await store('frames', 'readwrite'); for (const f of list) st.put({ sig: S.sig, f, lines: S.savedFrames.get(f) }); await txDone(st); savedNow(); } catch (e) { setStatus('保存エラー: ' + e.message, 'danger'); }
+  };
 
   // ---- 遅延復元: 保存済みフレームを初訪時にデコード（carry より優先） ----
   S.onFrameEnter = (f) => {

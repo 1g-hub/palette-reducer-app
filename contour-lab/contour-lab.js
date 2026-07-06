@@ -128,7 +128,7 @@
   ['fileInput', 'videoInfo', 'frameNav', 'firstFrame', 'prevFrame', 'frameLabel', 'nextFrame', 'lastFrame', 'frameSlider',
     'zoomGrp', 'zoomFit', 'zoom100', 'panel', 'fpsInput', 'fpsDetected', 'toolPen', 'toolEraser', 'snapToggle',
     'eraserSize', 'eraserSizeLabel', 'objectEraser', 'layerList', 'addLayer', 'cleanInterior', 'removeStray', 'clearColor',
-    'maskHidden', 'maskOpacity', 'edgeToggle', 'edgeOpacity', 'srcOpacity', 'gridToggle', 'carryToggle',
+    'maskHidden', 'maskOpacity', 'edgeToggle', 'edgeOpacity', 'srcOpacity', 'gridToggle', 'carryToggle', 'copyNext', 'copyScene',
     'undoBtn', 'redoBtn', 'clearFrame', 'exportPng', 'view', 'empty', 'hint',
   ].forEach((k) => { dom[k] = $(k); });
 
@@ -484,6 +484,44 @@
     if (S.activeLid === id) S.activeLid = S.layers[0].id;
     renderLayers(); S.maskDirty = true; render(); notifyMetaChanged();
   }
+  function layerName(id) { const L = S.layers.find((l) => l.id === id); if (!L) return '色'; return L.name || ('色' + (S.layers.indexOf(L) + 1)); }
+  // 機能1: 色 src を色 dst に統合（全フレームで線をOR→dstへ、srcを削除）。所有 in-memory とIDB(savedFrames)両方。
+  function mergeLayers(srcId, dstId) {
+    if (srcId === dstId || !S.layers.some((l) => l.id === srcId) || !S.layers.some((l) => l.id === dstId)) { toast('統合先は別の色を選んでください'); return; }
+    if (!confirm('「' + layerName(srcId) + '」を「' + layerName(dstId) + '」に統合します。統合元の色は消えます（Ctrl+Zでは戻せません）。よろしいですか？')) return;
+    for (const [f, d] of S.frames) {
+      const s = d.lines.get(srcId); if (!s) continue;
+      const dst = writableLines(f, dstId); for (let i = 0; i < s.length; i++) if (s[i]) dst[i] = 1;
+      d.fill.set(dstId, newFill(dst)); d.lines.delete(srcId); d.fill.delete(srcId); if (d.sharedLids) d.sharedLids.delete(srcId);
+      notifyFrameChanged(f);
+    }
+    if (S.onMergeSaved) S.onMergeSaved(srcId, dstId); // 未訪問の保存フレーム(RLE)＋IDBも統合
+    S.layers = S.layers.filter((l) => l.id !== srcId);
+    if (S.activeLid === srcId) S.activeLid = dstId;
+    renderLayers(); notifyMetaChanged(); ensureFills(S.cur); S.maskDirty = true; render(); updateUndoButtons();
+    toast('色を統合しました');
+  }
+  // 機能2: 現在フレームのマスクを次フレーム('next')/このシーンの残り('scene')へ上書きコピー。各フレーム snap undo。
+  function copyFrameForward(mode) {
+    const srcD = S.frames.get(S.cur); if (!srcD || !srcD.lines.size) { toast('このフレームに線がありません'); return; }
+    const srcSnap = [...srcD.lines]; // [lid, arr]
+    let targets = [];
+    if (mode === 'next') { if (S.cur + 1 < S.total) targets = [S.cur + 1]; }
+    else { const sc = sceneIndexOf(S.cur); let f = S.cur + 1; while (f < S.total && sceneIndexOf(f) === sc) { targets.push(f); f++; } }
+    if (!targets.length) { toast('コピー先のフレームがありません'); return; }
+    if (targets.length > 60 && !confirm(targets.length + 'フレームに上書きコピーします。よろしいですか？')) return;
+    for (const f of targets) {
+      if (S.onFrameEnter) S.onFrameEnter(f);
+      const d = fdata(f), before = new Map(); for (const [lid, arr] of d.lines) before.set(lid, rleFromBitmap(arr));
+      const nl = new Map(), after = new Map();
+      for (const [lid, arr] of srcSnap) { const cp = Uint8Array.from(arr); nl.set(lid, cp); after.set(lid, rleFromBitmap(cp)); }
+      d.lines = nl; d.fill = new Map(); d.sharedLids = new Set(); d.touched = new Set();
+      pushUndo(f, { type: 'snap', before, after }); notifyFrameChanged(f);
+    }
+    S.maskDirty = true; updateUndoButtons();
+    if (mode === 'next') requestFrame(S.cur + 1); else render();
+    toast(targets.length + 'フレームへコピーしました');
+  }
   function renderLayers() {
     dom.layerList.innerHTML = '';
     S.layers.forEach((L, pos) => {
@@ -494,8 +532,9 @@
       nm.addEventListener('input', () => { L.name = nm.value; notifyMetaChanged(); }); nm.addEventListener('focus', () => setActive(L.id));
       const vis = document.createElement('input'); vis.type = 'checkbox'; vis.className = 'vis'; vis.checked = L.visible; vis.title = '表示'; vis.addEventListener('change', () => { L.visible = vis.checked; S.maskDirty = true; render(); notifyMetaChanged(); });
       const op = document.createElement('input'); op.type = 'range'; op.className = 'op'; op.min = 0; op.max = 100; op.value = Math.round(L.opacity * 100); op.title = '濃さ'; op.addEventListener('input', () => { L.opacity = op.value / 100; S.maskDirty = true; render(); notifyMetaChanged(); });
+      const mrg = document.createElement('button'); mrg.className = 'mrg'; mrg.textContent = '⤵'; mrg.title = '選択中の色へ統合'; mrg.addEventListener('click', () => mergeLayers(L.id, S.activeLid));
       const del = document.createElement('button'); del.className = 'del'; del.textContent = '✕'; del.title = '削除'; del.addEventListener('click', () => delLayer(L.id));
-      row.append(sw, nm, vis, op, del); dom.layerList.appendChild(row);
+      row.append(sw, nm, vis, op, mrg, del); dom.layerList.appendChild(row);
     });
   }
 
@@ -526,6 +565,8 @@
   dom.srcOpacity.addEventListener('input', () => { S.srcOpacity = dom.srcOpacity.value / 100; render(); });
   dom.gridToggle.addEventListener('change', () => { S.showGrid = dom.gridToggle.checked; render(); });
   dom.carryToggle.addEventListener('change', () => { S.carry = dom.carryToggle.checked; });
+  if (dom.copyNext) dom.copyNext.addEventListener('click', () => copyFrameForward('next'));
+  if (dom.copyScene) dom.copyScene.addEventListener('click', () => copyFrameForward('scene'));
   dom.fpsInput.addEventListener('change', () => {
     const f = parseFloat(dom.fpsInput.value); if (!(f > 0)) return;
     if (anyOwned() && !confirm('描画済みフレームがあります。fpsを変えるとフレーム番号がズレる可能性があります。続けますか？')) { dom.fpsInput.value = (+S.fps.toFixed(3)).toString(); return; }
@@ -573,7 +614,7 @@
     S, dom,
     requestFrame, scheduleRender, render, toast,
     fdata, layerLines, writableLines, newFill, ensureFills, owned, anyOwned, sceneIndexOf, retainFillsFor,
-    activeLayer, setActive, addLayer, setTool, renderLayers, eventToPixel,
+    activeLayer, setActive, addLayer, setTool, renderLayers, eventToPixel, mergeLayers, copyFrameForward,
     commitChanges, pushUndo, updateUndoButtons,
     rebuildMask, exportPng,
   };
