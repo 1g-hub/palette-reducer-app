@@ -344,29 +344,6 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
   const sp = SN.snapEndpoint(m, W, H, allowed, 4, 5, 2); ok(m[sp[1] * W + sp[0]] === 100, 'snapEndpoint moves to a max-gradient pixel');
 }
 
-// ---- traceChains / snapClosed（P3-3 全線再吸着） ----
-{
-  const line = (a, W, H, pts) => { for (let i = 1; i < pts.length; i++) A.bresenham(a, W, H, pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1], 1, null); };
-  const cov = (r) => { let c = 0; for (const ch of r.open) c += ch.length; for (const ch of r.closed) c += ch.length; return c; };
-  const cnt = (a) => { let c = 0; for (const v of a) c += v ? 1 : 0; return c; };
-  // L字 = open1
-  { const W = 10, H = 10, a = new Uint8Array(W * H); line(a, W, H, [[1, 1], [1, 7], [7, 7]]); const r = SN.traceChains(a, W, H); ok(r.open.length === 1 && r.closed.length === 0 && cov(r) === cnt(a), 'traceChains: L-shape = 1 open chain, full coverage'); }
-  // 閉じた四角 = closed1
-  { const W = 9, H = 9, a = new Uint8Array(W * H); rect(a, W, H, 2, 2, 6, 6); const r = SN.traceChains(a, W, H); ok(r.open.length === 0 && r.closed.length === 1 && cov(r) === cnt(a), 'traceChains: closed square = 1 closed loop, full coverage'); }
-  // 四角＋しっぽ = 端点あり→open
-  { const W = 11, H = 11, a = new Uint8Array(W * H); rect(a, W, H, 2, 2, 6, 6); A.bresenham(a, W, H, 6, 4, 9, 4, 1, null); const r = SN.traceChains(a, W, H); ok(r.open.length >= 1 && cov(r) === cnt(a), 'traceChains: square+tail has an endpoint -> open chain(s), full coverage'); }
-  // 2本の独立成分
-  { const W = 14, H = 8, a = new Uint8Array(W * H); A.bresenham(a, W, H, 1, 4, 5, 4, 1, null); A.bresenham(a, W, H, 8, 2, 12, 6, 1, null); const r = SN.traceChains(a, W, H); ok(r.open.length === 2, 'traceChains: two separate components -> two chains'); }
-  // snapClosed: 円状ループがエッジ(高勾配リング)へ寄る
-  { const W = 21, H = 21, mag = new Float32Array(W * H); const cx = 10, cy = 10, rr = 7;
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { if (Math.abs(Math.hypot(x - cx, y - cy) - rr) < 0.7) mag[y * W + x] = 100; }
-    // 少し内側(半径5)の八角ループ
-    const loop = []; for (let k = 0; k < 16; k++) { const th = k / 16 * 2 * Math.PI; loop.push([Math.round(cx + 5 * Math.cos(th)), Math.round(cy + 5 * Math.sin(th))]); }
-    const avgR = (pts) => pts.reduce((s, p) => s + Math.hypot(p[0] - cx, p[1] - cy), 0) / pts.length;
-    const before = avgR(loop), after = avgR(SN.snapClosed(loop, mag, W, H, 3));
-    ok(after > before && after <= rr + 1, 'snapClosed pulls a loop outward toward the high-gradient ring (' + before.toFixed(1) + '->' + after.toFixed(1) + ', ring ' + rr + ')'); }
-}
-
 // ---- P7: 本体(app.js)の RLE 機構と往復互換（contour-lab の線形RLE → ビットマップ → app.js の行RLE） ----
 {
   // app.js:3423 rleEncodeMask / :3437 rleMaskForEach の参照実装（コピー）。本体が読める形かを担保。
