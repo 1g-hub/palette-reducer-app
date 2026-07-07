@@ -129,54 +129,69 @@
     CL.toast('エッジに吸着しました（' + path.length + '点）');
   }
 
-  /* ============ なぞり吸着 (T)：既存の線の「なぞった区間」だけをエッジへ吸着（閉ループ対応） ============ */
-  // W(直前ストローク吸着)の延長。SAM取込マスクの輪郭（閉ループ）の一部区間を直すのが主用途:
-  // 線に沿ってドラッグ→離すと、なぞり両端に最も近い線上の2点をアンカーに、その間の「なぞった側の区間」を
-  // 回廊Dijkstraの最小コスト経路（色エッジ沿い）で置き換える。1 Undo で元の区間に戻る。
+  /* ============ なぞり吸着 (T)：円ブラシの帯（スワス）に触れた線の区間全体をエッジへ吸着 ============ */
+  // 仕様（ユーザ要望で刷新）: カーソルの円（半径=吸着半径スライダー）が掃いた帯に触れた既存線の
+  // 「連結した区間まるごと」が置換対象。区間の両端＝線が帯の外へ出る画素が自動でアンカーになる。
+  // 新しい線は帯の中を通る色エッジ沿いの最小コスト経路（Dijkstra）。閉ループ対応。1 Undo で復元。
   let tracing = false, tracePts = null;
   function traceSnapApply(pts) {
     const lid = S.activeLid, cd = S.frames.get(S.cur), lines0 = cd && cd.lines.get(lid);
     if (!lines0) { CL.toast('この色に線がありません'); return; }
-    if (!pts || pts.length < 2) { CL.toast('線に沿ってなぞってください'); return; }
+    if (!pts || !pts.length) return;
     const W = S.W, H = S.H, N = W * H;
-    const Ra = Math.max(3, Math.min(14, Math.round(10 / S.view.scale)));
-    const A = nearestLinePixel(lines0, W, H, pts[0][0], pts[0][1], Ra);
-    const B = nearestLinePixel(lines0, W, H, pts[pts.length - 1][0], pts[pts.length - 1][1], Ra);
-    if (!A || !B || (A[0] === B[0] && A[1] === B[1])) { CL.toast('なぞりの始点と終点を、既存の線の近くの別々の場所にしてください'); return; }
-    const R = +($('snapRadius') ? $('snapRadius').value : 6);
-    // 弧選択（なぞった側の既存区間）: 既存線が間違っている所ほど、なぞりとのズレは大きい。
-    // 回廊を 1×→2×→4×（上限48px）と広げながら探す。狭い回廊が先に成功する＝なぞった側の弧が優先される。
-    let seg = null;
-    for (const mul of [1, 2, 4]) {
-      const rr = Math.min(48, Math.max(R, 4) * mul);
-      seg = linePathWithin(lines0, W, H, A, B, buildCorridor(pts, W, H, rr).allowed);
-      if (seg) break;
+    const R = Math.max(2, S.traceSnapR || (+($('snapRadius') ? $('snapRadius').value : 6)));
+    const swath = buildCorridor(pts, W, H, R); // 円が掃いた帯
+    // 帯に触れた線画素 → 8連結成分に分け、最大の成分＝置換対象の区間
+    const compId = new Int32Array(N).fill(-1); const comps = [];
+    for (let y = Math.max(0, swath.y0); y <= Math.min(H - 1, swath.y1); y++) for (let x = Math.max(0, swath.x0); x <= Math.min(W - 1, swath.x1); x++) {
+      const s0 = y * W + x; if (!swath.allowed[s0] || !lines0[s0] || compId[s0] >= 0) continue;
+      const id = comps.length, px = []; const stk = [s0]; compId[s0] = id;
+      while (stk.length) { const p = stk.pop(); px.push(p); const cx0 = p % W, cy0 = (p / W) | 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { if (!dx && !dy) continue; const xx = cx0 + dx, yy = cy0 + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; const q = yy * W + xx; if (swath.allowed[q] && lines0[q] && compId[q] < 0) { compId[q] = id; stk.push(q); } } }
+      comps.push(px);
     }
-    if (!seg) { CL.toast('なぞりに沿った線の区間が見つかりません（線に沿ってなぞってください）'); return; }
+    if (!comps.length) { CL.toast('円が既存の線を通っていません（線の上をなぞってください）'); return; }
+    comps.sort((a, b) => b.length - a.length); const comp = comps[0]; const inComp = new Uint8Array(N); for (const p of comp) inComp[p] = 1;
+    // アンカー候補 = 「線が帯の外へ続く画素（出口）」∪「区間内にある線の端点（次数≤1）」。最遠ペアを A,B に。
+    const candEnds = [];
+    for (const p of comp) {
+      const x = p % W, y = (p / W) | 0; let deg = 0, exit = false;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; const q = yy * W + xx; if (lines0[q]) { deg++; if (!inComp[q]) exit = true; } }
+      if (exit || deg <= 1) candEnds.push(p);
+    }
+    if (candEnds.length < 2) { CL.toast('線を覆いすぎです：区間の両側が円の外に続くようになぞってください'); return; }
+    let aIdx = -1, bIdx = -1, bestD = -1;
+    for (let i = 0; i < candEnds.length; i++) for (let j = i + 1; j < candEnds.length; j++) {
+      const p = candEnds[i], q = candEnds[j]; const dx = (p % W) - (q % W), dy = ((p / W) | 0) - ((q / W) | 0), d = dx * dx + dy * dy;
+      if (d > bestD) { bestD = d; aIdx = p; bIdx = q; }
+    }
+    if (bestD <= 0) { CL.toast('なぞる範囲が狭すぎます'); return; }
+    const A = [aIdx % W, (aIdx / W) | 0], B = [bIdx % W, (bIdx / W) | 0];
     const mg = getMag(); if (!mg) { CL.toast('エッジ場が使えません'); return; }
-    const corridor = buildCorridor(pts.concat(seg), W, H, R);
-    let cmax = 1; for (let y = corridor.y0; y <= corridor.y1; y++) for (let x = corridor.x0; x <= corridor.x1; x++) { const i = y * W + x; if (corridor.allowed[i] && mg.mag[i] > cmax) cmax = mg.mag[i]; }
+    let cmax = 1; for (let y = swath.y0; y <= swath.y1; y++) for (let x = swath.x0; x <= swath.x1; x++) { const i = y * W + x; if (swath.allowed[i] && mg.mag[i] > cmax) cmax = mg.mag[i]; }
     const cost = costFromMag(mg.mag, N, 8, cmax);
-    const path = dijkstraPath(cost, W, H, corridor.allowed, A[0], A[1], B[0], B[1]);
+    const path = dijkstraPath(cost, W, H, swath.allowed, A[0], A[1], B[0], B[1]);
     if (!path || path.length < 2) { CL.toast('経路が見つかりません（吸着半径を上げてみてください）'); return; }
-    // 新線 = 旧線 − なぞった区間(アンカー除く) + 新経路
+    // 新線 = 旧線 − 帯に触れた区間全体(アンカー除く) + 新経路
     const newLines = Uint8Array.from(lines0);
-    for (let k = 1; k < seg.length - 1; k++) newLines[seg[k][1] * W + seg[k][0]] = 0;
-    const pathMask = new Uint8Array(N); // 新経路（保護対象）
+    for (const p of comp) if (p !== aIdx && p !== bIdx) newLines[p] = 0;
+    const pathMask = new Uint8Array(N);
     for (let k = 1; k < path.length; k++) CLab.bresenham(pathMask, W, H, path[k - 1][0], path[k - 1][1], path[k][0], path[k][1], 1, null);
     for (let i = 0; i < N; i++) if (pathMask[i]) newLines[i] = 1;
-    const aIdx = A[1] * W + A[0], bIdx = B[1] * W + B[0];
     newLines[aIdx] = 1; newLines[bIdx] = 1;
-    // 取り残し掃除: 旧区間はBFSの1本道しか消さないため、元の線の角(エルボー)等の隣接画素が孤立して残る。
-    // 「旧区間の8近傍にあった旧線画素」だけを候補に、孤立/ぶら下がり(次数≤1)を反復除去。
-    // 新経路・アンカーは保護し、候補外（正規の線）は一切触らない。
+    // 取り残し掃除: 区間除去の縁に残る旧線の孤立/ぶら下がり(次数≤1)画素を反復除去。
+    // 候補＝除去区間の8近傍の旧線画素。削除でぶら下がりが伝播する（2px以上のヒゲ）ため、削除した画素の
+    // 隣も候補へ連鎖追加する。ただし帯の近傍(+3px)に限定＝離れた正規の線・枝は巻き込まない。
+    // 新経路・アンカーは常に保護。
     {
+      const nearSw = buildCorridor(pts, W, H, R + 3).allowed;
+      const okCand = (q) => lines0[q] && !inComp[q] && !pathMask[q] && q !== aIdx && q !== bIdx && nearSw[q];
       const cand = new Set();
-      for (let k = 0; k < seg.length; k++) {
-        const sx = seg[k][0], sy = seg[k][1];
+      for (const p of comp) {
+        const sx = p % W, sy = (p / W) | 0;
         for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
           const xx = sx + dx, yy = sy + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
-          const q = yy * W + xx; if (lines0[q] && !pathMask[q] && q !== aIdx && q !== bIdx) cand.add(q);
+          const q = yy * W + xx; if (okCand(q)) cand.add(q);
         }
       }
       let removedAny = true;
@@ -186,7 +201,10 @@
           if (!newLines[c]) continue;
           const x = c % W, y = (c / W) | 0; let n = 0;
           for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; if (newLines[yy * W + xx]) n++; }
-          if (n <= 1) { newLines[c] = 0; removedAny = true; }
+          if (n <= 1) {
+            newLines[c] = 0; removedAny = true;
+            for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; const q = yy * W + xx; if (okCand(q)) cand.add(q); }
+          }
         }
       }
     }
@@ -199,7 +217,7 @@
     const arr = CL.writableLines(S.cur, lid); for (const [i] of changed) arr[i] = newLines[i];
     CL.fdata(S.cur).fill.set(lid, CL.newFill(arr)); CL.commitChanges(S.cur, lid, changed);
     S.lastStroke = null; S.maskDirty = true; CL.render(); CL.updateUndoButtons();
-    CL.toast('なぞった区間をエッジへ吸着しました');
+    CL.toast('円が通った区間をエッジへ吸着しました（' + comp.length + 'px→' + path.length + '点）');
   }
   // 入力（カスタムツール委譲＋自前 move/up）。なぞり中は黄色のプレビュー線を重畳。
   const prevOnToolDown = S.onToolDown;
@@ -215,16 +233,27 @@
   });
   window.addEventListener('pointerup', () => {
     if (!tracing) return; tracing = false; const pts = tracePts; tracePts = null; CL.render();
-    if (S.tool === 'tracesnap' && pts && pts.length >= 2) traceSnapApply(pts);
+    if (S.tool === 'tracesnap' && pts && pts.length >= 1) traceSnapApply(pts); // 1点クリック＝その円内だけの局所吸着
   });
   const prevAfter = S.onAfterSource;
   S.onAfterSource = function (ctx, v) {
     if (prevAfter) prevAfter(ctx, v);
-    if (S.tool !== 'tracesnap' || !tracing || !tracePts || tracePts.length < 2) return;
-    ctx.strokeStyle = '#ffd34d'; ctx.lineWidth = Math.max(1, 2 / S.view.scale); ctx.beginPath();
-    ctx.moveTo(tracePts[0][0] + 0.5, tracePts[0][1] + 0.5);
-    for (let k = 1; k < tracePts.length; k++) ctx.lineTo(tracePts[k][0] + 0.5, tracePts[k][1] + 0.5);
-    ctx.stroke();
+    if (S.tool !== 'tracesnap' || !tracing || !tracePts || !tracePts.length) return;
+    // 掃いた帯（実際の吸着対象幅）を半透明で表示＋中心線。1点ならその円。
+    const R = Math.max(2, S.traceSnapR || 6);
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    if (tracePts.length === 1) {
+      ctx.fillStyle = 'rgba(255,211,77,.22)'; ctx.beginPath(); ctx.arc(tracePts[0][0] + 0.5, tracePts[0][1] + 0.5, R, 0, 7); ctx.fill();
+    } else {
+      ctx.strokeStyle = 'rgba(255,211,77,.22)'; ctx.lineWidth = R * 2; ctx.beginPath();
+      ctx.moveTo(tracePts[0][0] + 0.5, tracePts[0][1] + 0.5);
+      for (let k = 1; k < tracePts.length; k++) ctx.lineTo(tracePts[k][0] + 0.5, tracePts[k][1] + 0.5);
+      ctx.stroke();
+      ctx.strokeStyle = '#ffd34d'; ctx.lineWidth = Math.max(1, 2 / S.view.scale); ctx.beginPath();
+      ctx.moveTo(tracePts[0][0] + 0.5, tracePts[0][1] + 0.5);
+      for (let k = 1; k < tracePts.length; k++) ctx.lineTo(tracePts[k][0] + 0.5, tracePts[k][1] + 0.5);
+      ctx.stroke();
+    }
   };
   const prevOnToolChange = S.onToolChange;
   S.onToolChange = function (t) { const b = $('toolTraceSnap'); if (b) b.classList.toggle('active', t === 'tracesnap'); if (prevOnToolChange) prevOnToolChange(t); };

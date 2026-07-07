@@ -32,18 +32,24 @@ module.exports = {
     const s0 = await stat();
     t.ok(s0.pop > 0 && s0.fill > 20000, 'closed bumpy loop built (lines ' + s0.pop + ', fill ' + s0.fill + ')');
 
-    // なぞり: 階段状の斜め上辺に沿って（少し下をなぞる）実マウスでドラッグ
-    await page.evaluate(() => window.CL.setTool('tracesnap'));
+    // なぞり（新仕様の核心の検証）: ズーム2倍・円半径10で、軌跡を線から約8px下にオフセットして掃く。
+    // 旧仕様は「なぞり端点から半径 round(10/scale)=5px 以内に線」が必要で必ず失敗（円が飾りだった）。
+    // 新仕様は円の帯が線に触れていればよい → 成功する（ユーザ要望: 円の領域全体が吸着の要素）。
+    await page.evaluate(() => {
+      const el = document.getElementById('snapRadius'); el.value = 10; el.dispatchEvent(new Event('input'));
+      const S = window.CL.S; S.view.scale = 2; S.view.tx = -520; S.view.ty = -360; window.CL.render();
+      window.CL.setTool('tracesnap');
+    });
     const [box, view] = await Promise.all([ctx.viewBox(), page.evaluate(() => ({ s: window.CL.S.view.scale, tx: window.CL.S.view.tx, ty: window.CL.S.view.ty }))]);
     const scr = (wx, wy) => [box.x + wx * view.s + view.tx, box.y + wy * view.s + view.ty];
-    const p0 = scr(305, 243), p1 = scr(455, 224);
+    const p0 = scr(310, 247), p1 = scr(450, 229); // 上辺（傾き-0.125）の約8px下を平行に掃く
     await page.mouse.move(p0[0], p0[1]); await page.mouse.down();
     const steps = 10; for (let i = 1; i <= steps; i++) await page.mouse.move(p0[0] + (p1[0] - p0[0]) * i / steps, p0[1] + (p1[1] - p0[1]) * i / steps);
     await page.mouse.up(); await sleep(300);
 
     const hint = await page.$eval('#hint', (e) => e.textContent);
     const s1 = await stat();
-    t.ok(s1.hash !== s0.hash, 'traced section was replaced (hint="' + hint + '")');
+    t.ok(s1.hash !== s0.hash, 'swath-covered section replaced even with the cursor path ~8px OFF the line (hint="' + hint + '")');
     t.ok(s1.left === 1 && s1.right === 1 && s1.bottom === 1, 'untraced sides (left/right/bottom) are intact');
     t.ok(s1.fill >= s0.fill * 0.7 && s1.fill > 0, 'loop still CLOSED after trace-snap (fill ' + s0.fill + '->' + s1.fill + ')');
     t.ok(s1.isolated === 0, 'NO isolated 1px remnants after trace-snap [user-reported fix] (' + s1.isolated + ')');
