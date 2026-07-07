@@ -162,8 +162,34 @@
     // 新線 = 旧線 − なぞった区間(アンカー除く) + 新経路
     const newLines = Uint8Array.from(lines0);
     for (let k = 1; k < seg.length - 1; k++) newLines[seg[k][1] * W + seg[k][0]] = 0;
-    for (let k = 1; k < path.length; k++) CLab.bresenham(newLines, W, H, path[k - 1][0], path[k - 1][1], path[k][0], path[k][1], 1, null);
-    newLines[A[1] * W + A[0]] = 1; newLines[B[1] * W + B[0]] = 1;
+    const pathMask = new Uint8Array(N); // 新経路（保護対象）
+    for (let k = 1; k < path.length; k++) CLab.bresenham(pathMask, W, H, path[k - 1][0], path[k - 1][1], path[k][0], path[k][1], 1, null);
+    for (let i = 0; i < N; i++) if (pathMask[i]) newLines[i] = 1;
+    const aIdx = A[1] * W + A[0], bIdx = B[1] * W + B[0];
+    newLines[aIdx] = 1; newLines[bIdx] = 1;
+    // 取り残し掃除: 旧区間はBFSの1本道しか消さないため、元の線の角(エルボー)等の隣接画素が孤立して残る。
+    // 「旧区間の8近傍にあった旧線画素」だけを候補に、孤立/ぶら下がり(次数≤1)を反復除去。
+    // 新経路・アンカーは保護し、候補外（正規の線）は一切触らない。
+    {
+      const cand = new Set();
+      for (let k = 0; k < seg.length; k++) {
+        const sx = seg[k][0], sy = seg[k][1];
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const xx = sx + dx, yy = sy + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+          const q = yy * W + xx; if (lines0[q] && !pathMask[q] && q !== aIdx && q !== bIdx) cand.add(q);
+        }
+      }
+      let removedAny = true;
+      while (removedAny) {
+        removedAny = false;
+        for (const c of cand) {
+          if (!newLines[c]) continue;
+          const x = c % W, y = (c / W) | 0; let n = 0;
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; if (newLines[yy * W + xx]) n++; }
+          if (n <= 1) { newLines[c] = 0; removedAny = true; }
+        }
+      }
+    }
     // リーク保険: 塗り(閉領域)が3割以上崩れるなら中止
     const pop = (u8) => { let c = 0; for (let i = 0; i < u8.length; i++) if (u8[i]) c++; return c; };
     const oldPop = pop(CLab.computeFill(lines0, W, H)), newPop = pop(CLab.computeFill(newLines, W, H));
@@ -202,6 +228,13 @@
   };
   const prevOnToolChange = S.onToolChange;
   S.onToolChange = function (t) { const b = $('toolTraceSnap'); if (b) b.classList.toggle('active', t === 'tracesnap'); if (prevOnToolChange) prevOnToolChange(t); };
+
+  // 吸着半径スライダー: ラベル表示と S.traceSnapR（なぞり吸着カーソルの半径円）を同期。
+  // ※従来はリスナーが無くラベルが「6」のまま動かなかった（値自体は使用時に読まれ効いてはいた）。
+  const srEl = $('snapRadius'), srLbl = $('snapRadiusLabel');
+  function syncSnapR() { const v = srEl ? +srEl.value : 6; S.traceSnapR = v; if (srLbl) srLbl.textContent = v; }
+  if (srEl) srEl.addEventListener('input', () => { syncSnapR(); CL.render(); });
+  syncSnapR();
 
   if ($('snapStroke')) $('snapStroke').addEventListener('click', snapLastStroke);
   if ($('toolTraceSnap')) $('toolTraceSnap').addEventListener('click', () => CL.setTool('tracesnap'));

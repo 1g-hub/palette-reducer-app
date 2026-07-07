@@ -6,31 +6,37 @@ module.exports = {
   name: 'trace-snap',
   async fn(ctx) {
     const { page, t, sleep } = ctx;
-    // 凸凹つき閉ループ（上辺に山: (300,240)-(380,215)-(460,240)、他は矩形）を作る
+    // 実SAMマスク風の「ギザギザ境界」の閉ループを作る（1px凹凸あり＝1px取り残しの実発生源。
+    // node実験で旧実装だと孤立画素が8〜12個残ることを確認済み）。決定的PRNGで再現性を確保。
     const lid = await page.evaluate(() => {
-      const CL = window.CL, S = CL.S, B = window.ContourLab.bresenham;
+      const CL = window.CL, S = CL.S, W = S.W, H = S.H, m = new Uint8Array(W * H);
       CL.addLayer(); const lid = S.activeLid;
-      const a = CL.writableLines(S.cur, lid);
-      B(a, S.W, S.H, 300, 240, 380, 215, 1, null); B(a, S.W, S.H, 380, 215, 460, 240, 1, null); // 凸凹上辺
-      B(a, S.W, S.H, 460, 240, 460, 420, 1, null); B(a, S.W, S.H, 460, 420, 300, 420, 1, null); B(a, S.W, S.H, 300, 420, 300, 240, 1, null);
-      CL.fdata(S.cur).fill.set(lid, CL.newFill(a)); S.maskDirty = true; CL.render();
+      let s = 7; const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+      for (let x = 300; x <= 460; x++) {
+        let top = 240 - Math.round((x - 300) * 20 / 160) + Math.round(4 * Math.sin(x / 17));
+        if (rnd() < 0.35) top += (rnd() < 0.5 ? -1 : 1); // 1px のギザギザ
+        for (let y = top; y <= 420; y++) m[y * W + x] = 1;
+      }
+      window.CLIO.applyMaskToLayer(S.cur, lid, m, 'replace');
+      S.maskDirty = true; CL.render();
       return lid;
     });
     const stat = () => page.evaluate((lid) => {
-      const S = window.CL.S, CLab = window.ContourLab, d = S.frames.get(S.cur), a = d.lines.get(lid);
-      const fl = CLab.computeFill(a, S.W, S.H); let pop = 0, fill = 0, h = 0;
+      const S = window.CL.S, W = S.W, H = S.H, CLab = window.ContourLab, d = S.frames.get(S.cur), a = d.lines.get(lid);
+      const fl = CLab.computeFill(a, W, H); let pop = 0, fill = 0, h = 0, isolated = 0;
       for (let i = 0; i < a.length; i++) { if (a[i]) { pop++; h = (h * 31 + i) >>> 0; } if (fl[i]) fill++; }
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; if (!a[i]) continue; let n = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; if (a[yy * W + xx]) n++; } if (n === 0) isolated++; }
       const at = (x, y) => (a[y * S.W + x] ? 1 : 0);
-      return { pop, fill, hash: '' + h, left: at(300, 330), right: at(460, 330), bottom: at(380, 420) };
+      return { pop, fill, hash: '' + h, isolated, left: at(300, 330), right: at(460, 330), bottom: at(380, 420) };
     }, lid);
     const s0 = await stat();
     t.ok(s0.pop > 0 && s0.fill > 20000, 'closed bumpy loop built (lines ' + s0.pop + ', fill ' + s0.fill + ')');
 
-    // なぞり: 上辺に沿って（y≈228 の直線、山とはズレた位置）実マウスでドラッグ
+    // なぞり: 階段状の斜め上辺に沿って（少し下をなぞる）実マウスでドラッグ
     await page.evaluate(() => window.CL.setTool('tracesnap'));
     const [box, view] = await Promise.all([ctx.viewBox(), page.evaluate(() => ({ s: window.CL.S.view.scale, tx: window.CL.S.view.tx, ty: window.CL.S.view.ty }))]);
     const scr = (wx, wy) => [box.x + wx * view.s + view.tx, box.y + wy * view.s + view.ty];
-    const p0 = scr(305, 235), p1 = scr(455, 235);
+    const p0 = scr(305, 243), p1 = scr(455, 224);
     await page.mouse.move(p0[0], p0[1]); await page.mouse.down();
     const steps = 10; for (let i = 1; i <= steps; i++) await page.mouse.move(p0[0] + (p1[0] - p0[0]) * i / steps, p0[1] + (p1[1] - p0[1]) * i / steps);
     await page.mouse.up(); await sleep(300);
@@ -40,6 +46,7 @@ module.exports = {
     t.ok(s1.hash !== s0.hash, 'traced section was replaced (hint="' + hint + '")');
     t.ok(s1.left === 1 && s1.right === 1 && s1.bottom === 1, 'untraced sides (left/right/bottom) are intact');
     t.ok(s1.fill >= s0.fill * 0.7 && s1.fill > 0, 'loop still CLOSED after trace-snap (fill ' + s0.fill + '->' + s1.fill + ')');
+    t.ok(s1.isolated === 0, 'NO isolated 1px remnants after trace-snap [user-reported fix] (' + s1.isolated + ')');
 
     await page.$eval('#undoBtn', (e) => e.click()); await sleep(150);
     const s2 = await stat();

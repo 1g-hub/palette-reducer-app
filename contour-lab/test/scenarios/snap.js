@@ -81,6 +81,12 @@ module.exports = {
     t.ok(fs.endPref && fs.endPref[0] === 140 && fs.endPref[1] === 100, 'findSnap: TRUE ENDPOINT preferred over a nearer on-line pixel');
     t.ok(fs.hiZoom === null, 'findSnap: at 16x zoom radius shrinks to 1px world (was fixed 3px = 48 screen px)');
 
+    // 吸着半径スライダー: ラベルと S.traceSnapR（Tカーソル円の半径）が追従（従来はリスナー無し＝表示が固定）
+    await page.evaluate(() => { const el = document.getElementById('snapRadius'); el.value = 12; el.dispatchEvent(new Event('input')); });
+    t.ok(await page.$eval('#snapRadiusLabel', (e) => e.textContent) === '12', 'snapRadius LABEL follows the slider [user-reported fix]');
+    t.ok(await page.evaluate(() => window.CL.S.traceSnapR === 12), 'S.traceSnapR synced (drives the trace-snap cursor circle)');
+    await page.evaluate(() => { const el = document.getElementById('snapRadius'); el.value = 6; el.dispatchEvent(new Event('input')); });
+
     await ctx.shot('final');
     t.ok(ctx.errors.length === 0, 'no page errors' + (ctx.errors.length ? ': ' + ctx.errors.join(' | ') : ''));
   },
