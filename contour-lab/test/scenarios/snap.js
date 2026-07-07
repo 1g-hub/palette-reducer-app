@@ -61,6 +61,26 @@ module.exports = {
     t.ok(await linePop() === 0, 'W after clearColor does NOT resurrect a phantom line [P3 review]');
     t.ok(/見つかりません/.test(hint3), 'W after clear reports the stroke is gone (self-validating guard)');
 
+    // 端点スナップ修正の回帰（ユーザ報告: カーソルと違う場所にスナップ）:
+    // 半径=画面約7px相当（scale=1で世界7px・円形）、半径外はスナップしない、真の端点を線上の点より優先。
+    const fs = await page.evaluate(() => {
+      const CL = window.CL, S = CL.S;
+      CL.addLayer(); const l = S.activeLid;
+      const arr = CL.writableLines(S.cur, l);
+      for (let x = 100; x <= 140; x++) arr[100 * S.W + x] = 1; // 水平線 (100,100)-(140,100)
+      const oldScale = S.view.scale; S.view.scale = 1;
+      const farNull = CL.findSnap(S.cur, l, 120, 110) === null;      // 10px下 > 半径7 → null
+      const nearMid = CL.findSnap(S.cur, l, 120, 103);                // 3px下 → 線上(120,100)
+      const endPref = CL.findSnap(S.cur, l, 138, 104);                // 線上(138,100)d=4 < 端点(140,100)d≈4.47 でも端点優先
+      const hiZoom = (() => { S.view.scale = 16; return CL.findSnap(S.cur, l, 120, 103); })(); // 16倍: 半径1px → 3px先はスナップしない
+      S.view.scale = oldScale;
+      return { farNull, nearMid, endPref, hiZoom };
+    });
+    t.ok(fs.farNull, 'findSnap: no snap beyond the ~7px screen radius (was 16-32px world at low zoom)');
+    t.ok(fs.nearMid && Math.abs(fs.nearMid[0] - 120) <= 1 && fs.nearMid[1] === 100, 'findSnap: snaps to nearest on-line pixel within radius');
+    t.ok(fs.endPref && fs.endPref[0] === 140 && fs.endPref[1] === 100, 'findSnap: TRUE ENDPOINT preferred over a nearer on-line pixel');
+    t.ok(fs.hiZoom === null, 'findSnap: at 16x zoom radius shrinks to 1px world (was fixed 3px = 48 screen px)');
+
     await ctx.shot('final');
     t.ok(ctx.errors.length === 0, 'no page errors' + (ctx.errors.length ? ': ' + ctx.errors.join(' | ') : ''));
   },

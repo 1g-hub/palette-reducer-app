@@ -147,9 +147,13 @@
       applyMaskToLayer(f, target, mask, multiObj ? 'replace' : modeSel); // 複数対象は各フレーム置換（追跡結果をそのまま）
       usedLayers.add(target); applied++; idx++;
     }
+    // 取込後は「引き継ぎ」を自動OFF＋借用線を一掃。SAMの出力はオブジェクト不在フレームにマスクが無い＝
+    // それが正なので、carry で最後のマスクが不在フレームへ引き継がれて残るのを防ぐ（ユーザ報告バグ）。
+    let carryNote = '';
+    if (applied && S.carry && CL.setCarry) { CL.setCarry(false, true); carryNote = '。引き継ぎをオフにしました'; }
     if (S.onMetaChanged) S.onMetaChanged();
     CL.S.cur = -1; CL.requestFrame(S.want || 0); // 取込結果を再描画
-    CL.toast('マスクを取込みました（' + applied + '枚' + (multiObj ? '・' + usedLayers.size + '色に振り分け' : '') + '）');
+    CL.toast('マスクを取込みました（' + applied + '枚' + (multiObj ? '・' + usedLayers.size + '色に振り分け' : '') + '）' + carryNote);
   }
 
   // ---- 本体(palette-reducer)取込用 JSON（P7: 形式凍結） ----

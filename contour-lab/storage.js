@@ -42,7 +42,7 @@
   function buildMeta() {
     return { sig: S.sig, name: S.file ? S.file.name : '', W: S.W, H: S.H, fps: S.fps, total: S.total,
       layers: S.layers.map((l) => ({ id: l.id, name: l.name, color: l.color.slice(), visible: l.visible, opacity: l.opacity })),
-      nextLid: S.nextLid, activeLid: S.activeLid, cuts: (S.cuts || []).slice(), cutDists: S.cutDists || null, savedAt: Date.now() };
+      nextLid: S.nextLid, activeLid: S.activeLid, cuts: (S.cuts || []).slice(), cutDists: S.cutDists || null, carry: S.carry, savedAt: Date.now() };
   }
 
   // ---- 自動保存（デバウンス 800ms） ----
@@ -104,6 +104,7 @@
       S.activeLid = meta.activeLid && S.layers.some((l) => l.id === meta.activeLid) ? meta.activeLid : S.layers[0].id;
     }
     S.cuts = (meta.cuts || []).slice(); S.cutDists = meta.cutDists || null;
+    if (typeof meta.carry === 'boolean') { S.carry = meta.carry; const ct = $('carryToggle'); if (ct) ct.checked = S.carry; } // SAM取込等で切った carry はリロード後も維持
     if (meta.fps > 0) { S.fps = meta.fps; S.total = Math.max(1, Math.round(S.duration * S.fps)); const fi = $('fpsInput'); if (fi) fi.value = (+S.fps.toFixed(3)).toString(); }
   }
 

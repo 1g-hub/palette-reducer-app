@@ -329,17 +329,23 @@
   }
 
   /* ============ スナップ（端点） ============ */
+  // 端点スナップ。半径＝「画面上で約7px」をズームで世界座標に換算し 1..12px にクランプ（円形判定）。
+  // 旧実装は世界座標で最低3px固定＝高ズームでは画面24〜48px先へ飛び、「カーソルと違う場所にスナップ」の原因。
+  // 低ズーム側も無制限（9/scale）で世界16〜32pxに膨張していた。真の端点(近傍≤1)を線上の点(近傍2)より優先する。
   function findSnap(f, lid, wx, wy) {
     if (!S.snap) return null;
     const arr = layerLines(f, lid, false); if (!arr) return null;
-    const W = S.W, H = S.H, R = Math.max(3, Math.round(9 / S.view.scale));
-    const cx = Math.round(wx), cy = Math.round(wy); let best = null, bestD = (R + 1) * (R + 1);
+    const W = S.W, H = S.H, R = Math.max(1, Math.min(12, Math.round(7 / S.view.scale)));
+    const cx = Math.round(wx), cy = Math.round(wy), R2 = (R + 0.5) * (R + 0.5);
+    let bestEnd = null, bestEndD = Infinity, bestLine = null, bestLineD = Infinity;
     for (let y = Math.max(0, cy - R); y <= Math.min(H - 1, cy + R); y++) for (let x = Math.max(0, cx - R); x <= Math.min(W - 1, cx + R); x++) {
       const i = y * W + x; if (!arr[i]) continue;
+      const d = (x - wx) * (x - wx) + (y - wy) * (y - wy); if (d > R2) continue;
       let n = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; if (arr[yy * W + xx]) n++; }
-      if (n > 2) continue; const d = (x - wx) * (x - wx) + (y - wy) * (y - wy); if (d < bestD) { bestD = d; best = [x, y]; }
+      if (n <= 1) { if (d < bestEndD) { bestEndD = d; bestEnd = [x, y]; } }
+      else if (n === 2) { if (d < bestLineD) { bestLineD = d; bestLine = [x, y]; } }
     }
-    return best;
+    return bestEnd || bestLine;
   }
 
   /* ============ 描画・消去（データのみ操作。表示は rebuildMask が担当＝選択色のみ演出） ============ */
@@ -610,7 +616,28 @@
   dom.edgeOpacity.addEventListener('input', () => { S.edgeOpacity = dom.edgeOpacity.value / 100; render(); });
   dom.srcOpacity.addEventListener('input', () => { S.srcOpacity = dom.srcOpacity.value / 100; render(); });
   dom.gridToggle.addEventListener('change', () => { S.showGrid = dom.gridToggle.checked; render(); });
-  dom.carryToggle.addEventListener('change', () => { S.carry = dom.carryToggle.checked; });
+  // carry の「借用」線（sharedLids＝引き継ぎで表示しているだけのコピー）を全フレームから消す。
+  // SAM取込後、オブジェクトが消えたフレームに最後のマスクが引き継がれて残り続ける問題への対処。
+  // 借用線は保存対象外の表示コピーなので消しても実データは失われない（編集済み＝所有化された分は残る）。
+  function purgeCarried() {
+    let n = 0;
+    for (const d of S.frames.values()) {
+      if (!d.sharedLids || !d.sharedLids.size) continue;
+      for (const lid of [...d.sharedLids]) {
+        const arr = d.lines.get(lid);
+        if (arr) { const rc = S.arrRefs.get(arr) || 1; if (rc - 1 <= 1) S.arrRefs.delete(arr); else S.arrRefs.set(arr, rc - 1); }
+        d.lines.delete(lid); d.fill.delete(lid); d.sharedLids.delete(lid); n++;
+      }
+    }
+    if (n) { S.maskDirty = true; render(); if (S.onTimelineRefresh) S.onTimelineRefresh(); }
+    return n;
+  }
+  function setCarry(on, silent) {
+    S.carry = !!on; if (dom.carryToggle) dom.carryToggle.checked = S.carry;
+    if (!S.carry) { const n = purgeCarried(); if (n && !silent) toast('引き継ぎ表示の線を片付けました'); }
+    notifyMetaChanged(); // carry 状態はプロジェクトに保存（リロード後も維持）
+  }
+  dom.carryToggle.addEventListener('change', () => setCarry(dom.carryToggle.checked));
   if (dom.copyPrev) dom.copyPrev.addEventListener('click', () => copyFrameForward('prev'));
   if (dom.copyNext) dom.copyNext.addEventListener('click', () => copyFrameForward('next'));
   if (dom.copyScene) dom.copyScene.addEventListener('click', () => copyFrameForward('scene'));
@@ -662,6 +689,7 @@
     requestFrame, scheduleRender, render, toast,
     fdata, layerLines, writableLines, newFill, ensureFills, owned, anyOwned, sceneIndexOf, retainFillsFor,
     activeLayer, setActive, addLayer, setTool, renderLayers, eventToPixel, mergeLayers, copyFrameForward, moveLayer, resolveOverlaps,
+    setCarry, purgeCarried, findSnap,
     commitChanges, pushUndo, updateUndoButtons,
     rebuildMask, exportPng,
   };
