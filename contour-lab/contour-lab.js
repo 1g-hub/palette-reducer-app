@@ -127,7 +127,7 @@
   const dom = {};
   ['fileInput', 'videoInfo', 'frameNav', 'firstFrame', 'prevFrame', 'frameLabel', 'nextFrame', 'lastFrame', 'frameSlider',
     'zoomGrp', 'zoomFit', 'zoom100', 'panel', 'fpsInput', 'fpsDetected', 'toolPen', 'toolEraser', 'snapToggle',
-    'eraserSize', 'eraserSizeLabel', 'objectEraser', 'layerList', 'addLayer', 'resolveFrame', 'resolveScene', 'cleanInterior', 'removeStray', 'clearColor',
+    'eraserSize', 'eraserSizeLabel', 'objectEraser', 'layerList', 'addLayer', 'resolveFrame', 'resolveScene', 'cleanInterior', 'removeStray', 'clearColor', 'clearColorFwd', 'clearColorBack',
     'maskHidden', 'maskOpacity', 'edgeToggle', 'edgeOpacity', 'srcOpacity', 'gridToggle', 'carryToggle', 'copyPrev', 'copyNext', 'copyScene',
     'undoBtn', 'redoBtn', 'clearFrame', 'exportPng', 'view', 'empty', 'hint',
   ].forEach((k) => { dom[k] = $(k); });
@@ -534,6 +534,38 @@
     if (mode === 'next') requestFrame(S.cur + 1); else if (mode === 'prev') requestFrame(S.cur - 1); else render();
     toast(n ? (n + 'フレームへコピーしました') : '差分なし（同じでした）');
   }
+  // 選択色を「現在フレームからシーン末尾(forward)/シーン先頭(backward)」まで一括消去。
+  // SAM追跡で対象消失後に実データ化して残った“幽霊マスク”の掃除にも使う。未訪問の保存フレームも対象。
+  // 各フレーム snap undo。savedFrames(メモリ側)も即時更新（IDB不可のオリジンでも古いRLEが残らないように）。
+  function clearColorRange(dir) {
+    const lid = S.activeLid, sc = sceneIndexOf(S.cur);
+    const hasLid = (f) => { const d = S.frames.get(f); if (d && d.lines.has(lid)) return true; const rec = S.savedFrames && S.savedFrames.get(f); return !!(rec && rec[lid]); };
+    const targets = [];
+    if (dir === 'forward') { for (let f = S.cur; f < S.total && sceneIndexOf(f) === sc; f++) if (hasLid(f)) targets.push(f); }
+    else { for (let f = S.cur; f >= 0 && sceneIndexOf(f) === sc; f--) if (hasLid(f)) targets.push(f); }
+    if (!targets.length) { toast('この色のマスクは範囲にありません'); return; }
+    if (!confirm('「' + layerName(lid) + '」を ' + targets.length + ' フレームから消去します。よろしいですか？（各フレームでUndo可）')) return;
+    const N = S.W * S.H;
+    for (const f of targets) {
+      if (S.onFrameEnter) S.onFrameEnter(f);
+      const d = fdata(f);
+      // 保存済みの他色がメモリに載っていないと、消去後の自動保存でその色ごと消えるため、rec の全色を実体化してから処理
+      const rec0 = S.savedFrames && S.savedFrames.get(f);
+      if (rec0) for (const k in rec0) { const id = +k; if (!d.lines.has(id) && S.layers.some((l) => l.id === id)) d.lines.set(id, bitmapFromRle(rec0[k], N)); }
+      const before = new Map(); for (const [id, a] of d.lines) before.set(id, rleFromBitmap(a));
+      const arr = d.lines.get(lid);
+      if (arr) {
+        if (d.sharedLids && d.sharedLids.has(lid)) { const rc = S.arrRefs.get(arr) || 1; if (rc - 1 <= 1) S.arrRefs.delete(arr); else S.arrRefs.set(arr, rc - 1); d.sharedLids.delete(lid); }
+        d.lines.delete(lid); d.fill.delete(lid);
+      }
+      const rec = S.savedFrames && S.savedFrames.get(f);
+      if (rec && rec[lid]) { delete rec[lid]; if (!Object.keys(rec).length) S.savedFrames.delete(f); }
+      const after = new Map(); for (const [id, a] of d.lines) after.set(id, rleFromBitmap(a));
+      pushUndo(f, { type: 'snap', before, after }); notifyFrameChanged(f);
+    }
+    S.maskDirty = true; render(); updateUndoButtons(); if (S.onTimelineRefresh) S.onTimelineRefresh();
+    toast(targets.length + ' フレームから「' + layerName(lid) + '」を消去しました');
+  }
   // レイヤ順序変更。S.layers の後ろほど前面（合成で上に描かれる）。dir:+1=前面へ, -1=背面へ。
   function moveLayer(id, dir) {
     const i = S.layers.findIndex((l) => l.id === id); if (i < 0) return;
@@ -610,6 +642,8 @@
   dom.cleanInterior.addEventListener('click', cleanInterior);
   dom.removeStray.addEventListener('click', removeStray);
   dom.clearColor.addEventListener('click', clearColorAction);
+  if (dom.clearColorFwd) dom.clearColorFwd.addEventListener('click', () => clearColorRange('forward'));
+  if (dom.clearColorBack) dom.clearColorBack.addEventListener('click', () => clearColorRange('backward'));
   dom.maskHidden.addEventListener('change', () => { S.maskHidden = dom.maskHidden.checked; render(); });
   dom.maskOpacity.addEventListener('input', () => { S.maskOpacity = dom.maskOpacity.value / 100; render(); });
   dom.edgeToggle.addEventListener('change', () => { S.edgeOn = dom.edgeToggle.checked; render(); });
@@ -689,7 +723,7 @@
     requestFrame, scheduleRender, render, toast,
     fdata, layerLines, writableLines, newFill, ensureFills, owned, anyOwned, sceneIndexOf, retainFillsFor,
     activeLayer, setActive, addLayer, setTool, renderLayers, eventToPixel, mergeLayers, copyFrameForward, moveLayer, resolveOverlaps,
-    setCarry, purgeCarried, findSnap,
+    setCarry, purgeCarried, findSnap, clearColorRange,
     commitChanges, pushUndo, updateUndoButtons,
     rebuildMask, exportPng,
   };

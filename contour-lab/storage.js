@@ -93,7 +93,11 @@
     if (meta) {
       applyMetaToState(meta);
       try { const st = await store('frames', 'readonly'); const rows = await req(st.getAll(rangeFor(sig))); for (const row of rows) S.savedFrames.set(row.f, row.lines); } catch (e) {}
-      CL.renderLayers(); CL.toast('前回の作業を復元しました（' + S.savedFrames.size + 'フレーム）'); setStatus('復元しました');
+      // 旧形式メタ（carry フィールドが無い＝carry自動OFF修正前に保存）を開いた場合も、既存マスクへの
+      // 幽霊引き継ぎを防ぐため carry を OFF にする（明示的に boolean が保存されていればそれを尊重）。
+      let carryNote = '';
+      if (typeof meta.carry !== 'boolean' && CL.setCarry) { CL.setCarry(false, true); carryNote = '。引き継ぎをオフにしました'; }
+      CL.renderLayers(); CL.toast('前回の作業を復元しました（' + S.savedFrames.size + 'フレーム）' + carryNote); setStatus('復元しました');
     } else if (!dbBroken) { setStatus('新規プロジェクト'); }
     await refreshProjectList();
   };

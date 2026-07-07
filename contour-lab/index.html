@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>輪郭ラボ — 手描き領域マスク (P1)</title>
-<link rel="stylesheet" href="./styles.css?v=31">
+<link rel="stylesheet" href="./styles.css?v=32">
 </head>
 <body>
 <header id="topbar">
@@ -58,8 +58,9 @@
       <label class="row"><span class="lbl">消しゴム幅</span><input type="range" id="eraserSize" min="1" max="15" step="2" value="3"><span id="eraserSizeLabel" class="mono small">3</span></label>
       <label class="row check"><input type="checkbox" id="objectEraser"> オブジェクト消しゴム（ドラッグで触れた塊ごと消去）</label>
       <button id="snapStroke" class="btn wide">🧲 直前の線をエッジへ吸着 (W)</button>
+      <button id="toolTraceSnap" class="btn wide tool">🧲 なぞり吸着 (T)：既存の線をなぞって吸着</button>
       <label class="row"><span class="lbl">吸着半径</span><input type="range" id="snapRadius" min="2" max="16" step="1" value="6"><span id="snapRadiusLabel" class="mono small">6</span></label>
-      <p class="note small">雑にペンで描く→W（またはボタン）で、その線を近くの色エッジへ吸着します。1回のUndoでラフ線に戻せます。</p>
+      <p class="note small">W＝雑にペンで描いた直前の線をエッジへ吸着。T＝<b>既存の線（閉じた輪郭もOK）の直したい区間を線に沿ってなぞる→離すと、その区間だけ</b>エッジへ吸着。どちらも1回のUndoで戻せます。</p>
     </section>
 
     <section class="psec">
@@ -95,7 +96,9 @@
       <button id="cleanInterior" class="btn wide">内部の線を掃除（輪郭だけ残す）</button>
       <button id="removeStray" class="btn wide">未使用の線を削除（塗りに無関係）</button>
       <button id="clearColor" class="btn wide danger">この色の線を全消去</button>
-      <p class="note small">「内部の線を掃除」は塗りの内側に埋もれた線だけ消し、外側と穴（ドーナツ）の輪郭は残します。</p>
+      <button id="clearColorFwd" class="btn wide danger">この色をここからシーン末尾まで消去</button>
+      <button id="clearColorBack" class="btn wide danger">この色をここからシーン先頭まで消去</button>
+      <p class="note small">「内部の線を掃除」は塗りの内側に埋もれた線だけ消し、外側と穴（ドーナツ）の輪郭は残します。<br>範囲消去は、SAMで対象が消えた後に残った“幽霊マスク”が保存データ化してしまった場合の一括削除にも使えます（未訪問フレームも対象・各フレームUndo可）。</p>
     </section>
 
     <section class="psec">
@@ -166,7 +169,7 @@
         <li>左ドラッグ＝描画／消去</li>
         <li>右・中・Space+ドラッグ＝移動</li>
         <li>ホイール＝カーソル中心ズーム</li>
-        <li>B ペン / E 消しゴム / S スナップ / W エッジ吸着 / G グリッド / D エッジ / Q 量子化 / A ワンド / X スクリブル</li>
+        <li>B ペン / E 消しゴム / S スナップ / W エッジ吸着 / T なぞり吸着 / G グリッド / D エッジ / Q 量子化 / A ワンド / X スクリブル</li>
         <li>← → フレーム送り / Shift+← → シーン移動（次/前シーンの先頭）/ F 全体 / 1 等倍</li>
         <li>Ctrl+Z 戻す / Ctrl+Y やり直し</li>
       </ul>
@@ -183,14 +186,14 @@
   </main>
 </div>
 
-<script src="../icm.js?v=31"></script>
-<script src="./contour-lab.js?v=31"></script>
-<script src="./morpho.js?v=31"></script>
-<script src="./storage.js?v=31"></script>
-<script src="./io.js?v=31"></script>
-<script src="./timeline.js?v=31"></script>
-<script src="./quantize.js?v=31"></script>
-<script src="./slic.js?v=31"></script>
-<script src="./snap.js?v=31"></script>
+<script src="../icm.js?v=32"></script>
+<script src="./contour-lab.js?v=32"></script>
+<script src="./morpho.js?v=32"></script>
+<script src="./storage.js?v=32"></script>
+<script src="./io.js?v=32"></script>
+<script src="./timeline.js?v=32"></script>
+<script src="./quantize.js?v=32"></script>
+<script src="./slic.js?v=32"></script>
+<script src="./snap.js?v=32"></script>
 </body>
 </html>

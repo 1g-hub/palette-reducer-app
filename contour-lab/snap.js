@@ -49,7 +49,34 @@
     return [bx, by];
   }
 
-  const API = { costFromMag, dijkstraPath, buildCorridor, snapEndpoint };
+  // (x,y) から半径 r 内で最も近い線画素（円形判定）。無ければ null。
+  function nearestLinePixel(lines, W, H, x, y, r) {
+    let best = null, bd = Infinity; const cx = Math.round(x), cy = Math.round(y);
+    for (let yy = Math.max(0, cy - r); yy <= Math.min(H - 1, cy + r); yy++) for (let xx = Math.max(0, cx - r); xx <= Math.min(W - 1, cx + r); xx++) {
+      if (!lines[yy * W + xx]) continue; const d = (xx - x) * (xx - x) + (yy - y) * (yy - y); if (d < bd) { bd = d; best = [xx, yy]; }
+    }
+    return best && bd <= (r + 0.5) * (r + 0.5) ? best : null;
+  }
+  // 既存線上を a→b へ、near(許可マスク, 省略可)内の線画素だけを通る最短経路(8近傍BFS)。
+  // 閉ループでは near＝なぞり近傍にすることで「なぞった側の弧」が選ばれる。到達不能なら null。
+  function linePathWithin(lines, W, H, a, b, near) {
+    const N = W * H, sa = a[1] * W + a[0], sb = b[1] * W + b[0];
+    if (!lines[sa] || !lines[sb]) return null;
+    const prev = new Int32Array(N).fill(-1), q = new Int32Array(N); let head = 0, tail = 0;
+    q[tail++] = sa; prev[sa] = sa;
+    while (head < tail) {
+      const p = q[head++]; if (p === sb) break;
+      const x = p % W, y = (p / W) | 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+        const t = yy * W + xx; if (prev[t] !== -1 || !lines[t] || (near && !near[t])) continue; prev[t] = p; q[tail++] = t;
+      }
+    }
+    if (prev[sb] === -1) return null;
+    const path = []; let c = sb; while (c !== sa) { path.push([c % W, (c / W) | 0]); c = prev[c]; } path.push([a[0], a[1]]); path.reverse(); return path;
+  }
+
+  const API = { costFromMag, dijkstraPath, buildCorridor, snapEndpoint, nearestLinePixel, linePathWithin };
   if (typeof window !== 'undefined') window.ContourLab = Object.assign(window.ContourLab || {}, API);
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
   if (typeof document === 'undefined') return;
@@ -102,15 +129,91 @@
     CL.toast('エッジに吸着しました（' + path.length + '点）');
   }
 
+  /* ============ なぞり吸着 (T)：既存の線の「なぞった区間」だけをエッジへ吸着（閉ループ対応） ============ */
+  // W(直前ストローク吸着)の延長。SAM取込マスクの輪郭（閉ループ）の一部区間を直すのが主用途:
+  // 線に沿ってドラッグ→離すと、なぞり両端に最も近い線上の2点をアンカーに、その間の「なぞった側の区間」を
+  // 回廊Dijkstraの最小コスト経路（色エッジ沿い）で置き換える。1 Undo で元の区間に戻る。
+  let tracing = false, tracePts = null;
+  function traceSnapApply(pts) {
+    const lid = S.activeLid, cd = S.frames.get(S.cur), lines0 = cd && cd.lines.get(lid);
+    if (!lines0) { CL.toast('この色に線がありません'); return; }
+    if (!pts || pts.length < 2) { CL.toast('線に沿ってなぞってください'); return; }
+    const W = S.W, H = S.H, N = W * H;
+    const Ra = Math.max(3, Math.min(14, Math.round(10 / S.view.scale)));
+    const A = nearestLinePixel(lines0, W, H, pts[0][0], pts[0][1], Ra);
+    const B = nearestLinePixel(lines0, W, H, pts[pts.length - 1][0], pts[pts.length - 1][1], Ra);
+    if (!A || !B || (A[0] === B[0] && A[1] === B[1])) { CL.toast('なぞりの始点と終点を、既存の線の近くの別々の場所にしてください'); return; }
+    const R = +($('snapRadius') ? $('snapRadius').value : 6);
+    // 弧選択（なぞった側の既存区間）: 既存線が間違っている所ほど、なぞりとのズレは大きい。
+    // 回廊を 1×→2×→4×（上限48px）と広げながら探す。狭い回廊が先に成功する＝なぞった側の弧が優先される。
+    let seg = null;
+    for (const mul of [1, 2, 4]) {
+      const rr = Math.min(48, Math.max(R, 4) * mul);
+      seg = linePathWithin(lines0, W, H, A, B, buildCorridor(pts, W, H, rr).allowed);
+      if (seg) break;
+    }
+    if (!seg) { CL.toast('なぞりに沿った線の区間が見つかりません（線に沿ってなぞってください）'); return; }
+    const mg = getMag(); if (!mg) { CL.toast('エッジ場が使えません'); return; }
+    const corridor = buildCorridor(pts.concat(seg), W, H, R);
+    let cmax = 1; for (let y = corridor.y0; y <= corridor.y1; y++) for (let x = corridor.x0; x <= corridor.x1; x++) { const i = y * W + x; if (corridor.allowed[i] && mg.mag[i] > cmax) cmax = mg.mag[i]; }
+    const cost = costFromMag(mg.mag, N, 8, cmax);
+    const path = dijkstraPath(cost, W, H, corridor.allowed, A[0], A[1], B[0], B[1]);
+    if (!path || path.length < 2) { CL.toast('経路が見つかりません（吸着半径を上げてみてください）'); return; }
+    // 新線 = 旧線 − なぞった区間(アンカー除く) + 新経路
+    const newLines = Uint8Array.from(lines0);
+    for (let k = 1; k < seg.length - 1; k++) newLines[seg[k][1] * W + seg[k][0]] = 0;
+    for (let k = 1; k < path.length; k++) CLab.bresenham(newLines, W, H, path[k - 1][0], path[k - 1][1], path[k][0], path[k][1], 1, null);
+    newLines[A[1] * W + A[0]] = 1; newLines[B[1] * W + B[0]] = 1;
+    // リーク保険: 塗り(閉領域)が3割以上崩れるなら中止
+    const pop = (u8) => { let c = 0; for (let i = 0; i < u8.length; i++) if (u8[i]) c++; return c; };
+    const oldPop = pop(CLab.computeFill(lines0, W, H)), newPop = pop(CLab.computeFill(newLines, W, H));
+    if (oldPop > 0 && newPop < oldPop * 0.7) { CL.toast('領域が壊れるため中止しました（なぞる範囲を見直してください）'); return; }
+    const changed = new Map(); for (let i = 0; i < N; i++) { const nv = newLines[i] ? 1 : 0; if ((lines0[i] ? 1 : 0) !== nv) changed.set(i, lines0[i]); }
+    if (!changed.size) { CL.toast('変化なし（既にエッジ上でした）'); return; }
+    const arr = CL.writableLines(S.cur, lid); for (const [i] of changed) arr[i] = newLines[i];
+    CL.fdata(S.cur).fill.set(lid, CL.newFill(arr)); CL.commitChanges(S.cur, lid, changed);
+    S.lastStroke = null; S.maskDirty = true; CL.render(); CL.updateUndoButtons();
+    CL.toast('なぞった区間をエッジへ吸着しました');
+  }
+  // 入力（カスタムツール委譲＋自前 move/up）。なぞり中は黄色のプレビュー線を重畳。
+  const prevOnToolDown = S.onToolDown;
+  S.onToolDown = function (e, px, py, wx, wy) {
+    if (S.tool === 'tracesnap') { tracing = true; tracePts = [[px, py]]; CL.render(); return; }
+    if (prevOnToolDown) prevOnToolDown(e, px, py, wx, wy);
+  };
+  CL.dom.view.addEventListener('pointermove', (e) => {
+    if (!tracing || S.tool !== 'tracesnap') return;
+    const [px, py] = CL.eventToPixel(e); const last = tracePts[tracePts.length - 1];
+    if (px !== last[0] || py !== last[1]) tracePts.push([px, py]);
+    CL.scheduleRender();
+  });
+  window.addEventListener('pointerup', () => {
+    if (!tracing) return; tracing = false; const pts = tracePts; tracePts = null; CL.render();
+    if (S.tool === 'tracesnap' && pts && pts.length >= 2) traceSnapApply(pts);
+  });
+  const prevAfter = S.onAfterSource;
+  S.onAfterSource = function (ctx, v) {
+    if (prevAfter) prevAfter(ctx, v);
+    if (S.tool !== 'tracesnap' || !tracing || !tracePts || tracePts.length < 2) return;
+    ctx.strokeStyle = '#ffd34d'; ctx.lineWidth = Math.max(1, 2 / S.view.scale); ctx.beginPath();
+    ctx.moveTo(tracePts[0][0] + 0.5, tracePts[0][1] + 0.5);
+    for (let k = 1; k < tracePts.length; k++) ctx.lineTo(tracePts[k][0] + 0.5, tracePts[k][1] + 0.5);
+    ctx.stroke();
+  };
+  const prevOnToolChange = S.onToolChange;
+  S.onToolChange = function (t) { const b = $('toolTraceSnap'); if (b) b.classList.toggle('active', t === 'tracesnap'); if (prevOnToolChange) prevOnToolChange(t); };
+
   if ($('snapStroke')) $('snapStroke').addEventListener('click', snapLastStroke);
+  if ($('toolTraceSnap')) $('toolTraceSnap').addEventListener('click', () => CL.setTool('tracesnap'));
   window.addEventListener('keydown', (e) => {
     if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key.toLowerCase() === 'w') { e.preventDefault(); snapLastStroke(); }
+    else if (e.key.toLowerCase() === 't') { CL.setTool('tracesnap'); CL.toast('なぞり吸着: 既存の線に沿ってなぞる→離すと吸着'); }
   });
   // 動画読込で mag キャッシュ＋直前ストロークをリセット（別動画の残留を防ぐ、P4 と同クラス）。
   const prevOVL = S.onVideoLoaded;
   S.onVideoLoaded = function (file) { magCache = null; S.lastStroke = null; S.strokePts = null; return prevOVL ? prevOVL(file) : undefined; };
 
-  window.CLSnap = { snapLastStroke, getMag, _magCache: () => magCache };
+  window.CLSnap = { snapLastStroke, traceSnapApply, getMag, _magCache: () => magCache };
 })(typeof self !== 'undefined' ? self : this);

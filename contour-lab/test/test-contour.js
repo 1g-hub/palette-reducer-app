@@ -344,6 +344,27 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
   const sp = SN.snapEndpoint(m, W, H, allowed, 4, 5, 2); ok(m[sp[1] * W + sp[0]] === 100, 'snapEndpoint moves to a max-gradient pixel');
 }
 
+// ---- なぞり吸着の純関数（nearestLinePixel / linePathWithin＝閉ループの弧選択） ----
+{
+  const W = 12, H = 12, a = new Uint8Array(W * H);
+  rect(a, W, H, 2, 2, 8, 8); // 閉ループ（四角）
+  // nearestLinePixel: (5,0) から r=3 → (5,2)。r=1 → 見つからず null
+  const p1 = SN.nearestLinePixel(a, W, H, 5, 0, 3);
+  ok(p1 && p1[0] === 5 && p1[1] === 2, 'nearestLinePixel finds the loop pixel within r');
+  ok(SN.nearestLinePixel(a, W, H, 5, 0, 1) === null, 'nearestLinePixel: null beyond r (circular)');
+  // linePathWithin: A=(2,4)左辺, B=(8,4)右辺。制限なし → 短い上側の弧（(5,2)を通る）
+  const pathTop = SN.linePathWithin(a, W, H, [2, 4], [8, 4], null);
+  ok(pathTop && pathTop.some((p) => p[0] === 5 && p[1] === 2), 'linePathWithin (unrestricted): takes the shorter TOP arc');
+  // near＝下半分のみ許可 → 長い下側の弧（(5,8)を通る）＝「なぞった側」が選ばれる
+  const nearBottom = new Uint8Array(W * H); for (let y = 4; y < H; y++) for (let x = 0; x < W; x++) nearBottom[y * W + x] = 1;
+  const pathBot = SN.linePathWithin(a, W, H, [2, 4], [8, 4], nearBottom);
+  ok(pathBot && pathBot.some((p) => p[0] === 5 && p[1] === 8) && !pathBot.some((p) => p[1] === 2), 'linePathWithin (near=bottom): takes the BOTTOM arc = the traced side of a CLOSED loop');
+  ok(pathBot[0][0] === 2 && pathBot[0][1] === 4 && pathBot[pathBot.length - 1][0] === 8 && pathBot[pathBot.length - 1][1] === 4, 'linePathWithin: path starts at A and ends at B');
+  // 到達不能（near が線を分断）→ null
+  const nearNone = new Uint8Array(W * H); nearNone[4 * W + 2] = 1; nearNone[4 * W + 8] = 1;
+  ok(SN.linePathWithin(a, W, H, [2, 4], [8, 4], nearNone) === null, 'linePathWithin: null when the corridor disconnects the line');
+}
+
 // ---- P7: 本体(app.js)の RLE 機構と往復互換（contour-lab の線形RLE → ビットマップ → app.js の行RLE） ----
 {
   // app.js:3423 rleEncodeMask / :3437 rleMaskForEach の参照実装（コピー）。本体が読める形かを担保。
