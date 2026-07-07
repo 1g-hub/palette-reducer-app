@@ -76,7 +76,34 @@
     const path = []; let c = sb; while (c !== sa) { path.push([c % W, (c / W) | 0]); c = prev[c]; } path.push([a[0], a[1]]); path.reverse(); return path;
   }
 
-  const API = { costFromMag, dijkstraPath, buildCorridor, snapEndpoint, nearestLinePixel, linePathWithin };
+  // 塗り領域(mask=1)の外周を8近傍ムーア追跡で一周し、順序付き閉輪郭を返す（古典手法・ギザギザに頑健）。
+  // start は領域の最上・最左の画素（その真上は必ず領域外）。Jacob の停止条件（開始画素へ同方向で再入）。
+  function mooreBoundary(mask, W, H, start) {
+    const dirs = [[0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1]]; // N,NE,E,SE,S,SW,W,NW（時計回り）
+    const at = (x, y) => (x >= 0 && y >= 0 && x < W && y < H && mask[y * W + x]) ? 1 : 0;
+    const sx = start % W, sy = (start / W) | 0;
+    if (!at(sx, sy)) return [];
+    const pts = [[sx, sy]];
+    let cx = sx, cy = sy, scanFrom = 0;
+    // 停止条件は「(画素,走査開始方向) の状態が再訪されたら一周」。方向一致だけの Jacob 基準は
+    // ギザギザ形状で満たされず無限周回し得る（e2e で 8*W*H 上限まで回るハングを実測）。
+    const seen = new Set(); seen.add((sy * W + sx) * 8 + scanFrom);
+    for (;;) {
+      let moved = -1;
+      for (let k = 0; k < 8; k++) {
+        const d = (scanFrom + k) % 8, nx = cx + dirs[d][0], ny = cy + dirs[d][1];
+        if (at(nx, ny)) { moved = d; cx = nx; cy = ny; break; }
+      }
+      if (moved < 0) break; // 1画素の領域
+      scanFrom = (moved + 6) % 8; // 直前に来た方向の右隣から再走査（時計回り追跡の定石）
+      const state = (cy * W + cx) * 8 + scanFrom;
+      if (seen.has(state)) break; // 一周完了（状態再訪＝必ず停止）
+      seen.add(state); pts.push([cx, cy]);
+    }
+    return pts;
+  }
+
+  const API = { costFromMag, dijkstraPath, buildCorridor, snapEndpoint, nearestLinePixel, linePathWithin, mooreBoundary };
   if (typeof window !== 'undefined') window.ContourLab = Object.assign(window.ContourLab || {}, API);
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
   if (typeof document === 'undefined') return;
@@ -219,6 +246,65 @@
     S.lastStroke = null; S.maskDirty = true; CL.render(); CL.updateUndoButtons();
     CL.toast('円が通った区間をエッジへ吸着しました（' + comp.length + 'px→' + path.length + '点）');
   }
+  /* ============ フレーム全体のエッジ吸着：選択色の全輪郭を一括でエッジへ（専用半径） ============ */
+  // 「塗り領域の外周」をムーア追跡で順序付き閉輪郭にし（線グラフの枝・ギザギザに頑健）、
+  // 約90px間隔のアンカーで区切って区間ごとに帯Dijkstraで置換。アンカーは局所の勾配最大へ小さく(≤4px)
+  // 寄せ、隣接区間とアンカーを共有＝ループは閉じたまま。塗りの無い開曲線（手描きメモ等）と20px未満の
+  // 微小成分（ノイズ片）は対象外。塗り3割崩壊で中止。1 Undo で全復元。
+  function snapFrameEdges() {
+    const lid = S.activeLid, cd = S.frames.get(S.cur), lines0 = cd && cd.lines.get(lid);
+    if (!lines0) { CL.toast('この色に線がありません'); return; }
+    const mg = getMag(); if (!mg) { CL.toast('エッジ場が使えません'); return; }
+    const W = S.W, H = S.H, N = W * H;
+    const Rf = Math.max(2, +($('frameSnapRadius') ? $('frameSnapRadius').value : 5));
+    const SEG = 90;
+    // 領域 = 線 ∪ 塗り。領域の8連結成分ごとに外周を処理する。
+    const fill0 = CLab.computeFill(lines0, W, H);
+    const full = new Uint8Array(N); for (let i = 0; i < N; i++) if (lines0[i] || fill0[i]) full[i] = 1;
+    const compOf = new Int32Array(N).fill(-1); const comps = []; // {start(最上左), size, fillCnt, idx[]}
+    for (let i = 0; i < N; i++) {
+      if (!full[i] || compOf[i] >= 0) continue;
+      const id = comps.length, idx = []; let fillCnt = 0; const stk = [i]; compOf[i] = id;
+      while (stk.length) { const p = stk.pop(); idx.push(p); if (!lines0[p]) fillCnt++; const x = p % W, y = (p / W) | 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; const q = yy * W + xx; if (full[q] && compOf[q] < 0) { compOf[q] = id; stk.push(q); } } }
+      comps.push({ start: i, size: idx.length, fillCnt, idx }); // i はスキャン順で最上左
+    }
+    const newLines = Uint8Array.from(lines0);
+    let snapped = 0;
+    const drawChain = (pts) => { for (let k = 1; k < pts.length; k++) CLab.bresenham(newLines, W, H, pts[k - 1][0], pts[k - 1][1], pts[k][0], pts[k][1], 1, null); if (pts.length === 1) newLines[pts[0][1] * W + pts[0][0]] = 1; };
+    for (const c of comps) {
+      if (c.size < 20 || c.fillCnt === 0) continue; // ノイズ片・塗りのない開曲線はそのまま
+      const bpts = mooreBoundary(full, W, H, c.start); // 外周（順序付き・閉）
+      if (bpts.length < 12) continue;
+      for (const p of c.idx) if (lines0[p]) newLines[p] = 0; // この領域の旧線を丸ごと消す（内部の迷い線も掃除）
+      const L = bpts.length, anchorIdx = [];
+      { const n = Math.max(2, Math.round(L / SEG)); for (let i = 0; i < n; i++) anchorIdx.push(Math.floor(i * L / n)); }
+      const rN = Math.min(Rf, 4);
+      const anchors = anchorIdx.map((i) => { const p = bpts[i]; let best = p, bd = -1; for (let dy = -rN; dy <= rN; dy++) for (let dx = -rN; dx <= rN; dx++) { const x = p[0] + dx, y = p[1] + dy; if (x < 0 || y < 0 || x >= W || y >= H) continue; const m = mg.mag[y * W + x]; if (m > bd) { bd = m; best = [x, y]; } } return best; });
+      for (let a = 0; a < anchors.length; a++) {
+        const i0 = anchorIdx[a], i1 = anchorIdx[(a + 1) % anchors.length];
+        const arcPts = (a === anchors.length - 1) ? bpts.slice(i0).concat(bpts.slice(0, i1 + 1)) : bpts.slice(i0, i1 + 1);
+        const A = anchors[a], B = anchors[(a + 1) % anchors.length];
+        const cor = buildCorridor(arcPts.concat([A, B]), W, H, Rf);
+        let cmax = 1; for (let y = cor.y0; y <= cor.y1; y++) for (let x = cor.x0; x <= cor.x1; x++) { const i = y * W + x; if (cor.allowed[i] && mg.mag[i] > cmax) cmax = mg.mag[i]; }
+        const cost = costFromMag(mg.mag, N, 8, cmax);
+        const path = dijkstraPath(cost, W, H, cor.allowed, A[0], A[1], B[0], B[1]);
+        drawChain(path && path.length >= 2 ? path : arcPts); // 失敗区間は元の形を維持
+      }
+      snapped++;
+    }
+    if (!snapped) { CL.toast('対象の輪郭がありません（塗りのある20px以上の領域が対象）'); return; }
+    const pop = (u8) => { let c2 = 0; for (let i = 0; i < u8.length; i++) if (u8[i]) c2++; return c2; };
+    const oldPop = pop(CLab.computeFill(lines0, W, H)), newPop = pop(CLab.computeFill(newLines, W, H));
+    if (oldPop > 0 && newPop < oldPop * 0.7) { CL.toast('領域が壊れるため中止しました（全体半径を小さくしてください）'); return; }
+    const changed = new Map(); for (let i = 0; i < N; i++) { const nv = newLines[i] ? 1 : 0; if ((lines0[i] ? 1 : 0) !== nv) changed.set(i, lines0[i]); }
+    if (!changed.size) { CL.toast('変化なし（既にエッジ上でした）'); return; }
+    const arr = CL.writableLines(S.cur, lid); for (const [i] of changed) arr[i] = newLines[i];
+    CL.fdata(S.cur).fill.set(lid, CL.newFill(arr)); CL.commitChanges(S.cur, lid, changed);
+    S.lastStroke = null; S.maskDirty = true; CL.render(); CL.updateUndoButtons();
+    CL.toast('フレーム全体のエッジへ吸着しました（' + snapped + '本の輪郭）');
+  }
+
   // 入力（カスタムツール委譲＋自前 move/up）。なぞり中は黄色のプレビュー線を重畳。
   const prevOnToolDown = S.onToolDown;
   S.onToolDown = function (e, px, py, wx, wy) {
@@ -267,6 +353,9 @@
 
   if ($('snapStroke')) $('snapStroke').addEventListener('click', snapLastStroke);
   if ($('toolTraceSnap')) $('toolTraceSnap').addEventListener('click', () => CL.setTool('tracesnap'));
+  if ($('snapFrame')) $('snapFrame').addEventListener('click', snapFrameEdges);
+  const fsrEl = $('frameSnapRadius'), fsrLbl = $('frameSnapRadiusLabel');
+  if (fsrEl) fsrEl.addEventListener('input', () => { if (fsrLbl) fsrLbl.textContent = fsrEl.value; });
   window.addEventListener('keydown', (e) => {
     if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -277,5 +366,5 @@
   const prevOVL = S.onVideoLoaded;
   S.onVideoLoaded = function (file) { magCache = null; S.lastStroke = null; S.strokePts = null; return prevOVL ? prevOVL(file) : undefined; };
 
-  window.CLSnap = { snapLastStroke, traceSnapApply, getMag, _magCache: () => magCache };
+  window.CLSnap = { snapLastStroke, traceSnapApply, snapFrameEdges, getMag, _magCache: () => magCache };
 })(typeof self !== 'undefined' ? self : this);

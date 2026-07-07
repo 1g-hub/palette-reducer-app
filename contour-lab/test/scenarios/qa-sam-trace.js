@@ -56,6 +56,19 @@ module.exports = {
     await page.$eval('#undoBtn', (e) => e.click()); await sleep(200);
     t.ok((await stat()).hash === s0.hash, 'Undo restores the original SAM contour');
 
+    // ===== フェーズ2: フレーム全体のエッジ吸着（実SAM輪郭の全周） =====
+    await page.evaluate(() => { const el = document.getElementById('frameSnapRadius'); el.value = 5; el.dispatchEvent(new Event('input')); const h = document.getElementById('hint'); h.textContent = ''; });
+    await page.$eval('#snapFrame', (e) => e.click());
+    let hint2 = ''; { const end = Date.now() + 90000; while (Date.now() < end) { hint2 = await page.$eval('#hint', (e) => e.textContent).catch(() => ''); if (/吸着|中止|ありません|変化なし/.test(hint2)) break; await sleep(300); } }
+    const s2 = await stat();
+    await ctx.shot('frame_after');
+    t.ok(/吸着しました/.test(hint2), 'FRAME-WIDE snap applied on the real SAM mask (hint="' + hint2 + '")');
+    t.ok(s2.hash !== s0.hash, 'whole contour changed');
+    t.ok(s2.iso <= s0.iso, 'frame-wide snap: no NEW isolated pixels (' + s0.iso + '->' + s2.iso + ')');
+    t.ok(s2.fill >= s0.fill * 0.7 && s2.fill <= s0.fill * 1.3, 'frame-wide snap: mask area sane (' + s0.fill + '->' + s2.fill + ')');
+    await page.$eval('#undoBtn', (e) => e.click()); await sleep(300);
+    t.ok((await stat()).hash === s0.hash, 'one Undo restores everything after frame-wide snap');
+
     t.ok(ctx.errors.length === 0, 'no page errors' + (ctx.errors.length ? ': ' + ctx.errors.join(' | ') : ''));
   },
 };

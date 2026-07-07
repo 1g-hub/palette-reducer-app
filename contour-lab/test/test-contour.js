@@ -365,6 +365,32 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
   ok(SN.linePathWithin(a, W, H, [2, 4], [8, 4], nearNone) === null, 'linePathWithin: null when the corridor disconnects the line');
 }
 
+// ---- mooreBoundary（フレーム全体吸着：塗り領域の外周追跡） ----
+{
+  // 7x7 の塗り四角（(2,2)-(8,8)）: 外周 = 周長24画素を順序付きで一周、連続点は8近傍隣接
+  { const W = 12, H = 12, m = new Uint8Array(W * H);
+    for (let y = 2; y <= 8; y++) for (let x = 2; x <= 8; x++) m[y * W + x] = 1;
+    const b = SN.mooreBoundary(m, W, H, 2 * W + 2);
+    const uniq = new Set(b.map((p) => p[1] * W + p[0]));
+    let adj = true; for (let k = 1; k < b.length; k++) { const dx = Math.abs(b[k][0] - b[k - 1][0]), dy = Math.abs(b[k][1] - b[k - 1][1]); if (dx > 1 || dy > 1) adj = false; }
+    ok(uniq.size === 24 && adj, 'mooreBoundary: filled square rim = 24 ordered, 8-adjacent boundary pixels (' + uniq.size + ')');
+    // 端(先頭)と末尾も8近傍で繋がる（閉輪郭）
+    const f = b[0], l = b[b.length - 1];
+    ok(Math.abs(f[0] - l[0]) <= 1 && Math.abs(f[1] - l[1]) <= 1, 'mooreBoundary: first/last points adjacent (closed cycle)'); }
+  // ギザギザ領域でも追跡が破綻しない（1px凹凸つき台形）
+  { const W = 60, H = 40, m = new Uint8Array(W * H); let s = 5; const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+    let start = -1;
+    for (let x = 5; x <= 55; x++) { let top = 10 + ((x % 7 === 0) ? 1 : 0) + (rnd() < 0.4 ? 1 : 0); for (let y = top; y <= 30; y++) { m[y * W + x] = 1; } }
+    for (let i = 0; i < W * H; i++) if (m[i]) { start = i; break; }
+    const b = SN.mooreBoundary(m, W, H, start);
+    let adj = true; for (let k = 1; k < b.length; k++) { const dx = Math.abs(b[k][0] - b[k - 1][0]), dy = Math.abs(b[k][1] - b[k - 1][1]); if (dx > 1 || dy > 1) adj = false; }
+    ok(b.length > 100 && b.length < 800 && adj, 'mooreBoundary: ragged region = ONE lap, no endless orbit (' + b.length + ' pts, perimeter~200)'); }
+  // 1画素領域
+  { const W = 5, H = 5, m = new Uint8Array(W * H); m[2 * W + 2] = 1;
+    const b = SN.mooreBoundary(m, W, H, 2 * W + 2);
+    ok(b.length === 1 && b[0][0] === 2 && b[0][1] === 2, 'mooreBoundary: single pixel region -> single point'); }
+}
+
 // ---- P7: 本体(app.js)の RLE 機構と往復互換（contour-lab の線形RLE → ビットマップ → app.js の行RLE） ----
 {
   // app.js:3423 rleEncodeMask / :3437 rleMaskForEach の参照実装（コピー）。本体が読める形かを担保。
