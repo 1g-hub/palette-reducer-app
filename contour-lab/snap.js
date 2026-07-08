@@ -272,24 +272,69 @@
     const newLines = Uint8Array.from(lines0);
     let snapped = 0;
     const drawChain = (pts) => { for (let k = 1; k < pts.length; k++) CLab.bresenham(newLines, W, H, pts[k - 1][0], pts[k - 1][1], pts[k][0], pts[k][1], 1, null); if (pts.length === 1) newLines[pts[0][1] * W + pts[0][0]] = 1; };
-    for (const c of comps) {
-      if (c.size < 20 || c.fillCnt === 0) continue; // ノイズ片・塗りのない開曲線はそのまま
-      const bpts = mooreBoundary(full, W, H, c.start); // 外周（順序付き・閉）
-      if (bpts.length < 12) continue;
-      for (const p of c.idx) if (lines0[p]) newLines[p] = 0; // この領域の旧線を丸ごと消す（内部の迷い線も掃除）
+    // 閉輪郭（順序付き点列）をアンカー分割してエッジへ吸着（外周・穴の縁の共通処理）。
+    // コスト＝エッジ項（グローバル正規化）＋「元の輪郭からの距離」バイアス。エッジ信号が無い平坦部
+    // （例: 髪内部の穴）では距離項が支配して元の形を保ち、実エッジがある所だけ吸着する。
+    // 回廊内正規化だと平坦部でノイズが増幅され、最短経路化で閉ループが退化して穴が潰れる（実測）。
+    const globalMax = mg.magMax || 1, nudgeThr = 0.15 * globalMax;
+    const snapClosedBoundary = (bpts) => {
       const L = bpts.length, anchorIdx = [];
       { const n = Math.max(2, Math.round(L / SEG)); for (let i = 0; i < n; i++) anchorIdx.push(Math.floor(i * L / n)); }
       const rN = Math.min(Rf, 4);
-      const anchors = anchorIdx.map((i) => { const p = bpts[i]; let best = p, bd = -1; for (let dy = -rN; dy <= rN; dy++) for (let dx = -rN; dx <= rN; dx++) { const x = p[0] + dx, y = p[1] + dy; if (x < 0 || y < 0 || x >= W || y >= H) continue; const m = mg.mag[y * W + x]; if (m > bd) { bd = m; best = [x, y]; } } return best; });
+      // アンカー移動は「意味のあるエッジ（グローバル最大の15%以上）へ、今より良くなる時だけ」
+      const anchors = anchorIdx.map((i) => {
+        const p = bpts[i]; let best = p, bd = mg.mag[p[1] * W + p[0]];
+        for (let dy = -rN; dy <= rN; dy++) for (let dx = -rN; dx <= rN; dx++) { const x = p[0] + dx, y = p[1] + dy; if (x < 0 || y < 0 || x >= W || y >= H) continue; const m = mg.mag[y * W + x]; if (m > bd && m >= nudgeThr) { bd = m; best = [x, y]; } }
+        return best;
+      });
       for (let a = 0; a < anchors.length; a++) {
         const i0 = anchorIdx[a], i1 = anchorIdx[(a + 1) % anchors.length];
         const arcPts = (a === anchors.length - 1) ? bpts.slice(i0).concat(bpts.slice(0, i1 + 1)) : bpts.slice(i0, i1 + 1);
         const A = anchors[a], B = anchors[(a + 1) % anchors.length];
         const cor = buildCorridor(arcPts.concat([A, B]), W, H, Rf);
-        let cmax = 1; for (let y = cor.y0; y <= cor.y1; y++) for (let x = cor.x0; x <= cor.x1; x++) { const i = y * W + x; if (cor.allowed[i] && mg.mag[i] > cmax) cmax = mg.mag[i]; }
-        const cost = costFromMag(mg.mag, N, 8, cmax);
+        const cost = costFromMag(mg.mag, N, 8, globalMax);
+        // 元の弧からの距離（回廊内BFS）をコストに加算 → 平坦部では元の形を維持
+        const distB = new Int32Array(N).fill(-1); const q = [];
+        for (const p of arcPts) { const i = p[1] * W + p[0]; if (cor.allowed[i] && distB[i] < 0) { distB[i] = 0; q.push(i); } }
+        let qh = 0; while (qh < q.length) { const i = q[qh++]; const x = i % W, y = (i / W) | 0, d = distB[i] + 1;
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; const j = yy * W + xx; if (cor.allowed[j] && distB[j] < 0) { distB[j] = d; q.push(j); } } }
+        for (let y = cor.y0; y <= cor.y1; y++) for (let x = cor.x0; x <= cor.x1; x++) { const i = y * W + x; if (cor.allowed[i]) cost[i] += (distB[i] < 0 ? Rf : distB[i]); }
         const path = dijkstraPath(cost, W, H, cor.allowed, A[0], A[1], B[0], B[1]);
         drawChain(path && path.length >= 2 ? path : arcPts); // 失敗区間は元の形を維持
+      }
+    };
+    const holeScratch = new Uint8Array(N); // 穴の縁追跡用（使い回し）
+    for (const c of comps) {
+      if (c.size < 20 || c.fillCnt === 0) continue; // ノイズ片・塗りのない開曲線はそのまま
+      const bpts = mooreBoundary(full, W, H, c.start); // 外周（順序付き・閉）
+      if (bpts.length < 12) continue;
+      for (const p of c.idx) if (lines0[p]) newLines[p] = 0; // この領域の旧線を丸ごと消す（内部の迷い線も掃除）
+      snapClosedBoundary(bpts);
+      // 穴（ドーナツ）: 領域bbox内で「この領域以外」を外周(bbox縁)から4近傍floodし、届かない空間＝穴。
+      // 穴の縁も輪郭として同様に吸着（外周だけ描き直すと穴の縁の線が失われ even-odd で穴が埋まる、ユーザ報告バグ）。
+      {
+        const cid = compOf[c.start];
+        let minx = W, miny = H, maxx = 0, maxy = 0;
+        for (const p of c.idx) { const x = p % W, y = (p / W) | 0; if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y; }
+        minx = Math.max(0, minx - 1); miny = Math.max(0, miny - 1); maxx = Math.min(W - 1, maxx + 1); maxy = Math.min(H - 1, maxy + 1);
+        const bw = maxx - minx + 1, bh = maxy - miny + 1, mark = new Uint8Array(bw * bh), stk = [];
+        const push = (lx, ly, v) => { const li = ly * bw + lx; if (mark[li]) return; const g = (miny + ly) * W + (minx + lx); if (compOf[g] === cid) return; mark[li] = v; stk.push(li); };
+        for (let x = 0; x < bw; x++) { push(x, 0, 1); push(x, bh - 1, 1); }
+        for (let y = 0; y < bh; y++) { push(0, y, 1); push(bw - 1, y, 1); }
+        while (stk.length) { const li = stk.pop(); const lx = li % bw, ly = (li / bw) | 0; if (lx > 0) push(lx - 1, ly, 1); if (lx < bw - 1) push(lx + 1, ly, 1); if (ly > 0) push(lx, ly - 1, 1); if (ly < bh - 1) push(lx, ly + 1, 1); }
+        for (let ly = 0; ly < bh; ly++) for (let lx = 0; lx < bw; lx++) {
+          const li = ly * bw + lx; if (mark[li]) continue; const g0 = (miny + ly) * W + (minx + lx); if (compOf[g0] === cid) continue;
+          // 穴blobを収集（4近傍）
+          const blob = []; let minIdx = g0; mark[li] = 2; const hs = [li];
+          while (hs.length) { const l2 = hs.pop(); const x2 = l2 % bw, y2 = (l2 / bw) | 0; const g2 = (miny + y2) * W + (minx + x2); blob.push(g2); if (g2 < minIdx) minIdx = g2;
+            const tryN = (lx3, ly3) => { const l3 = ly3 * bw + lx3; if (mark[l3]) return; const g3 = (miny + ly3) * W + (minx + lx3); if (compOf[g3] === cid) return; mark[l3] = 2; hs.push(l3); };
+            if (x2 > 0) tryN(x2 - 1, y2); if (x2 < bw - 1) tryN(x2 + 1, y2); if (y2 > 0) tryN(x2, y2 - 1); if (y2 < bh - 1) tryN(x2, y2 + 1); }
+          for (const g of blob) holeScratch[g] = 1;
+          const rim = mooreBoundary(holeScratch, W, H, minIdx);
+          for (const g of blob) holeScratch[g] = 0;
+          if (rim.length >= 24) snapClosedBoundary(rim);
+          else if (rim.length >= 2) drawChain(rim.concat([rim[0]])); // 小さな穴は形をそのまま維持
+        }
       }
       snapped++;
     }
