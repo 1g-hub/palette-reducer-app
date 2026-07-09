@@ -415,6 +415,23 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
   ok(c05[1] < c1[1], 'gamma=0.5 lowers the cost of a WEAK (30%) edge: ' + c1[1].toFixed(2) + ' -> ' + c05[1].toFixed(2));
 }
 
+// ---- なぞり平滑 (smoothChain): 両端固定・ギザギザ低減・直線不変 ----
+{
+  // ギザギザ階段: y が ±1 交互に振れる水平チェーン
+  const zig = []; for (let x = 0; x <= 40; x++) zig.push([x, 100 + (x % 2)]);
+  const tv = (pts) => { let s = 0; for (let i = 1; i < pts.length; i++) s += Math.abs(pts[i][1] - pts[i - 1][1]); return s; };
+  const sm = SN.smoothChain(zig, 7, 4);
+  ok(sm.length === zig.length, 'smoothChain keeps point count');
+  ok(sm[0][0] === 0 && sm[0][1] === 100 && sm[sm.length - 1][0] === 40 && sm[sm.length - 1][1] === 100, 'smoothChain pins both endpoints exactly');
+  ok(tv(sm) < tv(zig) * 0.25, 'smoothChain reduces zigzag total-variation by >75% (' + tv(zig).toFixed(1) + ' -> ' + tv(sm).toFixed(1) + ')');
+  // 直線はほぼ不変（丸めれば同一）
+  const line = []; for (let x = 0; x <= 30; x++) line.push([x, 50]);
+  const smL = SN.smoothChain(line, 7, 4);
+  ok(smL.every((p, i) => Math.round(p[0]) === line[i][0] && Math.round(p[1]) === 50), 'smoothChain leaves a straight line unchanged (after rounding)');
+  // 強度が上がるほど滑らかさが単調に増す（TVが減る）
+  ok(tv(SN.smoothChain(zig, 7, 8)) <= tv(SN.smoothChain(zig, 7, 2)), 'more iterations => smoother (monotone TV)');
+}
+
 // ---- P7: 本体(app.js)の RLE 機構と往復互換（contour-lab の線形RLE → ビットマップ → app.js の行RLE） ----
 {
   // app.js:3423 rleEncodeMask / :3437 rleMaskForEach の参照実装（コピー）。本体が読める形かを担保。

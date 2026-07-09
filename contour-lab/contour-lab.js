@@ -325,7 +325,7 @@
     if (v.scale >= 8) { ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.strokeRect(Math.round(wx * v.scale + v.tx) + 0.5, Math.round(wy * v.scale + v.ty) + 0.5, v.scale, v.scale); }
     ctx.strokeStyle = col; ctx.globalAlpha = 0.9; ctx.lineWidth = 1; ctx.beginPath(); const s = 9; ctx.moveTo(cx - s, cy); ctx.lineTo(cx + s, cy); ctx.moveTo(cx, cy - s); ctx.lineTo(cx, cy + s); ctx.stroke(); ctx.globalAlpha = 1;
     if (S.tool === 'eraser' && !S.objectEraser) { const r = (S.eraserSize / 2) * v.scale; ctx.strokeStyle = '#ffffff88'; ctx.beginPath(); ctx.arc(cx, cy, Math.max(3, r), 0, 7); ctx.stroke(); }
-    if (S.tool === 'tracesnap') { const r = Math.max(3, (S.traceSnapR || 6) * v.scale); ctx.strokeStyle = '#ffd34d88'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.stroke(); } // なぞり吸着＝回廊半径を消しゴム風の円で表示
+    if (S.tool === 'tracesnap' || S.tool === 'tracesmooth') { const r = Math.max(3, (S.traceSnapR || 6) * v.scale); ctx.strokeStyle = S.tool === 'tracesmooth' ? '#7ad3ff88' : '#ffd34d88'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.stroke(); } // なぞり吸着/平滑＝帯半径を消しゴム風の円で表示（T=黄・Y=水色）
     if (S.snapPt && S.tool === 'pen') { const sx = (S.snapPt[0] + 0.5) * v.scale + v.tx, sy = (S.snapPt[1] + 0.5) * v.scale + v.ty; ctx.strokeStyle = '#ffd34d'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(sx, sy, Math.max(5, v.scale * 0.7), 0, 7); ctx.stroke(); }
   }
 
