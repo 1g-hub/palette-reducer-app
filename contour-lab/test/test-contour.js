@@ -391,6 +391,30 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
     ok(b.length === 1 && b[0][0] === 2 && b[0][1] === 2, 'mooreBoundary: single pixel region -> single point'); }
 }
 
+// ---- sharpTurnIndices（トゲ先端の固定アンカー）＋ costFromMag のガンマ ----
+{
+  // 上辺中央に鋭いトゲ（高さ12・底辺幅6）をもつ矩形ループの点列（時計回りに手作り）
+  const pts = [];
+  for (let x = 10; x <= 40; x++) pts.push([x, 20]);          // 上辺（前半）
+  for (let i = 1; i <= 12; i++) pts.push([40 + Math.round(i / 4), 20 - i]); // トゲ上り（急峻）
+  const tipIdx = pts.length - 1;                              // 先端 (43,8)
+  for (let i = 11; i >= 0; i--) pts.push([46 - Math.round(i / 4) + 0, 20 - i]); // トゲ下り
+  for (let x = 47; x <= 70; x++) pts.push([x, 20]);          // 上辺（後半）
+  for (let y = 21; y <= 50; y++) pts.push([70, y]);          // 右辺
+  for (let x = 69; x >= 10; x--) pts.push([x, 50]);          // 下辺
+  for (let y = 49; y >= 21; y--) pts.push([10, y]);          // 左辺
+  const sharp = SN.sharpTurnIndices(pts, 6, 55);
+  const nearTip = sharp.some((i) => Math.abs(i - tipIdx) <= 3);
+  ok(nearTip, 'sharpTurnIndices finds the spike TIP (' + JSON.stringify(sharp.filter((i) => Math.abs(i - tipIdx) <= 6)) + ' near ' + tipIdx + ')');
+  const onFlat = sharp.some((i) => { const p = pts[i]; return p[1] === 50; }); // 下辺の直線上には出ない（角は出てよい）
+  ok(!sharp.some((i) => { const p = pts[i]; return p[1] === 50 && p[0] > 15 && p[0] < 65; }), 'no sharp turns reported on a straight run');
+  // ガンマ: 弱いエッジ(30%)のコストが gamma=0.5 で下がる（=引力が増す）。強いエッジ・ゼロは不変。
+  const mag = new Float32Array([0, 30, 100]);
+  const c1 = SN.costFromMag(mag, 3, 8, 100), c05 = SN.costFromMag(mag, 3, 8, 100, 0.5);
+  ok(Math.abs(c1[0] - c05[0]) < 1e-6 && Math.abs(c1[2] - c05[2]) < 1e-6, 'gamma keeps cost at mag=0 and mag=max unchanged');
+  ok(c05[1] < c1[1], 'gamma=0.5 lowers the cost of a WEAK (30%) edge: ' + c1[1].toFixed(2) + ' -> ' + c05[1].toFixed(2));
+}
+
 // ---- P7: 本体(app.js)の RLE 機構と往復互換（contour-lab の線形RLE → ビットマップ → app.js の行RLE） ----
 {
   // app.js:3423 rleEncodeMask / :3437 rleMaskForEach の参照実装（コピー）。本体が読める形かを担保。

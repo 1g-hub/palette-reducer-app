@@ -3,11 +3,33 @@
    純関数（costFromMag / dijkstraPath / buildCorridor / snapEndpoint）は ContourLab に co-attach（node テスト可）。
    コスト場＝色勾配（ICM.colorSobelMag）。回廊内で始点→終点の最小コスト経路（Dijkstra）を新しい線にする。 */
 (function (global) {
-  // 勾配強度 → コスト（勾配が高い＝エッジ＝低コスト）。cost = 1 + K*(1 - mag/magMax)。
-  function costFromMag(mag, N, K, magMax) {
-    K = K == null ? 8 : K; const inv = magMax > 0 ? 1 / magMax : 0, cost = new Float32Array(N);
-    for (let i = 0; i < N; i++) { let r = mag[i] * inv; if (r > 1) r = 1; cost[i] = 1 + K * (1 - r); }
+  // 勾配強度 → コスト（勾配が高い＝エッジ＝低コスト）。cost = 1 + K*(1 - (mag/magMax)^gamma)。
+  // gamma<1 で弱いエッジを増幅（AAで滲んだ細部＝髪の先等のエッジが引力を持つ）。既定1=従来どおり。
+  function costFromMag(mag, N, K, magMax, gamma) {
+    K = K == null ? 8 : K; gamma = gamma == null ? 1 : gamma;
+    const inv = magMax > 0 ? 1 / magMax : 0, cost = new Float32Array(N);
+    for (let i = 0; i < N; i++) { let r = mag[i] * inv; if (r > 1) r = 1; if (gamma !== 1) r = Math.pow(r, gamma); cost[i] = 1 + K * (1 - r); }
     return cost;
+  }
+  // 閉輪郭の順序付き点列から「鋭い曲がり」（トゲの先端・角）の添字を返す。
+  // 各点で前後 k 点との弦ベクトルの折れ角（0=直進, 180=折返し）を取り、minAngleDeg 以上の局所最大を採用。
+  function sharpTurnIndices(bpts, k, minAngleDeg) {
+    const L = bpts.length, out = []; if (L < 2 * k + 2) return out;
+    const ang = new Float32Array(L);
+    for (let i = 0; i < L; i++) {
+      const a = bpts[(i - k + L) % L], b = bpts[i], c = bpts[(i + k) % L];
+      const v1x = b[0] - a[0], v1y = b[1] - a[1], v2x = c[0] - b[0], v2y = c[1] - b[1];
+      const n1 = Math.hypot(v1x, v1y) || 1, n2 = Math.hypot(v2x, v2y) || 1;
+      let cos = (v1x * v2x + v1y * v2y) / (n1 * n2); if (cos > 1) cos = 1; else if (cos < -1) cos = -1;
+      ang[i] = Math.acos(cos) * 180 / Math.PI;
+    }
+    for (let i = 0; i < L; i++) {
+      if (ang[i] < minAngleDeg) continue;
+      let isMax = true;
+      for (let d = -k; d <= k && isMax; d++) { if (!d) continue; const j = (i + d + L) % L; if (ang[j] > ang[i] || (ang[j] === ang[i] && j < i)) isMax = false; }
+      if (isMax) out.push(i);
+    }
+    return out;
   }
   // 二分ヒープ [dist,node]
   function hpush(a, x) { a.push(x); let i = a.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (a[p][0] <= a[i][0]) break; const t = a[p]; a[p] = a[i]; a[i] = t; i = p; } }
@@ -103,7 +125,7 @@
     return pts;
   }
 
-  const API = { costFromMag, dijkstraPath, buildCorridor, snapEndpoint, nearestLinePixel, linePathWithin, mooreBoundary };
+  const API = { costFromMag, dijkstraPath, buildCorridor, snapEndpoint, nearestLinePixel, linePathWithin, mooreBoundary, sharpTurnIndices };
   if (typeof window !== 'undefined') window.ContourLab = Object.assign(window.ContourLab || {}, API);
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
   if (typeof document === 'undefined') return;
@@ -138,7 +160,7 @@
     const cor = buildCorridor(ls.pts, W, H, R);
     // 回廊内の勾配最大でコスト場を正規化（コントラストを出す）
     let cmax = 1; for (let y = cor.y0; y <= cor.y1; y++) for (let x = cor.x0; x <= cor.x1; x++) { const i = y * W + x; if (cor.allowed[i] && mg.mag[i] > cmax) cmax = mg.mag[i]; }
-    const cost = costFromMag(mg.mag, W * H, 8, cmax);
+    const cost = costFromMag(mg.mag, W * H, 8, cmax, 0.5);
     const a = ls.pts[0], b = ls.pts[ls.pts.length - 1];
     const sPt = snapEndpoint(mg.mag, W, H, cor.allowed, a[0], a[1], 3), tPt = snapEndpoint(mg.mag, W, H, cor.allowed, b[0], b[1], 3);
     const path = dijkstraPath(cost, W, H, cor.allowed, sPt[0], sPt[1], tPt[0], tPt[1]);
@@ -196,7 +218,7 @@
     const A = [aIdx % W, (aIdx / W) | 0], B = [bIdx % W, (bIdx / W) | 0];
     const mg = getMag(); if (!mg) { CL.toast('エッジ場が使えません'); return; }
     let cmax = 1; for (let y = swath.y0; y <= swath.y1; y++) for (let x = swath.x0; x <= swath.x1; x++) { const i = y * W + x; if (swath.allowed[i] && mg.mag[i] > cmax) cmax = mg.mag[i]; }
-    const cost = costFromMag(mg.mag, N, 8, cmax);
+    const cost = costFromMag(mg.mag, N, 8, cmax, 0.5);
     const path = dijkstraPath(cost, W, H, swath.allowed, A[0], A[1], B[0], B[1]);
     if (!path || path.length < 2) { CL.toast('経路が見つかりません（吸着半径を上げてみてください）'); return; }
     // 新線 = 旧線 − 帯に触れた区間全体(アンカー除く) + 新経路
@@ -278,12 +300,20 @@
     // 回廊内正規化だと平坦部でノイズが増幅され、最短経路化で閉ループが退化して穴が潰れる（実測）。
     const globalMax = mg.magMax || 1, nudgeThr = 0.15 * globalMax;
     const snapClosedBoundary = (bpts) => {
-      const L = bpts.length, anchorIdx = [];
-      { const n = Math.max(2, Math.round(L / SEG)); for (let i = 0; i < n; i++) anchorIdx.push(Math.floor(i * L / n)); }
+      const L = bpts.length;
+      // トゲの先端・角（鋭い曲がり）を検出して固定アンカーに＝Dijkstraの近道で先端が丸められない。
+      // 均等アンカー（約SEG間隔）は鋭角アンカーの近く(±12)では省く。
+      const sharp = sharpTurnIndices(bpts, 6, 55), pinned = new Set(sharp);
+      const anchorIdx = sharp.slice();
+      { const n = Math.max(2, Math.round(L / SEG));
+        for (let i = 0; i < n; i++) { const u = Math.floor(i * L / n); let near = false; for (const s2 of sharp) { let d = Math.abs(u - s2); d = Math.min(d, L - d); if (d < 12) { near = true; break; } } if (!near) anchorIdx.push(u); } }
+      anchorIdx.sort((x, y) => x - y);
+      if (anchorIdx.length < 2) anchorIdx.push((anchorIdx[0] + (L >> 1)) % L), anchorIdx.sort((x, y) => x - y);
       const rN = Math.min(Rf, 4);
-      // アンカー移動は「意味のあるエッジ（グローバル最大の15%以上）へ、今より良くなる時だけ」
+      // アンカー移動は「意味のあるエッジ（グローバル最大の15%以上）へ、今より良くなる時だけ」。鋭角アンカーは動かさない。
       const anchors = anchorIdx.map((i) => {
-        const p = bpts[i]; let best = p, bd = mg.mag[p[1] * W + p[0]];
+        const p = bpts[i]; if (pinned.has(i)) return p;
+        let best = p, bd = mg.mag[p[1] * W + p[0]];
         for (let dy = -rN; dy <= rN; dy++) for (let dx = -rN; dx <= rN; dx++) { const x = p[0] + dx, y = p[1] + dy; if (x < 0 || y < 0 || x >= W || y >= H) continue; const m = mg.mag[y * W + x]; if (m > bd && m >= nudgeThr) { bd = m; best = [x, y]; } }
         return best;
       });
@@ -292,7 +322,7 @@
         const arcPts = (a === anchors.length - 1) ? bpts.slice(i0).concat(bpts.slice(0, i1 + 1)) : bpts.slice(i0, i1 + 1);
         const A = anchors[a], B = anchors[(a + 1) % anchors.length];
         const cor = buildCorridor(arcPts.concat([A, B]), W, H, Rf);
-        const cost = costFromMag(mg.mag, N, 8, globalMax);
+        const cost = costFromMag(mg.mag, N, 8, globalMax, 0.5);
         // 元の弧からの距離（回廊内BFS）をコストに加算 → 平坦部では元の形を維持
         const distB = new Int32Array(N).fill(-1); const q = [];
         for (const p of arcPts) { const i = p[1] * W + p[0]; if (cor.allowed[i] && distB[i] < 0) { distB[i] = 0; q.push(i); } }
