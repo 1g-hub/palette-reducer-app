@@ -415,6 +415,27 @@ ok(A.snapFps(0) === 0, 'snapFps 0 -> 0');
   ok(c05[1] < c1[1], 'gamma=0.5 lowers the cost of a WEAK (30%) edge: ' + c1[1].toFixed(2) + ' -> ' + c05[1].toFixed(2));
 }
 
+// ---- マスク移動 (shiftLines): 平行移動・切り捨て・ゼロ移動不変 ----
+{
+  const MV = require('../move.js');
+  const W = 10, H = 6, src = new Uint8Array(W * H);
+  src[2 * W + 3] = 1; src[2 * W + 4] = 1; src[3 * W + 3] = 1; // 小さなL字
+  const eq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+  ok(eq(Array.from(MV.shiftLines(src, W, H, 0, 0)), Array.from(src)), 'shiftLines(0,0) is identity');
+  const s1 = MV.shiftLines(src, W, H, 2, 1);
+  ok(s1[3 * W + 5] === 1 && s1[3 * W + 6] === 1 && s1[4 * W + 5] === 1 && s1[2 * W + 3] === 0, 'shiftLines(+2,+1) moves every pixel');
+  let c1 = 0; for (const v of s1) c1 += v; ok(c1 === 3, 'no pixels lost when fully inside');
+  const s2 = MV.shiftLines(src, W, H, -3, 0); // x=3-3=0, x=4-3=1 は残る
+  let c2 = 0; for (const v of s2) c2 += v;
+  ok(c2 === 3 && s2[2 * W + 0] === 1 && s2[2 * W + 1] === 1, 'negative shift keeps in-bounds pixels at the border');
+  const s3 = MV.shiftLines(src, W, H, -4, 0); // x=3 の2画素が画面外へ
+  let c3 = 0; for (const v of s3) c3 += v;
+  ok(c3 === 1 && s3[2 * W + 0] === 1, 'pixels shifted off-canvas are clipped');
+  const s4 = MV.shiftLines(src, W, H, 0, -3); // y=2 → -1 は消え、y=3 → 0 が残る
+  let c4 = 0; for (const v of s4) c4 += v;
+  ok(c4 === 1 && s4[0 * W + 3] === 1, 'vertical clipping works');
+}
+
 // ---- なぞり平滑 (smoothChain): 両端固定・ギザギザ低減・直線不変 ----
 {
   // ギザギザ階段: y が ±1 交互に振れる水平チェーン

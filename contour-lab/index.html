@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>輪郭ラボ — 手描き領域マスク (P1)</title>
-<link rel="stylesheet" href="./styles.css?v=39">
+<link rel="stylesheet" href="./styles.css?v=40">
 </head>
 <body>
 <header id="topbar">
@@ -62,9 +62,10 @@
       <label class="row"><span class="lbl">吸着半径</span><input type="range" id="snapRadius" min="2" max="16" step="1" value="6"><span id="snapRadiusLabel" class="mono small">6</span></label>
       <button id="toolTraceSmooth" class="btn wide tool">〰 なぞり平滑 (Y)：なぞった区間を滑らかな1px線へ</button>
       <label class="row"><span class="lbl">なめらかさ</span><input type="range" id="smoothStrength" min="1" max="10" step="1" value="4"><span id="smoothStrengthLabel" class="mono small">4</span></label>
+      <button id="toolMoveMask" class="btn wide tool">✥ マスク移動 (M)：選択色を平行移動</button>
       <button id="snapFrame" class="btn wide">🧲 フレーム全体のエッジへ吸着（選択色）</button>
       <label class="row"><span class="lbl">全体半径</span><input type="range" id="frameSnapRadius" min="2" max="16" step="1" value="5"><span id="frameSnapRadiusLabel" class="mono small">5</span></label>
-      <p class="note small">W＝雑にペンで描いた直前の線をエッジへ吸着。T＝<b>円ブラシで既存の線の直したい区間を掃く→離すと、円が触れた区間全体</b>がエッジへ吸着（閉じた輪郭OK・線の真上を正確になぞる必要なし・円の大きさ＝吸着半径）。1クリックで円内だけの局所吸着も可。<br>〰なぞり平滑(Y)＝Tと同じ操作で、<b>エッジに寄せず</b>なぞった区間を「なめらかさ」に応じた<b>滑らかな1px線</b>に置き換え（ギザギザ・2px厚の掃除に。円の大きさ＝吸着半径）。<br>「フレーム全体」＝選択色の<b>全輪郭</b>を全体半径で一括吸着（髪のトゲ等の細部を保ちたい時は半径を小さく）。すべて1回のUndoで戻せます。</p>
+      <p class="note small">W＝雑にペンで描いた直前の線をエッジへ吸着。T＝<b>円ブラシで既存の線の直したい区間を掃く→離すと、円が触れた区間全体</b>がエッジへ吸着（閉じた輪郭OK・線の真上を正確になぞる必要なし・円の大きさ＝吸着半径）。1クリックで円内だけの局所吸着も可。<br>〰なぞり平滑(Y)＝Tと同じ操作で、<b>エッジに寄せず</b>なぞった区間を「なめらかさ」に応じた<b>滑らかな1px線</b>に置き換え（ギザギザ・2px厚の掃除に。円の大きさ＝吸着半径）。<br>✥マスク移動(M)＝選択色のマスクを<b>ドラッグ or 矢印キー</b>（Shift=10px）で平行移動。ツールが有効な間は矢印キーが移動に変わります（フレーム移動はスライダー等で）。<b>Enterかツール切替で確定</b>（1 Undo）・Escで取消。画面外へ出た部分は確定時に消えます。<br>「フレーム全体」＝選択色の<b>全輪郭</b>を全体半径で一括吸着（髪のトゲ等の細部を保ちたい時は半径を小さく）。すべて1回のUndoで戻せます。</p>
     </section>
 
     <section class="psec">
@@ -190,14 +191,15 @@
   </main>
 </div>
 
-<script src="../icm.js?v=39"></script>
-<script src="./contour-lab.js?v=39"></script>
-<script src="./morpho.js?v=39"></script>
-<script src="./storage.js?v=39"></script>
-<script src="./io.js?v=39"></script>
-<script src="./timeline.js?v=39"></script>
-<script src="./quantize.js?v=39"></script>
-<script src="./slic.js?v=39"></script>
-<script src="./snap.js?v=39"></script>
+<script src="../icm.js?v=40"></script>
+<script src="./contour-lab.js?v=40"></script>
+<script src="./morpho.js?v=40"></script>
+<script src="./storage.js?v=40"></script>
+<script src="./io.js?v=40"></script>
+<script src="./timeline.js?v=40"></script>
+<script src="./quantize.js?v=40"></script>
+<script src="./slic.js?v=40"></script>
+<script src="./snap.js?v=40"></script>
+<script src="./move.js?v=40"></script>
 </body>
 </html>
