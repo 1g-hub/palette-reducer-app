@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20260623-69">
+    <link rel="stylesheet" href="./styles.css?v=20260709-70">
   </head>
   <body>
     <div class="page">
@@ -96,6 +96,14 @@
                   <button type="button" data-mode="scene" class="seg">シーン別</button>
                 </div>
                 <p class="seg-note">全編通し＝動画全体を1つの色セットにまとめます。シーン別＝カット（場面）ごとに分けて、色を統合できます。</p>
+
+                <div class="seg-label">領域マスク（輪郭ラボ）<span class="info" data-tip="輪郭ラボで書き出した「本体用JSON（.mainapp.json）」を読み込むと、対象ごとの領域と背景で別々のパレットを作ります（例：キャラは少ない色数・背景は多め）。マスクの解像度が動画と一致している必要があります。">?</span></div>
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0 14px">
+                  <label class="btn-ghost" for="maskJsonInput" style="cursor:pointer">マスクJSONを読み込む</label>
+                  <input type="file" id="maskJsonInput" accept=".json,application/json" hidden>
+                  <span id="maskJsonStatus" class="seg-note" style="margin:0">未読込</span>
+                  <button id="maskJsonClear" type="button" class="btn-ghost" hidden>解除</button>
+                </div>
 
                 <button id="analyzeBtn" type="button" class="btn-primary block big"><span class="ic">✦</span> <span id="analyzeBtnLabel">色を分析する</span></button>
 
@@ -313,6 +321,7 @@
 
                 <div id="step3Tabs" class="vid-tabs" hidden></div>
                 <div id="sceneTabs" class="scene-tabs" hidden></div>
+                <div id="regionTabs" class="scene-tabs" hidden title="領域マスク使用中：背景と各対象のパレットを切り替えて調整できます"></div>
                 <p class="step-desc">表示中：<b id="activeName">—</b> — 「▶ 再生」で3つの映像を同期再生します。</p>
 
                 <div class="preview-sticky">
@@ -569,7 +578,7 @@
     <!-- hidden work elements -->
     <video id="workVideo" muted playsinline preload="auto"></video>
     <canvas id="exportCanvas" class="offscreen"></canvas>
-    <script src="./icm.js?v=20260623-69"></script>
-    <script src="./app.js?v=20260623-69"></script>
+    <script src="./icm.js?v=20260709-70"></script>
+    <script src="./app.js?v=20260709-70"></script>
   </body>
 </html>

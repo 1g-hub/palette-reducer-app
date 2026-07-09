@@ -27,11 +27,18 @@ function analyze(payload) {
   const settings = payload.settings || {};
   const first = new Uint8ClampedArray(payload.firstBuffer);
   const last = new Uint8ClampedArray(payload.lastBuffer);
-  const totalPixels = first.length / 4 + last.length / 4;
+  // 任意の領域マスク（1画素=1バイト、1=集計対象）。マスク別パレット分析で使う。無ければ全画素。
+  const firstMask = payload.firstMaskBuffer ? new Uint8Array(payload.firstMaskBuffer) : null;
+  const lastMask = payload.lastMaskBuffer ? new Uint8Array(payload.lastMaskBuffer) : null;
+  const masks = firstMask || lastMask ? [firstMask, lastMask] : null;
+  const totalPixels = masks
+    ? (firstMask ? firstMask.reduce((s, m) => s + (m ? 1 : 0), 0) : first.length / 4)
+      + (lastMask ? lastMask.reduce((s, m) => s + (m ? 1 : 0), 0) : last.length / 4)
+    : first.length / 4 + last.length / 4;
   const bucketBits = settings.bucketBits || DEFAULT_BUCKET_BITS;
 
   postProgress("histogram", 0.05, "Bucketing colors");
-  const buckets = buildBucketCandidates([first, last], bucketBits);
+  const buckets = buildBucketCandidates([first, last], bucketBits, masks);
   const histogram = buckets.candidates;
   const uniqueColors = histogram.length;
   if (!uniqueColors) throw new Error("No colors were available for palette analysis");
@@ -94,12 +101,15 @@ function analyze(payload) {
   };
 }
 
-function buildBucketCandidates(buffers, bucketBits) {
+function buildBucketCandidates(buffers, bucketBits, masks) {
   const shift = 8 - Math.max(1, Math.min(8, bucketBits));
   const counts = new Map();
 
-  for (const data of buffers) {
+  for (let b = 0; b < buffers.length; b += 1) {
+    const data = buffers[b];
+    const mask = masks ? masks[b] : null;
     for (let index = 0; index < data.length; index += 4) {
+      if (mask && !mask[index >> 2]) continue; // 領域外の画素は集計しない
       const r = data[index] >> shift;
       const g = data[index + 1] >> shift;
       const b = data[index + 2] >> shift;
