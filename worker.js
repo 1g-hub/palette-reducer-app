@@ -142,13 +142,14 @@ function buildBucketCandidates(buffers, bucketBits, masks) {
   return { candidates };
 }
 
-// 計算するKの列: 40までは全整数（従来どおり）、40超は間引きラダー（44,48,…,256）。
+// 計算するKの列: 40までは全整数（従来どおり）、40超は間引きラダー（44,48,…,1024）。
 // 高Kは1回のk-meansが重いので、密に計算せず飛び飛びに用意する（STEP3のスライダーは
 // availableK の最も近い値へスナップするため、間引きでも操作感は保たれる）。
+// 実質上限は候補色数（maxCandidates=1200）。
 function clusterKList(minClusters, maxClusters) {
   const ks = [];
   for (let k = minClusters; k <= Math.min(40, maxClusters); k += 1) ks.push(k);
-  const LADDER = [44, 48, 52, 56, 64, 72, 80, 96, 112, 128, 144, 160, 192, 224, 256];
+  const LADDER = [44, 48, 52, 56, 64, 72, 80, 96, 112, 128, 144, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024];
   for (const k of LADDER) if (k > 40 && k >= minClusters && k <= maxClusters) ks.push(k);
   if (ks[ks.length - 1] !== maxClusters && maxClusters > 40) ks.push(maxClusters);
   return ks;
@@ -252,23 +253,27 @@ function initCenterSequence(colors, weights, maxK) {
     if (weights[i] > weights[first]) first = i;
   }
 
+  // 最遠点貪欲。既存センターまでの最近距離を配列で増分更新する（新センター1つにつき O(n)）。
+  // 全センター総当たりの再計算（O(n·k²)）だと maxK=1024 で数億演算になり数秒詰まる。選択結果は同一。
   const centers = [colors[first].slice()];
+  const minDistSq = new Float64Array(colors.length);
+  for (let i = 0; i < colors.length; i += 1) minDistSq[i] = colorDistanceSq(colors[i], centers[0]);
   while (centers.length < maxK) {
     let bestIndex = 0;
     let bestScore = -1;
     for (let i = 0; i < colors.length; i += 1) {
-      let nearestSq = Infinity;
-      for (const center of centers) {
-        const d = colorDistanceSq(colors[i], center);
-        if (d < nearestSq) nearestSq = d;
-      }
-      const score = nearestSq * Math.sqrt(Math.max(1, weights[i]));
+      const score = minDistSq[i] * Math.sqrt(Math.max(1, weights[i]));
       if (score > bestScore) {
         bestScore = score;
         bestIndex = i;
       }
     }
-    centers.push(colors[bestIndex].slice());
+    const c = colors[bestIndex].slice();
+    centers.push(c);
+    for (let i = 0; i < colors.length; i += 1) {
+      const d = colorDistanceSq(colors[i], c);
+      if (d < minDistSq[i]) minDistSq[i] = d;
+    }
   }
   return centers;
 }

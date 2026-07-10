@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260710-79";
+const APP_VERSION = "20260710-80";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -129,10 +129,10 @@ const EXPORT_FORMATS = [
     args: ["-c:v", "libvpx-vp9", "-b:v", "500k", ...VF_FULL("yuv420p"), ...FULLRANGE_709],
     desc: "WebMで容量を抑えたいとき向け。画質は落ちます。" },
 ];
-// maxk 256: 40超は worker が間引きラダー（44,48,…,256）で計算。自動K（膝法）は従来どおり
-// K≤40 から選ぶので既存挙動は不変。高Kは STEP3 のスライダーで手動選択（実質上限なし——
-// 代表色は最大 maxc=1200 の候補色から選ぶため、これ以上は減色として意味を持たない）。
-const DEFAULT_VALS = { ana: 540, prev: 360, anaFull: true, prevFull: true, maxc: 1200, mindist: 12, mink: 4, maxk: 256, fixed: 60, margin: 5, targetScenes: 8, subshotSec: 0, cutSensitivity: 0.18, detectStride: 3, minShotSec: 1.0 };
+// maxk 1024: 40超は worker が間引きラダー（44,48,…,1024）で計算。自動K（膝法）は従来どおり
+// K≤40 から選ぶので既存挙動は不変。高Kは STEP3 のスライダーで手動選択（実質上限は候補色数
+// maxc=1200）。activeK=0 は「減色なし」（そのまま出力）の番兵＝スライダー最左端。
+const DEFAULT_VALS = { ana: 540, prev: 360, anaFull: true, prevFull: true, maxc: 1200, mindist: 12, mink: 4, maxk: 1024, fixed: 60, margin: 5, targetScenes: 8, subshotSec: 0, cutSensitivity: 0.18, detectStride: 3, minShotSec: 1.0 };
 
 // 高品質(ICM): when enabled, recoloring (preview + export) uses icm.js's label-field optimization +
 // detail protection instead of nearest-color. Global (not per-scene); read at every recolor site.
@@ -1151,8 +1151,8 @@ function syncSceneForTime(v, t) {
 
 // Palette (reps/threshold/cache) to use at a given time — used by export per frame.
 function paletteStateAtTime(v, t) {
-  if (v.sceneMode) { const st = v.palettes[paletteIdAtTime(v, t)]; return { reps: repsEnabled(st.analysis.representatives, st.disabledKeys), th: st.confirmThreshold, cache: st.processedCache }; }
-  return { reps: repsEnabled(v.analysis.representatives, v.disabledKeys), th: v.confirmThreshold, cache: v.processedCache };
+  if (v.sceneMode) { const st = v.palettes[paletteIdAtTime(v, t)]; return { reps: repsEnabled(st.analysis.representatives, st.disabledKeys), th: st.confirmThreshold, cache: st.processedCache, off: st.activeK === 0 }; }
+  return { reps: repsEnabled(v.analysis.representatives, v.disabledKeys), th: v.confirmThreshold, cache: v.processedCache, off: v.activeK === 0 };
 }
 // Export palette for the output frame whose CONTENT sits at decoded time `at`. Assign by FRAME INDEX,
 // not raw time: the decoded frame is floor(at*fps), and each scene owns the integer frame range
@@ -1167,7 +1167,7 @@ function paletteStateForFrame(v, at, fps) {
     let sc = v.scenes[v.scenes.length - 1];
     for (const s of v.scenes) { if (f >= Math.round(s.start * fps) && f < Math.round(s.end * fps)) { sc = s; break; } }
     const st = v.palettes[sc.paletteId];
-    return { reps: repsEnabled(st.analysis.representatives, st.disabledKeys), th: st.confirmThreshold, cache: st.processedCache };
+    return { reps: repsEnabled(st.analysis.representatives, st.disabledKeys), th: st.confirmThreshold, cache: st.processedCache, off: st.activeK === 0 };
   }
   return paletteStateAtTime(v, at);
 }
@@ -1336,10 +1336,10 @@ function sceneIdForFrame(v, f, fps) {
 // パレットID → recolor 用の状態。現在ロード中のIDは「ライブ」（未保存のK/しきい値/OFF編集を反映）。
 function paletteRuntimeState(v, id) {
   if (id === v.curPaletteId || !v.palettes || !v.palettes[id]) {
-    return { reps: repsEnabled(v.analysis.representatives, v.disabledKeys), th: v.confirmThreshold, cache: v.processedCache, mcache: v.maskCache };
+    return { reps: repsEnabled(v.analysis.representatives, v.disabledKeys), th: v.confirmThreshold, cache: v.processedCache, mcache: v.maskCache, off: v.activeK === 0 };
   }
   const st = v.palettes[id];
-  return { reps: repsEnabled(st.analysis.representatives, st.disabledKeys), th: st.confirmThreshold, cache: st.processedCache, mcache: st.maskCache };
+  return { reps: repsEnabled(st.analysis.representatives, st.disabledKeys), th: st.confirmThreshold, cache: st.processedCache, mcache: st.maskCache, off: st.activeK === 0 };
 }
 
 // シーンの全領域状態（index = regionMap 値: 0=背景, i+1=レイヤi）。領域パレットが無ければ背景で代用。
@@ -1357,6 +1357,10 @@ function regionStatesFor(v, sceneId) {
 function processPixelsRegional(data, rmap, states, maskOnly) {
   for (let index = 0, p = 0; index < data.length; index += 4, p += 1) {
     const st = states[rmap[p]] || states[0];
+    if (st.off) { // この領域は「減色なし」＝素通し（はみ出しマップでは黒）
+      if (maskOnly) { data[index] = 0; data[index + 1] = 0; data[index + 2] = 0; data[index + 3] = 255; }
+      continue;
+    }
     const cache = maskOnly ? st.mcache : st.cache;
     const key = (data[index] << 16) | (data[index + 1] << 8) | data[index + 2];
     let mapped = cache.get(key);
@@ -1753,10 +1757,16 @@ function selectRegion(rk) {
   requestPlotDraw();
 }
 
+// はみ出しマップ用: 「減色なし」領域は範囲外画素が存在しない＝黒で塗る。
+function fillBlackRGB(data) {
+  for (let i = 0; i < data.length; i += 4) { data[i] = 0; data[i + 1] = 0; data[i + 2] = 0; data[i + 3] = 255; }
+}
 // recolor の共通入口（時刻ベース）: マスク未使用なら従来どおり、使用中は領域別パレットで量子化。
+// activeK=0（減色なし）のパレットは入力をそのまま通す（はみ出しマップは黒）。
 function reduceFrameAt(v, data, at, fps, w, h, opts) {
   if (!masksActive(v)) {
     const pal = paletteStateForFrame(v, at, fps);
+    if (pal.off) { if (opts && opts.maskOnly) fillBlackRGB(data); return; }
     reduceFrame(data, pal.reps, pal.th, pal.cache, w, h, opts);
     return;
   }
@@ -2427,11 +2437,12 @@ function renderKControl(v) {
     return;
   }
   const min = ks[0], max = ks[ks.length - 1];
-  dom.kValue.textContent = String(v.activeK);
-  dom.kRange.textContent = `（${min}〜${max}）`;
-  dom.kMinus.disabled = v.activeK <= min;
-  dom.kPlus.disabled = v.activeK >= max;
-  if (dom.sK) { dom.sK.disabled = false; dom.sK.min = String(min); dom.sK.max = String(max); dom.sK.step = "1"; dom.sK.value = String(v.activeK); }
+  const off = v.activeK === 0; // 減色なし（スライダー最左端の1目盛り）
+  dom.kValue.textContent = off ? "減色なし" : String(v.activeK);
+  dom.kRange.textContent = `（左端＝減色なし・${min}〜${max}）`;
+  dom.kMinus.disabled = off;
+  dom.kPlus.disabled = !off && v.activeK >= max;
+  if (dom.sK) { dom.sK.disabled = false; dom.sK.min = String(min - 1); dom.sK.max = String(max); dom.sK.step = "1"; dom.sK.value = String(off ? min - 1 : v.activeK); }
 }
 function nearestAvailableK(ks, val) {
   let best = ks[0], bd = Infinity;
@@ -2480,21 +2491,43 @@ function applyKValue(nk, coalesce) {
   if (!state.playing) drawActiveFrame();
   requestPlotDraw();
 }
-function setK(val) { // from the slider (any int) — snap to the nearest available K
-  const v = activeVideo();
-  if (!v || !v.analysis || !v.analysis.availableK) return;
-  const nk = nearestAvailableK(v.analysis.availableK, val);
-  if (dom.sK) dom.sK.value = String(nk);
-  applyKValue(nk, true); // slider drag → coalesce into one undo step
-}
-function changeK(delta) { // from the −/＋ steppers
+function setK(val) { // from the slider (any int) — leftmost slot = 減色なし, else snap to nearest available K
   const v = activeVideo();
   if (!v || !v.analysis || !v.analysis.availableK) return;
   const ks = v.analysis.availableK;
+  if (val < ks[0]) { if (dom.sK) dom.sK.value = String(ks[0] - 1); applyNoReduce(true); return; }
+  const nk = nearestAvailableK(ks, val);
+  if (dom.sK) dom.sK.value = String(nk);
+  applyKValue(nk, true); // slider drag → coalesce into one undo step
+}
+function changeK(delta) { // from the −/＋ steppers（最小Kからさらに−で減色なしへ）
+  const v = activeVideo();
+  if (!v || !v.analysis || !v.analysis.availableK) return;
+  const ks = v.analysis.availableK;
+  if (v.activeK === 0) { if (delta > 0) applyKValue(ks[0], false); return; }
   let i = ks.indexOf(v.activeK);
   if (i < 0) i = ks.indexOf(v.analysis.selectedK);
-  i = Math.max(0, Math.min(ks.length - 1, i + delta));
-  applyKValue(ks[i], false); // discrete stepper → its own undo step
+  const ni = i + delta;
+  if (ni < 0) { applyNoReduce(false); return; }
+  applyKValue(ks[Math.min(ks.length - 1, ni)], false); // discrete stepper → its own undo step
+}
+// 減色なし（activeK=0）: パレット・しきい値はそのまま保持し、量子化だけをバイパスする。
+function applyNoReduce(coalesce) {
+  const v = activeVideo();
+  if (!v || !v.analysis) return;
+  if (v.activeK === 0) { renderKControl(v); return; }
+  recordUndo("K", !!coalesce);
+  v.activeK = 0;
+  v.processedCache = new Map();
+  v.maskCache = new Map();
+  state.plotCache = null;
+  updateSnapMarker(v);
+  renderKControl(v);
+  renderPalette(v);
+  renderMetrics(v);
+  renderKTable(v);
+  if (!state.playing) drawActiveFrame();
+  requestPlotDraw();
 }
 
 // Restore the active video's threshold and representative count to the auto-determined originals.
@@ -2555,8 +2588,10 @@ function restorePaletteSnapshot(snap) {
   try {
     if (state.activeIdx !== snap.activeIdx && state.videos[snap.activeIdx]) { state.activeIdx = snap.activeIdx; renderStep3Dynamic(); }
     const v = activeVideo(); if (!v || !v.analysis) return;
-    if (v.sceneMode && v.curPaletteId !== snap.paletteId && v.palettes && v.palettes[snap.paletteId]) { savePaletteState(v); loadPaletteState(v, snap.paletteId); }
-    if (v.analysis.snapshotsByK && v.analysis.snapshotsByK[snap.activeK]) { v.activeK = snap.activeK; v.analysis.representatives = v.analysis.snapshotsByK[snap.activeK].representatives; }
+    // 領域パレット（sceneMode でなくても curPaletteId が変わる）にも対応して切り替える
+    if (v.curPaletteId !== snap.paletteId && v.palettes && v.palettes[snap.paletteId]) { savePaletteState(v); loadPaletteState(v, snap.paletteId); }
+    if (snap.activeK === 0) { v.activeK = 0; } // 減色なし（代表色は保持したまま）
+    else if (v.analysis.snapshotsByK && v.analysis.snapshotsByK[snap.activeK]) { v.activeK = snap.activeK; v.analysis.representatives = v.analysis.snapshotsByK[snap.activeK].representatives; }
     v.confirmThreshold = snap.confirmThreshold;
     v.disabledKeys = new Set(snap.disabled);
     v.processedCache = new Map(); v.maskCache = new Map(); state.plotCache = null;
@@ -2990,14 +3025,15 @@ function drawActiveFrame(timeOverride) {
   }
   const proc = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
   if (masksActive(v)) reduceFrameAt(v, proc.data, t, v.fps || v.masks.fps || 30, proc.width, proc.height, {}); // 領域別パレット（現在編集中の領域はライブ状態）
-  else reduceFrame(proc.data, reps, th, v.processedCache, proc.width, proc.height, {});
+  else if (v.activeK !== 0) reduceFrame(proc.data, reps, th, v.processedCache, proc.width, proc.height, {}); // activeK=0（減色なし）は素通し
   applyFrameMerges(proc.data, proc.width, proc.height, v, t); // confirmed STEP4 merges (color + region)
   blackout(proc.data);
   pCtx.putImageData(proc, 0, 0);
   state.reducedFrameDirty = true; // the hover loupe re-snapshots the reduced canvas on the next move
   const mask = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
   if (masksActive(v)) reduceFrameAt(v, mask.data, t, v.fps || v.masks.fps || 30, mask.width, mask.height, { maskOnly: true });
-  else reduceFrame(mask.data, reps, th, v.maskCache, mask.width, mask.height, { maskOnly: true });
+  else if (v.activeK !== 0) reduceFrame(mask.data, reps, th, v.maskCache, mask.width, mask.height, { maskOnly: true });
+  else fillBlackRGB(mask.data); // 減色なし＝はみ出し画素は存在しない
   blackout(mask.data);
   mCtx.putImageData(mask, 0, 0);
   updateSnapMarkerFromImageData(v, base.data);
@@ -3743,8 +3779,9 @@ function mpDraw(side, timeOverride) {
   // the moving object and appears to drift.
   const W = r.canvas.width, H = r.canvas.height, t = (timeOverride != null ? timeOverride : mp.video.currentTime) || 0;
   const vForMasks = activeVideo();
+  const mpOff = vForMasks && vForMasks.palettes && mp.scene && vForMasks.palettes[mp.scene.paletteId] && vForMasks.palettes[mp.scene.paletteId].activeK === 0;
   if (vForMasks && masksActive(vForMasks)) reduceFrameAt(vForMasks, img.data, t, vForMasks.fps || vForMasks.masks.fps || 30, W, H, { flat: true }); // 領域別パレットの見た目と一致させる
-  else reduceFrame(img.data, mp.reps, mp.threshold, mp.cache, W, H, { flat: true });
+  else if (!mpOff) reduceFrame(img.data, mp.reps, mp.threshold, mp.cache, W, H, { flat: true }); // 減色なしシーンは素通し
   const v = activeVideo();
   // confirmed + previewed merges, applied in order so chained re-merges resolve fully
   if (v) applyFrameMerges(img.data, W, H, v, t, true);
