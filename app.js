@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260710-77";
+const APP_VERSION = "20260710-78";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
