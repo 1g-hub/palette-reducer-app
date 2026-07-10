@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260710-74";
+const APP_VERSION = "20260710-75";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -1524,7 +1524,7 @@ function clearMaskJson() {
    専用の<video>要素を使う（分析用の workVideo と干渉しない）。各表示フレームで
    フレーム番号 = floor(currentTime × マスクfps) の領域を色付き半透明で重畳。
    マスクは未分析でも state.masksData から直接参照する（動画へは分析時に適用される）。 */
-let mpv = null; // { video, pv, fps, ctx, w, h, raf, lastF }
+let mpv = null; // { video, pv, fps, ctx, w, h, lastF, mode:'play'|'pause', pendingF, playTimer, playT0, playF0 }
 function openMaskPreview() {
   const m = state.masksData;
   if (!m) return;
@@ -1532,12 +1532,11 @@ function openMaskPreview() {
   if (!v) { showToast("info", "先に STEP1 で動画を追加してください"); return; }
   closeMaskPreview();
   const video = document.createElement("video");
-  video.muted = true; video.loop = true; video.playsInline = true; video.preload = "auto";
+  video.muted = true; video.playsInline = true; video.preload = "auto";
   video.src = v.url;
   const pv = { masks: { ...m, _regionRuns: new Map(), _layerFrames: null }, _regionMapCache: null };
-  mpv = { video, pv, fps: m.fps || 30, ctx: null, w: 0, h: 0, raf: 0, lastF: -1 };
+  mpv = { video, pv, fps: m.fps || 30, ctx: null, w: 0, h: 0, lastF: -1, mode: "pause", pendingF: null, playTimer: null, playT0: 0, playF0: 0 };
   dom.maskPreviewBox.hidden = false;
-  dom.maskPreviewPlay.textContent = "⏸ 一時停止";
   dom.maskPreviewInfo.textContent = "読込中…";
   video.addEventListener("loadedmetadata", () => {
     if (!mpv || mpv.video !== video) return;
@@ -1546,47 +1545,62 @@ function openMaskPreview() {
     mpv.ctx = dom.maskPreviewCanvas.getContext("2d", { willReadFrequently: true });
     mpv.w = width; mpv.h = height;
     const names = m.layers.map((L) => L.name || ("対象" + L.id)).join("・");
-    dom.maskPreviewInfo.textContent = `${esc(v.name)} ＋ ${names}（${m.fps ? m.fps : 30}fps基準）`;
+    dom.maskPreviewInfo.textContent = `${esc(v.name)} ＋ ${names}（${m.fps ? m.fps : 30}fps基準・コマ順次再生）`;
     if (dom.maskPreviewSeek) { dom.maskPreviewSeek.min = "0"; dom.maskPreviewSeek.max = String(maskPreviewTotalF() - 1); dom.maskPreviewSeek.value = "0"; }
-    // 一時停止中のシーク/コマ送りは 'seeked' で確実に1枚描く（rVFC は停止中に発火しないことがある。
-    // 停止中の currentTime は表示フレームと一致するので先読みズレも無い）。
+    // シーク駆動: 描画は常に 'seeked' 後（=停止中）に行う。停止中は currentTime＝表示フレームが
+    // 保証されるので、画素とマスクの対応が構成的にズレない。再生モードなら描画後に次のコマを予約。
     video.addEventListener("seeked", () => {
       if (!mpv || mpv.video !== video) return;
       mpv.pendingF = null; // シーク完了（コマ送り連打の基準をリセット）
       mpv.lastF = -1; // 同一フレーム抑止を解除して必ず再描画
       drawMaskPreviewFrame(video.currentTime);
+      if (mpv.mode === "play") scheduleMaskPreviewNext();
     });
-    video.play().catch(() => { dom.maskPreviewPlay.textContent = "▶ 再生"; });
-    // 同期は rVFC（実際に提示されたフレームの mediaTime）で行う。currentTime はデコード先読みで
-    // 表示中フレームより先を指すため、rAF+currentTime で回すとマスクだけ先行する（ユーザ報告バグ。
-    // STEP3 プレビュー/STEP4 と同じ確立済みパターンに合わせた）。
-    if (typeof video.requestVideoFrameCallback === "function") {
-      const onF = (now, meta) => {
-        if (!mpv || mpv.video !== video) return;
-        drawMaskPreviewFrame(meta.mediaTime);
-        mpv.rvfc = video.requestVideoFrameCallback(onF);
-      };
-      mpv.rvfc = video.requestVideoFrameCallback(onF);
-      drawMaskPreviewFrame(video.currentTime); // 自動再生が始まる前の1枚目（停止中は先読みズレなし）
-    } else {
-      const step = () => { // rVFC の無い環境のみの後退動作（±1フレームのズレは許容）
-        if (!mpv || mpv.video !== video) return;
-        drawMaskPreviewFrame(video.currentTime);
-        mpv.raf = requestAnimationFrame(step);
-      };
-      mpv.raf = requestAnimationFrame(step);
-    }
+    drawMaskPreviewFrame(video.currentTime); // 1枚目
+    startMaskPreviewPlay(); // シーク駆動の連続再生を開始
   }, { once: true });
   video.addEventListener("error", () => { if (mpv && mpv.video === video) dom.maskPreviewInfo.textContent = "動画を再生できませんでした"; }, { once: true });
+}
+/* シーク駆動の連続再生: 「次フレーム中央へシーク → seeked で描画 → 次を予約」を繰り返す。
+   動画要素は一度も play() しない（＝常に停止中でフレーム対応が正確）。ソースfpsに合わせて
+   1x へペーシングし、シークが追いつかない環境では出せる速度で全コマを順に表示（コマ飛びなし）。 */
+function startMaskPreviewPlay() {
+  if (!mpv) return;
+  mpv.mode = "play";
+  mpv.playT0 = performance.now();
+  mpv.playF0 = Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6);
+  dom.maskPreviewPlay.textContent = "⏸ 一時停止";
+  maskPreviewAdvance();
+}
+function maskPreviewAdvance() {
+  if (!mpv || mpv.mode !== "play" || !mpv.video.duration) return;
+  const total = maskPreviewTotalF();
+  let f = (mpv.pendingF != null ? mpv.pendingF : Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6)) + 1;
+  if (f >= total) { f = 0; mpv.playT0 = performance.now(); mpv.playF0 = 0; } // 先頭へループ
+  mpv.pendingF = f;
+  const at = Math.max(0.001, Math.min(mpv.video.duration - 0.001, (f + 0.5) / mpv.fps));
+  try { mpv.video.currentTime = at; } catch (e) { /* ignore */ }
+}
+function scheduleMaskPreviewNext() {
+  if (!mpv || mpv.mode !== "play") return;
+  const f = Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6);
+  const due = mpv.playT0 + ((f - mpv.playF0 + 1) / mpv.fps) * 1000; // 次コマの提示予定時刻（1x）
+  const delay = Math.max(0, due - performance.now());
+  if (mpv.playTimer) clearTimeout(mpv.playTimer);
+  mpv.playTimer = setTimeout(maskPreviewAdvance, delay);
 }
 function drawMaskPreviewFrame(t) {
   const { video, ctx, w, h, pv, fps } = mpv;
   if (!ctx || video.readyState < 2) return;
-  const at = t != null ? t : video.currentTime; // rVFC の mediaTime ＝ 表示中フレームの時刻
+  // このプレビューはシーク駆動（動画は常に一時停止のまま、フレーム中央へシーク→seekedで描画）。
+  // 停止中の currentTime は「表示中のフレーム」と一致することが保証されるため、画素とマスクの
+  // フレーム対応が構成的にズレない。※リアルタイム再生系は画素とタイムスタンプの原子性が無く、
+  // rVFC(mediaTime)でもVideoFrame(timestamp)でも±1コマの競合が残ることを画素比較QAで実測済み。
+  const at = t != null ? t : video.currentTime;
   const f = Math.floor(at * fps + 1e-6);
-  if (video.paused && f === mpv.lastF) return; // 停止中は再描画しない（CPU節約）
+  if (mpv.mode !== "play" && f === mpv.lastF) return; // 停止中の同一フレームは再描画しない
   mpv.lastF = f;
-  mpv._sync = { mediaTime: at, currentTime: video.currentTime, f }; // 検証用（rVFC同期の実測）
+  mpv._sync = { mediaTime: at, currentTime: video.currentTime, f }; // 検証用（同期の実測）
   ctx.drawImage(video, 0, 0, w, h);
   const rmap = regionMapForFrame(pv, f, w, h);
   const img = ctx.getImageData(0, 0, w, h);
@@ -1612,7 +1626,8 @@ function syncMaskPreviewSeekUI(f, at) {
 }
 function pauseMaskPreview() {
   if (!mpv) return;
-  try { mpv.video.pause(); } catch (e) { /* ignore */ }
+  mpv.mode = "pause";
+  if (mpv.playTimer) { clearTimeout(mpv.playTimer); mpv.playTimer = null; }
   dom.maskPreviewPlay.textContent = "▶ 再生";
 }
 // フレーム中央へシーク（境界ちょうどのシークは前後どちらのフレームが出るか曖昧＝本体の確立ルール）
@@ -1632,15 +1647,14 @@ function stepMaskPreview(d) {
 }
 function toggleMaskPreviewPlay() {
   if (!mpv) return;
-  if (mpv.video.paused) { mpv.video.play().catch(() => {}); dom.maskPreviewPlay.textContent = "⏸ 一時停止"; }
-  else { pauseMaskPreview(); }
+  if (mpv.mode === "play") pauseMaskPreview();
+  else startMaskPreviewPlay();
 }
 function closeMaskPreview() {
   if (dom.maskPreviewBox) dom.maskPreviewBox.hidden = true;
   if (!mpv) return;
-  if (mpv.raf) cancelAnimationFrame(mpv.raf);
-  if (mpv.rvfc && typeof mpv.video.cancelVideoFrameCallback === "function") { try { mpv.video.cancelVideoFrameCallback(mpv.rvfc); } catch (e) { /* ignore */ } }
-  try { mpv.video.pause(); } catch (e) { /* ignore */ }
+  mpv.mode = "pause";
+  if (mpv.playTimer) { clearTimeout(mpv.playTimer); mpv.playTimer = null; }
   try { mpv.video.removeAttribute("src"); mpv.video.load(); } catch (e) { /* ignore */ }
   mpv = null;
 }
