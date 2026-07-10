@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260710-72";
+const APP_VERSION = "20260710-73";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -1539,21 +1539,36 @@ function openMaskPreview() {
     const names = m.layers.map((L) => L.name || ("対象" + L.id)).join("・");
     dom.maskPreviewInfo.textContent = `${esc(v.name)} ＋ ${names}（${m.fps ? m.fps : 30}fps基準）`;
     video.play().catch(() => { dom.maskPreviewPlay.textContent = "▶ 再生"; });
-    const step = () => {
-      if (!mpv || mpv.video !== video) return;
-      drawMaskPreviewFrame();
+    // 同期は rVFC（実際に提示されたフレームの mediaTime）で行う。currentTime はデコード先読みで
+    // 表示中フレームより先を指すため、rAF+currentTime で回すとマスクだけ先行する（ユーザ報告バグ。
+    // STEP3 プレビュー/STEP4 と同じ確立済みパターンに合わせた）。
+    if (typeof video.requestVideoFrameCallback === "function") {
+      const onF = (now, meta) => {
+        if (!mpv || mpv.video !== video) return;
+        drawMaskPreviewFrame(meta.mediaTime);
+        mpv.rvfc = video.requestVideoFrameCallback(onF);
+      };
+      mpv.rvfc = video.requestVideoFrameCallback(onF);
+      drawMaskPreviewFrame(video.currentTime); // 自動再生が始まる前の1枚目（停止中は先読みズレなし）
+    } else {
+      const step = () => { // rVFC の無い環境のみの後退動作（±1フレームのズレは許容）
+        if (!mpv || mpv.video !== video) return;
+        drawMaskPreviewFrame(video.currentTime);
+        mpv.raf = requestAnimationFrame(step);
+      };
       mpv.raf = requestAnimationFrame(step);
-    };
-    mpv.raf = requestAnimationFrame(step);
+    }
   }, { once: true });
   video.addEventListener("error", () => { if (mpv && mpv.video === video) dom.maskPreviewInfo.textContent = "動画を再生できませんでした"; }, { once: true });
 }
-function drawMaskPreviewFrame() {
+function drawMaskPreviewFrame(t) {
   const { video, ctx, w, h, pv, fps } = mpv;
   if (!ctx || video.readyState < 2) return;
-  const f = Math.floor(video.currentTime * fps + 1e-6);
+  const at = t != null ? t : video.currentTime; // rVFC の mediaTime ＝ 表示中フレームの時刻
+  const f = Math.floor(at * fps + 1e-6);
   if (video.paused && f === mpv.lastF) return; // 停止中は再描画しない（CPU節約）
   mpv.lastF = f;
+  mpv._sync = { mediaTime: at, currentTime: video.currentTime, f }; // 検証用（rVFC同期の実測）
   ctx.drawImage(video, 0, 0, w, h);
   const rmap = regionMapForFrame(pv, f, w, h);
   const img = ctx.getImageData(0, 0, w, h);
@@ -1577,6 +1592,7 @@ function closeMaskPreview() {
   if (dom.maskPreviewBox) dom.maskPreviewBox.hidden = true;
   if (!mpv) return;
   if (mpv.raf) cancelAnimationFrame(mpv.raf);
+  if (mpv.rvfc && typeof mpv.video.cancelVideoFrameCallback === "function") { try { mpv.video.cancelVideoFrameCallback(mpv.rvfc); } catch (e) { /* ignore */ } }
   try { mpv.video.pause(); } catch (e) { /* ignore */ }
   try { mpv.video.removeAttribute("src"); mpv.video.load(); } catch (e) { /* ignore */ }
   mpv = null;
