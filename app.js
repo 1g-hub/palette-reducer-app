@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260623-69";
+const APP_VERSION = "20260710-80";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -41,7 +41,12 @@ const dom = {
   reassure: $("reassure"), transcodeNote: $("transcodeNote"), transcodeText: $("transcodeText"),
   // step3
   backToStep2: $("backToStep2"), playBtn: $("playBtn"), previewRateSelect: $("previewRateSelect"),
-  step3Tabs: $("step3Tabs"), sceneTabs: $("sceneTabs"), activeName: $("activeName"),
+  step3Tabs: $("step3Tabs"), sceneTabs: $("sceneTabs"), regionTabs: $("regionTabs"), regionEditRow: $("regionEditRow"), regionEditTabs: $("regionEditTabs"), activeName: $("activeName"),
+  maskJsonInput: $("maskJsonInput"), maskJsonStatus: $("maskJsonStatus"), maskJsonClear: $("maskJsonClear"),
+  maskOverlayWrap: $("maskOverlayWrap"), maskOverlayToggle: $("maskOverlayToggle"),
+  maskPreviewBtn: $("maskPreviewBtn"), maskPreviewBox: $("maskPreviewBox"), maskPreviewCanvas: $("maskPreviewCanvas"),
+  maskPreviewPlay: $("maskPreviewPlay"), maskPreviewInfo: $("maskPreviewInfo"), maskPreviewClose: $("maskPreviewClose"),
+  maskPreviewBack: $("maskPreviewBack"), maskPreviewFwd: $("maskPreviewFwd"), maskPreviewSeek: $("maskPreviewSeek"), maskPreviewTime: $("maskPreviewTime"),
   cvOrig: $("cvOrig"), cvReduced: $("cvReduced"), cvMask: $("cvMask"),
   previewSeek: $("previewSeek"), previewTime: $("previewTime"), cutMarkers: $("cutMarkers"),
   previewLargeBtn: $("previewLargeBtn"), frameBackBtn: $("frameBackBtn"), frameFwdBtn: $("frameFwdBtn"),
@@ -124,7 +129,10 @@ const EXPORT_FORMATS = [
     args: ["-c:v", "libvpx-vp9", "-b:v", "500k", ...VF_FULL("yuv420p"), ...FULLRANGE_709],
     desc: "WebMで容量を抑えたいとき向け。画質は落ちます。" },
 ];
-const DEFAULT_VALS = { ana: 540, prev: 360, anaFull: true, prevFull: true, maxc: 1200, mindist: 12, mink: 4, maxk: 40, fixed: 60, margin: 5, targetScenes: 8, subshotSec: 0, cutSensitivity: 0.18, detectStride: 3, minShotSec: 1.0 };
+// maxk 1024: 40超は worker が間引きラダー（44,48,…,1024）で計算。自動K（膝法）は従来どおり
+// K≤40 から選ぶので既存挙動は不変。高Kは STEP3 のスライダーで手動選択（実質上限は候補色数
+// maxc=1200）。activeK=0 は「減色なし」（そのまま出力）の番兵＝スライダー最左端。
+const DEFAULT_VALS = { ana: 540, prev: 360, anaFull: true, prevFull: true, maxc: 1200, mindist: 12, mink: 4, maxk: 1024, fixed: 60, margin: 5, targetScenes: 8, subshotSec: 0, cutSensitivity: 0.18, detectStride: 3, minShotSec: 1.0 };
 
 // 高品質(ICM): when enabled, recoloring (preview + export) uses icm.js's label-field optimization +
 // detail protection instead of nearest-color. Global (not per-scene); read at every recolor site.
@@ -135,6 +143,9 @@ const state = {
   wholeVideo: true, // true = whole-video (single palette, no scene split); false = scene-split mode
   sceneCutMode: "auto",
   sceneReview: null,
+  masksData: null, // 領域マスク（輪郭ラボJSON または ZIP/連番PNG から構築）。分析時に各動画へ適用される
+  maskOverlay: false, // STEP3「マスクを重ねて表示」
+
   icm: { ...ICM_DEFAULTS },
   videos: [],
   activeIdx: 0,
@@ -238,6 +249,22 @@ function init() {
   dom.previewSeek.addEventListener("input", onPreviewSeekInput);
   dom.step3Tabs.addEventListener("click", onTabClick);
   dom.sceneTabs.addEventListener("click", onSceneTabClick);
+  if (dom.regionTabs) dom.regionTabs.addEventListener("click", onRegionTabClick);
+  if (dom.regionEditTabs) dom.regionEditTabs.addEventListener("click", onRegionEditTabClick);
+  if (dom.maskJsonInput) dom.maskJsonInput.addEventListener("change", (e) => { const fs = [...(e.target.files || [])]; onMaskFilesPicked(fs); e.target.value = ""; });
+  if (dom.maskJsonClear) dom.maskJsonClear.addEventListener("click", clearMaskJson);
+  if (dom.maskOverlayToggle) dom.maskOverlayToggle.addEventListener("change", () => { state.maskOverlay = dom.maskOverlayToggle.checked; if (!state.playing) drawActiveFrame(); });
+  if (dom.maskPreviewBtn) dom.maskPreviewBtn.addEventListener("click", openMaskPreview);
+  if (dom.maskPreviewPlay) dom.maskPreviewPlay.addEventListener("click", toggleMaskPreviewPlay);
+  if (dom.maskPreviewClose) dom.maskPreviewClose.addEventListener("click", closeMaskPreview);
+  if (dom.maskPreviewBack) dom.maskPreviewBack.addEventListener("click", () => stepMaskPreview(-1));
+  if (dom.maskPreviewFwd) dom.maskPreviewFwd.addEventListener("click", () => stepMaskPreview(1));
+  if (dom.maskPreviewSeek) {
+    dom.maskPreviewSeek.addEventListener("input", () => { if (!mpv) return; mpv.scrubbing = true; seekMaskPreviewToFrame(+dom.maskPreviewSeek.value); });
+    const endScrub = () => { if (mpv) mpv.scrubbing = false; };
+    dom.maskPreviewSeek.addEventListener("change", endScrub);
+    dom.maskPreviewSeek.addEventListener("pointerup", endScrub);
+  }
   dom.plotZoomIn.addEventListener("click", () => zoomPlot(1.25));
   dom.plotZoomOut.addEventListener("click", () => zoomPlot(0.8));
   dom.plotReset.addEventListener("click", resetPlotView);
@@ -364,6 +391,9 @@ function makeVideo(file) {
     confirmThreshold: 47,
     processedCache: new Map(),
     maskCache: new Map(),
+    masks: null,            // 輪郭ラボの領域マスク（分析時に state.masksData から適用）
+    maskRegionSel: "bg",    // STEP3 で編集中の領域（'bg' | 'L<id>'）
+    _regionMapCache: null,
     status: "pending",
     progress: 0, detProgress: 0, palProgress: 0,
     error: null,
@@ -563,6 +593,7 @@ function onModeClick(e) {
 
 function goStep(n) {
   clearPaletteHistory(); // undo history is scoped to one STEP3 session for one video
+  closeMaskPreview(); // STEP2のマスクプレビューはステップ移動で停止（専用videoを解放）
   state.step = n;
   render();
   if (n === 3) {
@@ -1093,6 +1124,7 @@ function savePaletteState(v) {
 }
 
 function loadPaletteState(v, id) {
+  if (!v.palettes[id]) id = basePaletteId(id); // 領域パレットが無いシーンでは背景（シーン本体）へ
   const st = v.palettes[id];
   v.analysis = st.analysis; v.activeK = st.activeK; v.confirmThreshold = st.confirmThreshold;
   v.processedCache = st.processedCache; v.maskCache = st.maskCache; v.curPaletteId = id;
@@ -1104,23 +1136,23 @@ function loadPaletteState(v, id) {
 function syncSceneForTime(v, t) {
   if (!v.sceneMode) return false;
   const id = paletteIdAtTime(v, t);
-  if (id === v.curPaletteId) return false;
+  if (id === basePaletteId(v.curPaletteId)) return false; // 領域選択（@Lx）はシーン一致とみなす
   savePaletteState(v);
-  loadPaletteState(v, id);
+  loadPaletteState(v, effectivePaletteId(v, id));
   dom.sConfirm.max = Math.max(150, (v.confirmThreshold || 0) + 8);
   dom.sConfirm.value = v.confirmThreshold;
   dom.vConfirm.textContent = v.confirmThreshold;
   syncThresholdDockControls(v.confirmThreshold);
   updateConfStepperBounds(v.confirmThreshold);
-  renderKControl(v); renderPalette(v); renderMetrics(v); renderKTable(v);
+  renderKControl(v); renderPalette(v); renderMetrics(v); renderKTable(v); renderRegionTabs(v);
   state.plotCache = null; updateSnapMarker(v); requestPlotDraw();
   return true;
 }
 
 // Palette (reps/threshold/cache) to use at a given time — used by export per frame.
 function paletteStateAtTime(v, t) {
-  if (v.sceneMode) { const st = v.palettes[paletteIdAtTime(v, t)]; return { reps: repsEnabled(st.analysis.representatives, st.disabledKeys), th: st.confirmThreshold, cache: st.processedCache }; }
-  return { reps: repsEnabled(v.analysis.representatives, v.disabledKeys), th: v.confirmThreshold, cache: v.processedCache };
+  if (v.sceneMode) { const st = v.palettes[paletteIdAtTime(v, t)]; return { reps: repsEnabled(st.analysis.representatives, st.disabledKeys), th: st.confirmThreshold, cache: st.processedCache, off: st.activeK === 0 }; }
+  return { reps: repsEnabled(v.analysis.representatives, v.disabledKeys), th: v.confirmThreshold, cache: v.processedCache, off: v.activeK === 0 };
 }
 // Export palette for the output frame whose CONTENT sits at decoded time `at`. Assign by FRAME INDEX,
 // not raw time: the decoded frame is floor(at*fps), and each scene owns the integer frame range
@@ -1135,9 +1167,614 @@ function paletteStateForFrame(v, at, fps) {
     let sc = v.scenes[v.scenes.length - 1];
     for (const s of v.scenes) { if (f >= Math.round(s.start * fps) && f < Math.round(s.end * fps)) { sc = s; break; } }
     const st = v.palettes[sc.paletteId];
-    return { reps: repsEnabled(st.analysis.representatives, st.disabledKeys), th: st.confirmThreshold, cache: st.processedCache };
+    return { reps: repsEnabled(st.analysis.representatives, st.disabledKeys), th: st.confirmThreshold, cache: st.processedCache, off: st.activeK === 0 };
   }
   return paletteStateAtTime(v, at);
+}
+
+/* ============================ region masks (輪郭ラボ mainapp.json) → マスク別パレット ============================ */
+// 輪郭ラボの「本体用JSON」（format:"contour-lab-mainapp" v1、レイヤ別の輪郭線RLE）を読み込むと、
+// 各レイヤ（対象1/対象2…）＋背景（どのレイヤにも属さない残り）を別領域として、領域ごとに独立した
+// パレットを分析・適用する。パレットIDは 背景=従来のシーンID（"only"/"s0"…）のまま、
+// 領域は "<シーンID>@L<レイヤID>" — STEP3 の既存UI（K・しきい値・色OFF・Undo）がそのまま領域にも効く。
+
+function masksActive(v) { return !!(v && v.masks && v.masks.layers && v.masks.layers.length); }
+function basePaletteId(id) { return String(id || "").split("@")[0]; }
+function regionPaletteIdOf(sceneId, rk) { return rk && rk !== "bg" ? sceneId + "@" + rk : sceneId; }
+// 現在の領域選択を織り込んだ「実効パレットID」。その領域のパレットが無いシーンでは背景へフォールバック。
+function effectivePaletteId(v, sceneId) {
+  if (!masksActive(v)) return sceneId;
+  const id = regionPaletteIdOf(sceneId, v.maskRegionSel || "bg");
+  return v.palettes && v.palettes[id] ? id : sceneId;
+}
+
+// mainapp.json のパース＋検証（構造・寸法・RLE健全性の要点のみ）。throw = 不正ファイル。
+function parseMainappJson(text, fileName) {
+  const j = typeof text === "string" ? JSON.parse(text) : text;
+  if (j.format !== "contour-lab-mainapp" || j.version !== 1) throw new Error("形式が違います（contour-lab-mainapp v1 ではありません）");
+  if (!(j.W > 0 && j.H > 0 && j.total > 0) || !Array.isArray(j.layers) || !j.layers.length || !j.frames) throw new Error("必須フィールドが不足しています");
+  const N = j.W * j.H;
+  let frameCount = 0;
+  for (const key of Object.keys(j.frames)) {
+    const f = Number(key);
+    if (!Number.isInteger(f) || f < 0 || f >= j.total) throw new Error(`フレーム番号が不正です (${key})`);
+    const rec = j.frames[key];
+    for (const lidS of Object.keys(rec)) {
+      const runs = rec[lidS];
+      if (!Array.isArray(runs) || runs.length % 2) throw new Error(`RLEが不正です (f${key} L${lidS})`);
+      const last = runs.length ? runs[runs.length - 2] + runs[runs.length - 1] : 0;
+      if (last > N) throw new Error(`RLEが画面外を指しています (f${key} L${lidS})`);
+    }
+    frameCount += 1;
+  }
+  const perLayer = {};
+  for (const L of j.layers) perLayer[L.id] = 0;
+  for (const rec of Object.values(j.frames)) for (const lidS of Object.keys(rec)) if (lidS in perLayer) perLayer[lidS] += 1;
+  return { name: fileName || "", fps: j.fps || 30, W: j.W, H: j.H, total: j.total, layers: j.layers, scenes: j.scenes || [], frames: j.frames, framesRegion: null, frameCount, perLayer };
+}
+
+// 輪郭線→塗り（even-odd）。contour-lab の computeFill の忠実な移植（純関数）:
+// 線以外を4近傍連結成分に分け、外周(枠)から線を挟む隣接を辿った深さの偶奇で内外を決める。
+// ドーナツ穴も自動で開く。マスクZIPのPNG（線∪塗り）と画素単位で一致することを検証済みの同一アルゴリズム。
+function maskComputeFill(lines, W, H) {
+  const N = W * H;
+  const comp = new Int32Array(N).fill(-1), st = new Int32Array(N);
+  const isBorder = []; let nc = 0;
+  for (let s = 0; s < N; s++) {
+    if (lines[s] || comp[s] >= 0) continue;
+    const id = nc++; isBorder.push(false); let sp = 0; st[sp++] = s; comp[s] = id;
+    while (sp) {
+      const p = st[--sp], x = p % W, y = (p / W) | 0;
+      if (x === 0 || y === 0 || x === W - 1 || y === H - 1) isBorder[id] = true;
+      if (x > 0) { const q = p - 1; if (!lines[q] && comp[q] < 0) { comp[q] = id; st[sp++] = q; } }
+      if (x < W - 1) { const q = p + 1; if (!lines[q] && comp[q] < 0) { comp[q] = id; st[sp++] = q; } }
+      if (y > 0) { const q = p - W; if (!lines[q] && comp[q] < 0) { comp[q] = id; st[sp++] = q; } }
+      if (y < H - 1) { const q = p + W; if (!lines[q] && comp[q] < 0) { comp[q] = id; st[sp++] = q; } }
+    }
+  }
+  const fill = new Uint8Array(N);
+  if (nc === 0) return fill;
+  const adj = new Array(nc); for (let i = 0; i < nc; i++) adj[i] = new Set();
+  const nb = [];
+  for (let p = 0; p < N; p++) {
+    if (!lines[p]) continue; const x = p % W, y = (p / W) | 0; nb.length = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue; const c = comp[yy * W + xx]; if (c >= 0 && nb.indexOf(c) < 0) nb.push(c); }
+    for (let i = 0; i < nb.length; i++) for (let j = i + 1; j < nb.length; j++) { adj[nb[i]].add(nb[j]); adj[nb[j]].add(nb[i]); }
+  }
+  const dist = new Int32Array(nc).fill(-1); const q = []; let head = 0;
+  for (let id = 0; id < nc; id++) if (isBorder[id]) { dist[id] = 0; q.push(id); }
+  if (!q.length) { const cnt = new Int32Array(nc); for (let p = 0; p < N; p++) if (comp[p] >= 0) cnt[comp[p]]++; let best = 0, bn = -1; for (let i = 0; i < nc; i++) if (cnt[i] > bn) { bn = cnt[i]; best = i; } dist[best] = 0; q.push(best); }
+  while (head < q.length) { const c = q[head++]; for (const d of adj[c]) if (dist[d] < 0) { dist[d] = dist[c] + 1; q.push(d); } }
+  for (let p = 0; p < N; p++) { const c = comp[p]; if (c >= 0) { const dd = dist[c]; if (dd < 0 || (dd & 1)) fill[p] = 1; } }
+  return fill;
+}
+
+// フレーム f の各レイヤの「領域（線∪塗り）」RLEを遅延計算してキャッシュ（線RLE→塗り復元は1回だけ）。
+// 連番PNG直接取込（framesRegion）は最初から塗り済み領域なのでそのまま返す。
+function masksRegionRuns(v, f) {
+  const m = v.masks;
+  if (m.framesRegion) return m.framesRegion[String(f)] || {};
+  if (!m._regionRuns) m._regionRuns = new Map();
+  const hit = m._regionRuns.get(f);
+  if (hit) return hit;
+  const rec = m.frames[String(f)] || null;
+  const out = {};
+  if (rec) {
+    const N = m.W * m.H;
+    for (const L of m.layers) {
+      const runs = rec[String(L.id)];
+      if (!runs || !runs.length) continue;
+      const lines = new Uint8Array(N);
+      for (let k = 0; k < runs.length; k += 2) lines.fill(1, runs[k], runs[k] + runs[k + 1]);
+      const fillArr = maskComputeFill(lines, m.W, m.H);
+      for (let i = 0; i < N; i++) if (fillArr[i]) lines[i] = 1; // lines := 領域(線∪塗り)
+      // 領域を行RLEでなく線形RLEに再圧縮して保持（メモリ小・展開高速）
+      const rr = [];
+      let i = 0;
+      while (i < N) { if (!lines[i]) { i++; continue; } let j = i + 1; while (j < N && lines[j]) j++; rr.push(i, j - i); i = j; }
+      out[L.id] = rr;
+    }
+  }
+  m._regionRuns.set(f, out);
+  if (m._regionRuns.size > 900) { const first = m._regionRuns.keys().next().value; m._regionRuns.delete(first); }
+  return out;
+}
+
+// フレーム f の領域マップ（処理解像度 w×h、0=背景、i+1=layers[i]）。最近傍スケール、直近数フレームをキャッシュ。
+// レイヤはファイル順の先頭が前面（輪郭ラボのリスト順）なので、後ろから塗って前面勝ちにする。
+function regionMapForFrame(v, f, w, h) {
+  const m = v.masks;
+  const key = f + "|" + w + "x" + h;
+  if (!v._regionMapCache) v._regionMapCache = new Map();
+  const hit = v._regionMapCache.get(key);
+  if (hit) { v._regionMapCache.delete(key); v._regionMapCache.set(key, hit); return hit; } // LRU touch
+  const runsByLayer = masksRegionRuns(v, f);
+  const W = m.W, H = m.H;
+  const native = new Uint8Array(W * H);
+  for (let li = m.layers.length - 1; li >= 0; li--) {
+    const rr = runsByLayer[m.layers[li].id];
+    if (!rr) continue;
+    const val = li + 1;
+    for (let k = 0; k < rr.length; k += 2) native.fill(val, rr[k], rr[k] + rr[k + 1]);
+  }
+  let map;
+  if (w === W && h === H) map = native;
+  else {
+    map = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const sy = Math.min(H - 1, Math.round((y + 0.5) * H / h - 0.5)) * W;
+      const row = y * w;
+      for (let x = 0; x < w; x++) map[row + x] = native[sy + Math.min(W - 1, Math.round((x + 0.5) * W / w - 0.5))];
+    }
+  }
+  v._regionMapCache.set(key, map);
+  if (v._regionMapCache.size > 6) { const first = v._regionMapCache.keys().next().value; v._regionMapCache.delete(first); }
+  return map;
+}
+
+// 領域 rk（'bg' | 'L<id>'）の分析用サンプルマスク（1=対象画素）を w×h で返す。全0なら null。
+function regionSampleMask(v, f, w, h, rk) {
+  const rmap = regionMapForFrame(v, f, w, h);
+  const want = rk === "bg" ? 0 : v.masks.layers.findIndex((L) => "L" + L.id === rk) + 1;
+  if (rk !== "bg" && want === 0) return null;
+  const out = new Uint8Array(rmap.length);
+  let n = 0;
+  for (let i = 0; i < rmap.length; i++) if (rmap[i] === want) { out[i] = 1; n++; }
+  return n ? out : null;
+}
+
+// 動画のフレーム番号 → シーンID（paletteStateForFrame と同じ整数フレーム基準）。
+function sceneIdForFrame(v, f, fps) {
+  if (v.sceneMode && fps > 0 && v.scenes && v.scenes.length) {
+    let sc = v.scenes[v.scenes.length - 1];
+    for (const s of v.scenes) { if (f >= Math.round(s.start * fps) && f < Math.round(s.end * fps)) { sc = s; break; } }
+    return sc.paletteId;
+  }
+  return v.scenes && v.scenes[0] ? v.scenes[0].paletteId : "only";
+}
+
+// パレットID → recolor 用の状態。現在ロード中のIDは「ライブ」（未保存のK/しきい値/OFF編集を反映）。
+function paletteRuntimeState(v, id) {
+  if (id === v.curPaletteId || !v.palettes || !v.palettes[id]) {
+    return { reps: repsEnabled(v.analysis.representatives, v.disabledKeys), th: v.confirmThreshold, cache: v.processedCache, mcache: v.maskCache, off: v.activeK === 0 };
+  }
+  const st = v.palettes[id];
+  return { reps: repsEnabled(st.analysis.representatives, st.disabledKeys), th: st.confirmThreshold, cache: st.processedCache, mcache: st.maskCache, off: st.activeK === 0 };
+}
+
+// シーンの全領域状態（index = regionMap 値: 0=背景, i+1=レイヤi）。領域パレットが無ければ背景で代用。
+function regionStatesFor(v, sceneId) {
+  const bg = paletteRuntimeState(v, sceneId);
+  const states = [bg];
+  for (const L of v.masks.layers) {
+    const id = regionPaletteIdOf(sceneId, "L" + L.id);
+    states.push(v.palettes && v.palettes[id] ? paletteRuntimeState(v, id) : bg);
+  }
+  return states;
+}
+
+// 領域別 nearest-color 量子化（processPixels の領域対応版。キャッシュ・マゼンタ番兵も同一挙動）。
+function processPixelsRegional(data, rmap, states, maskOnly) {
+  for (let index = 0, p = 0; index < data.length; index += 4, p += 1) {
+    const st = states[rmap[p]] || states[0];
+    if (st.off) { // この領域は「減色なし」＝素通し（はみ出しマップでは黒）
+      if (maskOnly) { data[index] = 0; data[index + 1] = 0; data[index + 2] = 0; data[index + 3] = 255; }
+      continue;
+    }
+    const cache = maskOnly ? st.mcache : st.cache;
+    const key = (data[index] << 16) | (data[index + 1] << 8) | data[index + 2];
+    let mapped = cache.get(key);
+    if (mapped === undefined) {
+      const reps = st.reps;
+      let best = reps[0];
+      let bestSq = Infinity;
+      for (const rep of reps) {
+        const dr = data[index] - rep[0];
+        const dg = data[index + 1] - rep[1];
+        const db = data[index + 2] - rep[2];
+        const distSq = dr * dr + dg * dg + db * db;
+        if (distSq < bestSq) { bestSq = distSq; best = rep; }
+      }
+      const isNew = bestSq > st.th * st.th;
+      mapped = maskOnly
+        ? (isNew ? 0xff00ff : 0)
+        : (isNew ? 0xff00ff : ((best[0] << 16) | (best[1] << 8) | best[2]));
+      cache.set(key, mapped);
+    }
+    data[index] = (mapped >> 16) & 255;
+    data[index + 1] = (mapped >> 8) & 255;
+    data[index + 2] = mapped & 255;
+    data[index + 3] = 255;
+  }
+}
+
+/* ---- STEP2: マスク読込UI（輪郭ラボJSON / ZIP / 連番PNG を直接受け付ける） ----
+   連番PNGルート: クリスタ等で描いた「白=対象・黒/透明=背景」の2値マスク画像をそのまま読む。
+   ファイル名の f##### がフレーム番号（無ければ名前順に 0,1,2,…）。L{n}/obj{n} で複数対象を
+   色分け（無ければ全部「対象1」）。ZIP はその場で展開。manifest.json があれば色/名前/fpsを反映。 */
+async function appInflateRaw(bytes) {
+  const ds = new DecompressionStream("deflate-raw");
+  const stream = new Blob([bytes]).stream().pipeThrough(ds);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+async function appUnzip(buf) {
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  let eocd = -1; for (let i = buf.length - 22; i >= 0; i--) { if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; } }
+  if (eocd < 0) throw new Error("ZIPではありません");
+  const count = dv.getUint16(eocd + 10, true); let off = dv.getUint32(eocd + 16, true); const out = [];
+  for (let n = 0; n < count; n++) {
+    if (dv.getUint32(off, true) !== 0x02014b50) break;
+    const method = dv.getUint16(off + 10, true), compSize = dv.getUint32(off + 20, true);
+    const nameLen = dv.getUint16(off + 28, true), extraLen = dv.getUint16(off + 30, true), commentLen = dv.getUint16(off + 32, true), lho = dv.getUint32(off + 42, true);
+    const name = new TextDecoder().decode(buf.subarray(off + 46, off + 46 + nameLen));
+    const lNameLen = dv.getUint16(lho + 26, true), lExtraLen = dv.getUint16(lho + 28, true), dataStart = lho + 30 + lNameLen + lExtraLen;
+    const comp = buf.subarray(dataStart, dataStart + compSize);
+    let bytes; if (method === 0) bytes = comp.slice(); else if (method === 8) bytes = await appInflateRaw(comp); else throw new Error("未対応の圧縮方式 " + method);
+    if (!name.endsWith("/")) out.push({ name, bytes });
+    off += 46 + nameLen + extraLen + commentLen;
+  }
+  return out;
+}
+const maskFrameFromName = (name) => { const m = /f(\d{3,6})/.exec(name); return m ? +m[1] : null; };
+const maskObjFromName = (name) => { const m = /(?:^|[^a-z0-9])L(\d+)[_.]/i.exec(name) || /obj(?:ect)?[_-]?(\d+)/i.exec(name); return m ? +m[1] : null; };
+
+// 画像1枚 →「マスク＝不透明かつ明るい画素」の線形RLE（白黒2値マット。輪郭ラボの取込と同じ判定）。
+let _maskCanvas = null;
+function imageFileToRegionRuns(bmp, W, H) {
+  if (!_maskCanvas || _maskCanvas.width !== W || _maskCanvas.height !== H) { _maskCanvas = document.createElement("canvas"); _maskCanvas.width = W; _maskCanvas.height = H; }
+  const ctx = _maskCanvas.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, W, H);
+  ctx.drawImage(bmp, 0, 0, W, H);
+  const d = ctx.getImageData(0, 0, W, H).data;
+  const N = W * H, runs = [];
+  let i = 0;
+  const on = (p) => { const q = p * 4; return d[q + 3] > 127 && (0.299 * d[q] + 0.587 * d[q + 1] + 0.114 * d[q + 2]) > 127; };
+  while (i < N) { if (!on(i)) { i += 1; continue; } let j = i + 1; while (j < N && on(j)) j += 1; runs.push(i, j - i); i = j; }
+  return runs;
+}
+
+async function buildMasksFromImages(pngs, manifest, srcName) {
+  const sorted = pngs.slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const multiObj = sorted.some((f) => maskObjFromName(f.name) != null);
+  let W = 0, H = 0, maxF = 0, count = 0;
+  const framesRegion = {}, layerSet = new Set(), seqBy = {};
+  for (const file of sorted) {
+    let bmp = null; try { bmp = await createImageBitmap(file); } catch (e) { continue; }
+    if (!W) { W = bmp.width; H = bmp.height; }
+    const lid = multiObj ? (maskObjFromName(file.name) != null ? maskObjFromName(file.name) : 1) : 1;
+    // f番号なしの連番は「対象ごとに」0,1,2…と振る（全体通しで振ると、複数対象を別々の連番で
+    // 書き出したとき2つ目以降の対象の開始フレームがずれる）。名前順は数値対応ソート済み。
+    let f = maskFrameFromName(file.name);
+    if (f == null) { const k = String(lid); f = seqBy[k] = (seqBy[k] == null ? 0 : seqBy[k] + 1); }
+    const runs = imageFileToRegionRuns(bmp, W, H);
+    if (bmp.close) bmp.close();
+    count += 1;
+    if (dom.maskJsonStatus && count % 40 === 0) { dom.maskJsonStatus.textContent = `マスク読込中… ${count}/${sorted.length}`; await new Promise((r) => setTimeout(r, 0)); }
+    if (!runs.length) continue; // 真っ黒/全透明＝そのフレームに対象なし
+    const key = String(f);
+    (framesRegion[key] = framesRegion[key] || {})[String(lid)] = runs;
+    layerSet.add(lid);
+    if (f > maxF) maxF = f;
+  }
+  if (!layerSet.size) throw new Error("有効なマスク画像がありません（対象を白、背景を黒か透明で塗ってください）");
+  const maniLayers = manifest && Array.isArray(manifest.layers) ? manifest.layers : null;
+  const DEF = [[255, 60, 60], [60, 200, 60], [80, 140, 255], [255, 180, 50], [200, 90, 230], [90, 210, 210]];
+  const lids = [...layerSet].sort((a, b) => a - b);
+  const layers = lids.map((id, i) => {
+    const m = maniLayers && maniLayers.find((l) => l.id === id);
+    return { id, name: (m && m.name) || ("対象" + id), color: (m && m.color && m.color.length ? m.color.slice() : DEF[i % DEF.length].slice()) };
+  });
+  return { name: srcName || "連番PNG", fps: (manifest && manifest.fps) || 0, W, H, total: maxF + 1, layers, frames: null, framesRegion, frameCount: Object.keys(framesRegion).length, perLayer: {} };
+}
+
+async function onMaskFilesPicked(files) {
+  if (!files || !files.length) return;
+  try {
+    if (dom.maskJsonStatus) dom.maskJsonStatus.textContent = "マスク読込中…";
+    const arr = [];
+    const srcName = files.length === 1 ? files[0].name : files.length + "ファイル";
+    for (const f of files) {
+      if (/\.zip$/i.test(f.name)) {
+        const entries = await appUnzip(new Uint8Array(await f.arrayBuffer()));
+        for (const e of entries) { const base = e.name.split("/").pop(); if (base) arr.push(new File([e.bytes], base, { type: /\.json$/i.test(base) ? "application/json" : "image/png" })); }
+      } else arr.push(f);
+    }
+    const jsons = arr.filter((f) => /\.json$/i.test(f.name));
+    const pngs = arr.filter((f) => /\.(png|webp|bmp)$/i.test(f.name));
+    let mainapp = null, manifest = null;
+    for (const jf of jsons) {
+      try {
+        const obj = JSON.parse(await jf.text());
+        if (obj && obj.format === "contour-lab-mainapp") mainapp = { obj, name: jf.name };
+        else if (obj && (obj.layers || obj.W)) manifest = obj;
+      } catch (e) { /* JSONでなければ無視 */ }
+    }
+    let m;
+    if (mainapp) m = parseMainappJson(mainapp.obj, mainapp.name); // 輪郭ラボの本体用JSON
+    else if (pngs.length) m = await buildMasksFromImages(pngs, manifest, srcName); // 連番PNG（クリスタ等の直接ルート）
+    else throw new Error("マスク画像（PNG）または mainapp.json が見つかりません");
+    state.masksData = m;
+    renderMaskJsonStatus();
+    const names = m.layers.map((L) => L.name || ("対象" + L.id)).join("・");
+    showToast("success", `領域マスクを読み込みました（${names} ＋ 背景 / ${m.frameCount}フレーム分）。「色を分析する」を押すと反映されます`);
+  } catch (err) {
+    console.error(err);
+    renderMaskJsonStatus();
+    showToast("error", "マスクを読み込めませんでした：" + (err && err.message ? err.message : String(err)));
+  }
+}
+function renderMaskJsonStatus() {
+  if (!dom.maskJsonStatus) return;
+  const m = state.masksData;
+  if (dom.maskPreviewBtn) {
+    const on = !!m;
+    dom.maskPreviewBtn.disabled = !on;
+    dom.maskPreviewBtn.classList.toggle("btn-primary", on);   // 読み込むと「明るく」なる
+    dom.maskPreviewBtn.classList.toggle("btn-ghost", !on);
+    dom.maskPreviewBtn.textContent = on ? "▶ マスクプレビュー（配置を再生で確認）" : "▶ マスクプレビュー（マスクを読み込むと使えます）";
+    if (!on) closeMaskPreview();
+  }
+  if (!m) { dom.maskJsonStatus.textContent = "未読込"; if (dom.maskJsonClear) dom.maskJsonClear.hidden = true; return; }
+  dom.maskJsonStatus.textContent = `${m.name || "マスク"}（${m.W}×${m.H}・${m.total}f・${m.layers.length}色＋背景）`;
+  if (dom.maskJsonClear) dom.maskJsonClear.hidden = false;
+}
+function clearMaskJson() {
+  state.masksData = null;
+  renderMaskJsonStatus();
+  showToast("info", "領域マスクを解除しました（次の分析から反映）");
+}
+
+/* ---- STEP2: マスクプレビュー（分析前に、マスクを重ねた映像を再生して配置を確認） ----
+   専用の<video>要素を使う（分析用の workVideo と干渉しない）。各表示フレームで
+   フレーム番号 = floor(currentTime × マスクfps) の領域を色付き半透明で重畳。
+   マスクは未分析でも state.masksData から直接参照する（動画へは分析時に適用される）。 */
+let mpv = null; // { video, pv, fps, ctx, w, h, lastF, mode:'play'|'pause', pendingF, playTimer, playT0, playF0 }
+function openMaskPreview() {
+  const m = state.masksData;
+  if (!m) return;
+  const v = state.videos[0];
+  if (!v) { showToast("info", "先に STEP1 で動画を追加してください"); return; }
+  closeMaskPreview();
+  const video = document.createElement("video");
+  video.muted = true; video.playsInline = true; video.preload = "auto";
+  video.src = v.url;
+  const pv = { masks: { ...m, _regionRuns: new Map(), _layerFrames: null }, _regionMapCache: null };
+  mpv = { video, pv, fps: m.fps || 30, ctx: null, w: 0, h: 0, lastF: -1, mode: "pause", pendingF: null, playTimer: null, playT0: 0, playF0: 0 };
+  dom.maskPreviewBox.hidden = false;
+  dom.maskPreviewInfo.textContent = "読込中…";
+  video.addEventListener("loadedmetadata", () => {
+    if (!mpv || mpv.video !== video) return;
+    const { width, height } = scaledSize(video.videoWidth, video.videoHeight, 480);
+    dom.maskPreviewCanvas.width = width; dom.maskPreviewCanvas.height = height;
+    mpv.ctx = dom.maskPreviewCanvas.getContext("2d", { willReadFrequently: true });
+    mpv.w = width; mpv.h = height;
+    const names = m.layers.map((L) => L.name || ("対象" + L.id)).join("・");
+    dom.maskPreviewInfo.textContent = `${esc(v.name)} ＋ ${names}（${m.fps ? m.fps : 30}fps基準・コマ順次再生）`;
+    if (dom.maskPreviewSeek) { dom.maskPreviewSeek.min = "0"; dom.maskPreviewSeek.max = String(maskPreviewTotalF() - 1); dom.maskPreviewSeek.value = "0"; }
+    // シーク駆動: 描画は常に 'seeked' 後（=停止中）に行う。停止中は currentTime＝表示フレームが
+    // 保証されるので、画素とマスクの対応が構成的にズレない。再生モードなら描画後に次のコマを予約。
+    video.addEventListener("seeked", () => {
+      if (!mpv || mpv.video !== video) return;
+      mpv.pendingF = null; // シーク完了（コマ送り連打の基準をリセット）
+      mpv.lastF = -1; // 同一フレーム抑止を解除して必ず再描画
+      drawMaskPreviewFrame(video.currentTime);
+      if (mpv.mode === "play") scheduleMaskPreviewNext();
+    });
+    drawMaskPreviewFrame(video.currentTime); // 1枚目
+    startMaskPreviewPlay(); // シーク駆動の連続再生を開始
+  }, { once: true });
+  video.addEventListener("error", () => { if (mpv && mpv.video === video) dom.maskPreviewInfo.textContent = "動画を再生できませんでした"; }, { once: true });
+}
+/* シーク駆動の連続再生: 「次フレーム中央へシーク → seeked で描画 → 次を予約」を繰り返す。
+   動画要素は一度も play() しない（＝常に停止中でフレーム対応が正確）。ソースfpsに合わせて
+   1x へペーシングし、シークが追いつかない環境では出せる速度で全コマを順に表示（コマ飛びなし）。 */
+function startMaskPreviewPlay() {
+  if (!mpv) return;
+  mpv.mode = "play";
+  mpv.playT0 = performance.now();
+  mpv.playF0 = Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6);
+  dom.maskPreviewPlay.textContent = "⏸ 一時停止";
+  maskPreviewAdvance();
+}
+function maskPreviewAdvance() {
+  if (!mpv || mpv.mode !== "play" || !mpv.video.duration) return;
+  const total = maskPreviewTotalF();
+  let f = (mpv.pendingF != null ? mpv.pendingF : Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6)) + 1;
+  if (f >= total) { f = 0; mpv.playT0 = performance.now(); mpv.playF0 = 0; } // 先頭へループ
+  mpv.pendingF = f;
+  const at = Math.max(0.001, Math.min(mpv.video.duration - 0.001, (f + 0.5) / mpv.fps));
+  try { mpv.video.currentTime = at; } catch (e) { /* ignore */ }
+}
+function scheduleMaskPreviewNext() {
+  if (!mpv || mpv.mode !== "play") return;
+  const f = Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6);
+  const due = mpv.playT0 + ((f - mpv.playF0 + 1) / mpv.fps) * 1000; // 次コマの提示予定時刻（1x）
+  const delay = Math.max(0, due - performance.now());
+  if (mpv.playTimer) clearTimeout(mpv.playTimer);
+  mpv.playTimer = setTimeout(maskPreviewAdvance, delay);
+}
+function drawMaskPreviewFrame(t) {
+  const { video, ctx, w, h, pv, fps } = mpv;
+  if (!ctx || video.readyState < 2) return;
+  // このプレビューはシーク駆動（動画は常に一時停止のまま、フレーム中央へシーク→seekedで描画）。
+  // 停止中の currentTime は「表示中のフレーム」と一致することが保証されるため、画素とマスクの
+  // フレーム対応が構成的にズレない。※リアルタイム再生系は画素とタイムスタンプの原子性が無く、
+  // rVFC(mediaTime)でもVideoFrame(timestamp)でも±1コマの競合が残ることを画素比較QAで実測済み。
+  const at = t != null ? t : video.currentTime;
+  const f = Math.floor(at * fps + 1e-6);
+  if (mpv.mode !== "play" && f === mpv.lastF) return; // 停止中の同一フレームは再描画しない
+  mpv.lastF = f;
+  mpv._sync = { mediaTime: at, currentTime: video.currentTime, f }; // 検証用（同期の実測）
+  ctx.drawImage(video, 0, 0, w, h);
+  const rmap = regionMapForFrame(pv, f, w, h);
+  const img = ctx.getImageData(0, 0, w, h);
+  const cols = pv.masks.layers.map((L) => L.color || [255, 60, 60]);
+  const d = img.data;
+  for (let p = 0, i = 0; p < rmap.length; p += 1, i += 4) {
+    const li = rmap[p]; if (!li) continue;
+    const c = cols[li - 1];
+    d[i] = (d[i] * 0.55 + c[0] * 0.45) | 0;
+    d[i + 1] = (d[i + 1] * 0.55 + c[1] * 0.45) | 0;
+    d[i + 2] = (d[i + 2] * 0.55 + c[2] * 0.45) | 0;
+  }
+  ctx.putImageData(img, 0, 0);
+  syncMaskPreviewSeekUI(f, at);
+}
+function maskPreviewTotalF() {
+  return mpv && mpv.video && mpv.video.duration ? Math.max(1, Math.round(mpv.video.duration * mpv.fps)) : 0;
+}
+function syncMaskPreviewSeekUI(f, at) {
+  if (!mpv) return;
+  if (dom.maskPreviewSeek && !mpv.scrubbing) dom.maskPreviewSeek.value = String(f);
+  if (dom.maskPreviewTime) dom.maskPreviewTime.textContent = formatClock(at) + "・コマ " + (f + 1) + " / " + maskPreviewTotalF();
+}
+function pauseMaskPreview() {
+  if (!mpv) return;
+  mpv.mode = "pause";
+  if (mpv.playTimer) { clearTimeout(mpv.playTimer); mpv.playTimer = null; }
+  dom.maskPreviewPlay.textContent = "▶ 再生";
+}
+// フレーム中央へシーク（境界ちょうどのシークは前後どちらのフレームが出るか曖昧＝本体の確立ルール）
+function seekMaskPreviewToFrame(f) {
+  if (!mpv || !mpv.video.duration) return;
+  const total = maskPreviewTotalF();
+  const cf = Math.max(0, Math.min(total - 1, f));
+  pauseMaskPreview();
+  mpv.pendingF = cf; // シーク完了までコマ送りの基準に使う（連打の取りこぼし防止）
+  const at = Math.max(0.001, Math.min(mpv.video.duration - 0.001, (cf + 0.5) / mpv.fps));
+  try { mpv.video.currentTime = at; } catch (e) { /* ignore */ }
+}
+function stepMaskPreview(d) {
+  if (!mpv) return;
+  const base = mpv.pendingF != null ? mpv.pendingF : Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6);
+  seekMaskPreviewToFrame(base + d);
+}
+function toggleMaskPreviewPlay() {
+  if (!mpv) return;
+  if (mpv.mode === "play") pauseMaskPreview();
+  else startMaskPreviewPlay();
+}
+function closeMaskPreview() {
+  if (dom.maskPreviewBox) dom.maskPreviewBox.hidden = true;
+  if (!mpv) return;
+  mpv.mode = "pause";
+  if (mpv.playTimer) { clearTimeout(mpv.playTimer); mpv.playTimer = null; }
+  try { mpv.video.removeAttribute("src"); mpv.video.load(); } catch (e) { /* ignore */ }
+  mpv = null;
+}
+
+/* ---- STEP3: 領域チップ2種 ----
+   上（#regionTabs）＝「プレビュー表示」の複数選択: チェックした領域だけカラー表示し、外した領域は
+   3つのプレビュー（元動画/減色後/はみ出しマップ）で黒塗り。0個も可。既定は全選択。表示専用で
+   書き出しには影響しない。
+   シークバー下（#regionEditTabs）＝「パレット編集」の単一選択: どの領域のK/しきい値/色OFFを
+   編集するか（従来の領域タブの役割を移設）。 */
+function maskChips(v) {
+  const chips = [{ rk: "bg", name: "背景", color: null }];
+  for (const L of v.masks.layers) chips.push({ rk: "L" + L.id, name: L.name || ("対象" + L.id), color: L.color });
+  return chips;
+}
+function maskChipDot(c) {
+  const dotBg = c.color ? `rgb(${c.color[0]},${c.color[1]},${c.color[2]})` : "linear-gradient(135deg,#8a93a6,#cdd4e0)";
+  return `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:baseline;background:${dotBg}"></span>`;
+}
+function ensureMaskViewSel(v) {
+  if (!v.maskViewSel) v.maskViewSel = new Set(["bg", ...v.masks.layers.map((L) => "L" + L.id)]);
+  return v.maskViewSel;
+}
+function renderRegionTabs(v) {
+  if (!dom.regionTabs) return;
+  const active = !!(v && masksActive(v) && v.palettes);
+  if (dom.maskOverlayWrap) { dom.maskOverlayWrap.hidden = !active; if (dom.maskOverlayToggle) dom.maskOverlayToggle.checked = !!state.maskOverlay; }
+  if (!active) { dom.regionTabs.hidden = true; dom.regionTabs.innerHTML = ""; renderRegionEditTabs(v); return; }
+  const sel = ensureMaskViewSel(v);
+  dom.regionTabs.hidden = false;
+  dom.regionTabs.innerHTML = `<span class="seg-note" style="margin:0 6px 0 0;align-self:center" title="チェックした領域だけをカラー表示します（外した領域は黒塗り・書き出しには影響しません）">プレビュー表示：</span>` + maskChips(v).map((c) => {
+    const on = sel.has(c.rk);
+    const cls = on ? "scene-tab active" : "scene-tab";
+    return `<button class="${cls}" data-region="${c.rk}" type="button" style="${on ? "" : "opacity:.55"}">${maskChipDot(c)}<span class="scene-name">${on ? "✓ " : ""}${esc(c.name)}</span></button>`;
+  }).join("");
+  renderRegionEditTabs(v);
+}
+function onRegionTabClick(e) {
+  const btn = e.target.closest("[data-region]");
+  if (!btn) return;
+  const v = activeVideo();
+  if (!v || !masksActive(v)) return;
+  const sel = ensureMaskViewSel(v), rk = btn.dataset.region;
+  if (sel.has(rk)) sel.delete(rk); else sel.add(rk); // 0個も許可
+  renderRegionTabs(v);
+  if (!state.playing) drawActiveFrame();
+}
+function renderRegionEditTabs(v) {
+  if (!dom.regionEditTabs) return;
+  const active = !!(v && masksActive(v) && v.palettes);
+  if (dom.regionEditRow) dom.regionEditRow.hidden = !active;
+  if (!active) { dom.regionEditTabs.innerHTML = ""; return; }
+  const sceneId = v.sceneMode && v.scenes && v.scenes[v.activeScene] ? v.scenes[v.activeScene].paletteId : "only";
+  const cur = v.maskRegionSel || "bg";
+  dom.regionEditTabs.innerHTML = maskChips(v).map((c) => {
+    const exists = c.rk === "bg" || !!v.palettes[regionPaletteIdOf(sceneId, c.rk)];
+    const cls = c.rk === cur ? "scene-tab active" : "scene-tab";
+    const note = exists ? "" : `<span class="scene-time">このシーンに無し</span>`;
+    return `<button class="${cls}" data-region-edit="${c.rk}" type="button"${exists ? "" : " disabled"}>${maskChipDot(c)}<span class="scene-name">${esc(c.name)}</span>${note}</button>`;
+  }).join("");
+}
+function onRegionEditTabClick(e) {
+  const btn = e.target.closest("[data-region-edit]");
+  if (!btn || btn.disabled) return;
+  selectRegion(btn.dataset.regionEdit);
+}
+// プレビューの黒塗り判定: regionMap の値（0=背景, i=レイヤi）→ 表示ON/OFF。全部ONなら null（高速パス）。
+function regionViewVis(v) {
+  const sel = ensureMaskViewSel(v);
+  const vis = new Uint8Array(v.masks.layers.length + 1);
+  vis[0] = sel.has("bg") ? 1 : 0;
+  v.masks.layers.forEach((L, i) => { vis[i + 1] = sel.has("L" + L.id) ? 1 : 0; });
+  return vis.every((x) => x) ? null : vis;
+}
+function selectRegion(rk) {
+  const v = activeVideo();
+  if (!v || !masksActive(v) || (v.maskRegionSel || "bg") === rk) return;
+  savePaletteState(v);
+  v.maskRegionSel = rk;
+  const sceneId = v.sceneMode && v.scenes && v.scenes[v.activeScene] ? v.scenes[v.activeScene].paletteId : basePaletteId(v.curPaletteId) || "only";
+  loadPaletteState(v, effectivePaletteId(v, sceneId));
+  dom.sConfirm.max = Math.max(150, (v.confirmThreshold || 0) + 8);
+  dom.sConfirm.value = v.confirmThreshold;
+  dom.vConfirm.textContent = v.confirmThreshold;
+  syncThresholdDockControls(v.confirmThreshold);
+  updateConfStepperBounds(v.confirmThreshold);
+  renderRegionEditTabs(v);
+  renderKControl(v);
+  renderPalette(v);
+  renderMetrics(v);
+  renderKTable(v);
+  state.plotCache = null;
+  updateSnapMarker(v);
+  if (!state.playing) drawActiveFrame();
+  requestPlotDraw();
+}
+
+// はみ出しマップ用: 「減色なし」領域は範囲外画素が存在しない＝黒で塗る。
+function fillBlackRGB(data) {
+  for (let i = 0; i < data.length; i += 4) { data[i] = 0; data[i + 1] = 0; data[i + 2] = 0; data[i + 3] = 255; }
+}
+// recolor の共通入口（時刻ベース）: マスク未使用なら従来どおり、使用中は領域別パレットで量子化。
+// activeK=0（減色なし）のパレットは入力をそのまま通す（はみ出しマップは黒）。
+function reduceFrameAt(v, data, at, fps, w, h, opts) {
+  if (!masksActive(v)) {
+    const pal = paletteStateForFrame(v, at, fps);
+    if (pal.off) { if (opts && opts.maskOnly) fillBlackRGB(data); return; }
+    reduceFrame(data, pal.reps, pal.th, pal.cache, w, h, opts);
+    return;
+  }
+  const useFps = fps > 0 ? fps : v.masks.fps || 30;
+  const f = Math.floor(at * useFps + 1e-6);
+  const rmap = regionMapForFrame(v, f, w, h);
+  const states = regionStatesFor(v, sceneIdForFrame(v, f, useFps));
+  processPixelsRegional(data, rmap, states, !!(opts && opts.maskOnly));
 }
 
 /* ============================ analysis (batch) ============================ */
@@ -1145,6 +1782,7 @@ function paletteStateForFrame(v, at, fps) {
 async function analyzeAll() {
   if (!hasVideos() || state.analyzing) return;
   cancelAdvancedPreview();
+  closeMaskPreview();
   state.analyzing = true;
   state.cancelled = false;
   state.exported = false;
@@ -1172,6 +1810,7 @@ async function analyzeAll() {
       v.duration = dom.workVideo.duration;
       v.dimsText = `${v.videoWidth}×${v.videoHeight}`;
       v.durText = formatDuration(v.duration);
+      applyMasksToVideo(v); // 読み込み済みの領域マスク（あれば）をこの動画へ適用
       updateDet(v, 18);
       const lastTime = Math.max(0, dom.workVideo.duration - 1 / 30);
       const last = await extractFrame(dom.workVideo, lastTime, settings.analysisShortSide);
@@ -1183,15 +1822,27 @@ async function analyzeAll() {
       updateDet(v, 100); // cut-detection phase complete (instant in whole-video mode)
       throwIfCancelled();
       if (cuts.length === 0) {
-        // No scene change -> single combined palette (original behavior).
-        const result = await runAnalysisWorker(first.imageData, last.imageData, settings, (frac) => updatePal(v, Math.max(0, Math.min(1, frac)) * 100));
-        updatePal(v, 100);
-        throwIfCancelled();
         v.sceneMode = false;
         v.cuts = [];
         v.scenes = [{ start: 0, end: v.duration || 1, paletteId: "only" }];
-        v.palettes = { only: makePaletteState({ ...result, settings }) };
-        loadPaletteState(v, "only");
+        if (masksActive(v)) {
+          // マスク別パレット: 背景＋各レイヤを別々に分析（フレーム対応付けに正確なfpsが要る）
+          const fps = await ensureFps(v);
+          if (Math.abs(fps - (v.masks.fps || fps)) > 0.05) showToast("info", `マスクのfps（${v.masks.fps}）と動画の実測fps（${fps}）が異なります。領域の対応が数フレームずれる可能性があります。`);
+          const fLast = Math.floor(lastTime * fps + 1e-6);
+          v.palettes = {};
+          await analyzeSceneRegions(v, "only", 0, Math.round((v.duration || 1) * fps), 0, fLast, first.imageData, last.imageData, fps, settings, (frac) => updatePal(v, Math.max(0, Math.min(1, frac)) * 100));
+          updatePal(v, 100);
+          throwIfCancelled();
+          loadPaletteState(v, "only");
+        } else {
+          // No scene change -> single combined palette (original behavior).
+          const result = await runAnalysisWorker(first.imageData, last.imageData, settings, (frac) => updatePal(v, Math.max(0, Math.min(1, frac)) * 100));
+          updatePal(v, 100);
+          throwIfCancelled();
+          v.palettes = { only: makePaletteState({ ...result, settings }) };
+          loadPaletteState(v, "only");
+        }
       } else {
         // Scene change -> EACH scene gets its own palette, clustered from THAT scene's first & last frames.
         v.sceneMode = true;
@@ -1199,6 +1850,7 @@ async function analyzeAll() {
         v.scenes = buildScenes(cuts, v.duration || 1);
         v.palettes = {};
         const sceneFps = await ensureFps(v);
+        if (masksActive(v) && Math.abs(sceneFps - (v.masks.fps || sceneFps)) > 0.05) showToast("info", `マスクのfps（${v.masks.fps}）と動画の実測fps（${sceneFps}）が異なります。領域の対応が数フレームずれる可能性があります。`);
         prepareSceneFramePreview(v, sceneFps);
         await populateSceneReviewFrames(v);
         throwIfCancelled();
@@ -1217,13 +1869,19 @@ async function analyzeAll() {
           const lImg = await extractFrame(dom.workVideo, lT, settings.analysisShortSide);
           throwIfCancelled();
           const base = (i / nS) * 100, next = ((i + 1) / nS) * 100;
-          const res = await runAnalysisWorker(fImg.imageData, lImg.imageData, settings, (frac) => updatePal(v, base + Math.max(0, Math.min(1, frac)) * (next - base)));
+          if (masksActive(v)) {
+            // マスク別パレット: このシーンの背景＋各レイヤを別々に分析
+            const fLo = Math.round(sc.start * item.fps), fHi = Math.round(sc.end * item.fps);
+            await analyzeSceneRegions(v, sc.paletteId, fLo, fHi, item.firstFrame, item.lastFrame, fImg.imageData, lImg.imageData, item.fps, settings, (frac) => updatePal(v, base + Math.max(0, Math.min(1, frac)) * (next - base)));
+          } else {
+            const res = await runAnalysisWorker(fImg.imageData, lImg.imageData, settings, (frac) => updatePal(v, base + Math.max(0, Math.min(1, frac)) * (next - base)));
+            v.palettes[sc.paletteId] = makePaletteState({ ...res, settings });
+          }
           updatePal(v, next);
           throwIfCancelled();
-          v.palettes[sc.paletteId] = makePaletteState({ ...res, settings });
           updateSceneFramePreview(v, i, { status: "完了", done: true });
         }
-        loadPaletteState(v, paletteIdAtTime(v, initialPreviewTime(dom.workVideo)));
+        loadPaletteState(v, effectivePaletteId(v, paletteIdAtTime(v, initialPreviewTime(dom.workVideo))));
       }
       v.activeScene = 0;
       v.status = "done";
@@ -1319,6 +1977,105 @@ function runAnalysisWorker(firstImageData, lastImageData, settings, onProgress) 
   });
 }
 
+// マスク付き分析: 入力の ImageData は複製して渡す（転送で元が無効化されると、同じフレームを
+// 複数領域の分析に使い回せないため）。mask は 1画素=1バイト（1=対象）、null なら全画素。
+function runAnalysisWorkerMasked(firstImageData, lastImageData, firstMask, lastMask, settings, onProgress) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(`./worker.js?v=${APP_VERSION}`);
+    state.activeWorker = worker;
+    state.currentReject = reject;
+    worker.onmessage = (event) => {
+      const message = event.data;
+      if (message.type === "progress") { if (onProgress) onProgress(message.value); }
+      else if (message.type === "done") { worker.terminate(); state.activeWorker = null; state.currentReject = null; resolve(message.result); }
+      else if (message.type === "error") { worker.terminate(); state.activeWorker = null; state.currentReject = null; reject(new Error(message.message)); }
+    };
+    worker.onerror = (event) => { worker.terminate(); state.activeWorker = null; state.currentReject = null; reject(new Error(event.message)); };
+    const fb = new Uint8ClampedArray(firstImageData.data).buffer;
+    const lb = new Uint8ClampedArray(lastImageData.data).buffer;
+    const payload = { firstBuffer: fb, lastBuffer: lb, settings };
+    const transfer = [fb, lb];
+    if (firstMask) { const b = new Uint8Array(firstMask).buffer; payload.firstMaskBuffer = b; transfer.push(b); }
+    if (lastMask) { const b = new Uint8Array(lastMask).buffer; payload.lastMaskBuffer = b; transfer.push(b); }
+    worker.postMessage({ type: "analyze", payload }, transfer);
+  });
+}
+
+// レイヤの「マスクが存在するフレーム」昇順リスト（範囲 [fLo,fHi) 内）。
+function layerFramesInRange(v, lid, fLo, fHi) {
+  const m = v.masks;
+  if (!m._layerFrames) {
+    const src = m.framesRegion || m.frames; // 直接取込は framesRegion が正
+    m._layerFrames = {};
+    for (const L of m.layers) m._layerFrames[L.id] = [];
+    for (const key of Object.keys(src)) {
+      const f = Number(key), rec = src[key];
+      for (const lidS of Object.keys(rec)) if (m._layerFrames[lidS]) m._layerFrames[lidS].push(f);
+    }
+    for (const k of Object.keys(m._layerFrames)) m._layerFrames[k].sort((a, b) => a - b);
+  }
+  return (m._layerFrames[lid] || []).filter((f) => f >= fLo && f < fHi);
+}
+
+// 1シーン分の「背景＋各レイヤ」パレット分析。サンプルフレームは原則シーンの先頭/末尾（fA0/fB0、
+// 取得済み画像 imgA0/imgB0 を再利用）。レイヤがそこに不在なら、シーン内でそのレイヤが存在する
+// 最初/最後のフレームを追加で取得して使う。領域がシーンに全く無ければその領域パレットは作らない
+// （recolor は背景へフォールバック）。
+async function analyzeSceneRegions(v, sceneId, fLo, fHi, fA0, fB0, imgA0, imgB0, fps, settings, onFrac) {
+  const regions = ["bg", ...v.masks.layers.map((L) => "L" + L.id)];
+  const nR = regions.length;
+  for (let ri = 0; ri < nR; ri += 1) {
+    throwIfCancelled();
+    const rk = regions[ri];
+    let fa = fA0, fb = fB0, imgA = imgA0, imgB = imgB0;
+    if (rk !== "bg") {
+      const pres = layerFramesInRange(v, rk.slice(1), fLo, fHi);
+      if (!pres.length) { if (onFrac) onFrac((ri + 1) / nR); continue; }
+      // サンプルは「存在フレームの先頭/末尾」ではなく、前半・後半それぞれで輪郭量が最大のフレーム。
+      // 出入りの瞬間の極小マスク（例: 消える直前の126px）から代表色を作ると中盤の見た目を外し、
+      // 大量の「はみ出し色（マゼンタ）」が出る（実測）。輪郭RLEの合計長＝サイズの安価な代理指標。
+      const lid = rk.slice(1);
+      // 大きさの代理指標: JSONルート＝輪郭RLE合計（周長）、PNG直接ルート＝領域RLE合計（面積）。どちらも大きいほど大きい。
+      const msrc = v.masks.framesRegion || v.masks.frames;
+      const perim = (f) => { const rec = msrc[String(f)] || {}; const runs = rec[lid] || []; let s = 0; for (let k = 1; k < runs.length; k += 2) s += runs[k]; return s; };
+      const mid = pres.length >> 1;
+      const pick = (arr) => { let best = arr[0], bp = -1; for (const f of arr) { const p = perim(f); if (p > bp) { bp = p; best = f; } } return best; };
+      fa = pick(pres.slice(0, Math.max(1, mid)));
+      fb = pick(pres.slice(Math.max(0, mid)));
+      if (fb < fa) { const t2 = fa; fa = fb; fb = t2; }
+      if (fa !== fA0) { imgA = (await extractFrame(dom.workVideo, frameCenterTime(fa, fps, v.duration || 0), settings.analysisShortSide)).imageData; throwIfCancelled(); }
+      if (fb === fA0) imgB = imgA0;
+      else if (fb === fa) imgB = imgA;
+      else if (fb !== fB0) { imgB = (await extractFrame(dom.workVideo, frameCenterTime(fb, fps, v.duration || 0), settings.analysisShortSide)).imageData; throwIfCancelled(); }
+    }
+    const mA = regionSampleMask(v, fa, imgA.width, imgA.height, rk);
+    const mB = regionSampleMask(v, fb, imgB.width, imgB.height, rk);
+    if (rk !== "bg" && !mA && !mB) { if (onFrac) onFrac((ri + 1) / nR); continue; } // 縮小で消えるほど極小 → 背景に任せる
+    const res = await runAnalysisWorkerMasked(imgA, imgB, mA, mB, settings, (frac) => { if (onFrac) onFrac((ri + Math.max(0, Math.min(1, frac))) / nR); });
+    throwIfCancelled();
+    v.palettes[regionPaletteIdOf(sceneId, rk)] = makePaletteState({ ...res, settings });
+    if (onFrac) onFrac((ri + 1) / nR);
+  }
+}
+
+// 分析開始時に、読み込み済みマスクをこの動画へ適用（解像度が一致する場合のみ）。
+function applyMasksToVideo(v) {
+  v.masks = null; v.maskRegionSel = "bg"; v._regionMapCache = null;
+  const m = state.masksData;
+  if (!m) return;
+  if (m.W !== v.videoWidth || m.H !== v.videoHeight) {
+    // 縦横比が同じなら最近傍で伸縮して使う（連番PNGを半解像度で描くなどの運用を許す）。比率違いは位置がずれるので拒否。
+    const arV = v.videoWidth / Math.max(1, v.videoHeight), arM = m.W / Math.max(1, m.H);
+    if (Math.abs(arV - arM) > 0.01) {
+      showToast("error", `${v.name}: マスクの縦横比（${m.W}×${m.H}）が動画（${v.videoWidth}×${v.videoHeight}）と違うため、この動画には使いません`);
+      return;
+    }
+    showToast("info", `${v.name}: マスク（${m.W}×${m.H}）を動画（${v.videoWidth}×${v.videoHeight}）に合わせて伸縮して使います`);
+  }
+  v.masks = { name: m.name, fps: m.fps, W: m.W, H: m.H, total: m.total, layers: m.layers, frames: m.frames, framesRegion: m.framesRegion || null, _regionRuns: new Map(), _layerFrames: null };
+  v.maskViewSel = new Set(["bg", ...m.layers.map((L) => "L" + L.id)]); // プレビュー表示の複数選択（既定＝全部）
+}
+
 function stopAnalyze() {
   state.cancelled = true;
   stopElapsedTimer();
@@ -1370,7 +2127,7 @@ function renderAnalyzingList() {
             <span class="proc-name">${esc(v.name)}${v.error ? " — " + esc(v.error) : ""}</span>
             <span class="proc-status ${statusCls}">${statusText}</span>
           </div>
-          ${phase("カット検出", "det", det)}
+          ${phase(state.wholeVideo ? "フレーム読込" : "カット検出", "det", det)}
           ${phase("パレット分析", "pal", pal)}
         </div>
       </div>`;
@@ -1657,6 +2414,7 @@ function renderStep3Dynamic() {
   dom.activeName.textContent = v.name;
   syncPreviewPopupTitle();
   renderSceneTabs(v);
+  renderRegionTabs(v);
   syncPopupSceneTabs();
   dom.sConfirm.value = v.confirmThreshold;
   dom.vConfirm.textContent = v.confirmThreshold;
@@ -1679,11 +2437,12 @@ function renderKControl(v) {
     return;
   }
   const min = ks[0], max = ks[ks.length - 1];
-  dom.kValue.textContent = String(v.activeK);
-  dom.kRange.textContent = `（${min}〜${max}）`;
-  dom.kMinus.disabled = v.activeK <= min;
-  dom.kPlus.disabled = v.activeK >= max;
-  if (dom.sK) { dom.sK.disabled = false; dom.sK.min = String(min); dom.sK.max = String(max); dom.sK.step = "1"; dom.sK.value = String(v.activeK); }
+  const off = v.activeK === 0; // 減色なし（スライダー最左端の1目盛り）
+  dom.kValue.textContent = off ? "減色なし" : String(v.activeK);
+  dom.kRange.textContent = `（左端＝減色なし・${min}〜${max}）`;
+  dom.kMinus.disabled = off;
+  dom.kPlus.disabled = !off && v.activeK >= max;
+  if (dom.sK) { dom.sK.disabled = false; dom.sK.min = String(min - 1); dom.sK.max = String(max); dom.sK.step = "1"; dom.sK.value = String(off ? min - 1 : v.activeK); }
 }
 function nearestAvailableK(ks, val) {
   let best = ks[0], bd = Infinity;
@@ -1732,21 +2491,43 @@ function applyKValue(nk, coalesce) {
   if (!state.playing) drawActiveFrame();
   requestPlotDraw();
 }
-function setK(val) { // from the slider (any int) — snap to the nearest available K
-  const v = activeVideo();
-  if (!v || !v.analysis || !v.analysis.availableK) return;
-  const nk = nearestAvailableK(v.analysis.availableK, val);
-  if (dom.sK) dom.sK.value = String(nk);
-  applyKValue(nk, true); // slider drag → coalesce into one undo step
-}
-function changeK(delta) { // from the −/＋ steppers
+function setK(val) { // from the slider (any int) — leftmost slot = 減色なし, else snap to nearest available K
   const v = activeVideo();
   if (!v || !v.analysis || !v.analysis.availableK) return;
   const ks = v.analysis.availableK;
+  if (val < ks[0]) { if (dom.sK) dom.sK.value = String(ks[0] - 1); applyNoReduce(true); return; }
+  const nk = nearestAvailableK(ks, val);
+  if (dom.sK) dom.sK.value = String(nk);
+  applyKValue(nk, true); // slider drag → coalesce into one undo step
+}
+function changeK(delta) { // from the −/＋ steppers（最小Kからさらに−で減色なしへ）
+  const v = activeVideo();
+  if (!v || !v.analysis || !v.analysis.availableK) return;
+  const ks = v.analysis.availableK;
+  if (v.activeK === 0) { if (delta > 0) applyKValue(ks[0], false); return; }
   let i = ks.indexOf(v.activeK);
   if (i < 0) i = ks.indexOf(v.analysis.selectedK);
-  i = Math.max(0, Math.min(ks.length - 1, i + delta));
-  applyKValue(ks[i], false); // discrete stepper → its own undo step
+  const ni = i + delta;
+  if (ni < 0) { applyNoReduce(false); return; }
+  applyKValue(ks[Math.min(ks.length - 1, ni)], false); // discrete stepper → its own undo step
+}
+// 減色なし（activeK=0）: パレット・しきい値はそのまま保持し、量子化だけをバイパスする。
+function applyNoReduce(coalesce) {
+  const v = activeVideo();
+  if (!v || !v.analysis) return;
+  if (v.activeK === 0) { renderKControl(v); return; }
+  recordUndo("K", !!coalesce);
+  v.activeK = 0;
+  v.processedCache = new Map();
+  v.maskCache = new Map();
+  state.plotCache = null;
+  updateSnapMarker(v);
+  renderKControl(v);
+  renderPalette(v);
+  renderMetrics(v);
+  renderKTable(v);
+  if (!state.playing) drawActiveFrame();
+  requestPlotDraw();
 }
 
 // Restore the active video's threshold and representative count to the auto-determined originals.
@@ -1807,8 +2588,10 @@ function restorePaletteSnapshot(snap) {
   try {
     if (state.activeIdx !== snap.activeIdx && state.videos[snap.activeIdx]) { state.activeIdx = snap.activeIdx; renderStep3Dynamic(); }
     const v = activeVideo(); if (!v || !v.analysis) return;
-    if (v.sceneMode && v.curPaletteId !== snap.paletteId && v.palettes && v.palettes[snap.paletteId]) { savePaletteState(v); loadPaletteState(v, snap.paletteId); }
-    if (v.analysis.snapshotsByK && v.analysis.snapshotsByK[snap.activeK]) { v.activeK = snap.activeK; v.analysis.representatives = v.analysis.snapshotsByK[snap.activeK].representatives; }
+    // 領域パレット（sceneMode でなくても curPaletteId が変わる）にも対応して切り替える
+    if (v.curPaletteId !== snap.paletteId && v.palettes && v.palettes[snap.paletteId]) { savePaletteState(v); loadPaletteState(v, snap.paletteId); }
+    if (snap.activeK === 0) { v.activeK = 0; } // 減色なし（代表色は保持したまま）
+    else if (v.analysis.snapshotsByK && v.analysis.snapshotsByK[snap.activeK]) { v.activeK = snap.activeK; v.analysis.representatives = v.analysis.snapshotsByK[snap.activeK].representatives; }
     v.confirmThreshold = snap.confirmThreshold;
     v.disabledKeys = new Set(snap.disabled);
     v.processedCache = new Map(); v.maskCache = new Map(); state.plotCache = null;
@@ -1896,13 +2679,14 @@ function selectScene(idx) {
   stopPlay();
   savePaletteState(v);
   v.activeScene = idx;
-  loadPaletteState(v, v.scenes[idx].paletteId);
+  loadPaletteState(v, effectivePaletteId(v, v.scenes[idx].paletteId));
   dom.sConfirm.max = Math.max(150, (v.confirmThreshold || 0) + 8);
   dom.sConfirm.value = v.confirmThreshold;
   dom.vConfirm.textContent = v.confirmThreshold;
   syncThresholdDockControls(v.confirmThreshold);
   updateConfStepperBounds(v.confirmThreshold);
   renderSceneTabs(v);
+  renderRegionTabs(v);
   syncPopupSceneTabs();
   renderKControl(v);
   renderPalette(v);
@@ -2210,13 +2994,47 @@ function drawActiveFrame(timeOverride) {
   const mCtx = dom.cvMask.getContext("2d", { willReadFrequently: true });
   sCtx.drawImage(dom.workVideo, 0, 0, dom.cvOrig.width, dom.cvOrig.height);
   const base = sCtx.getImageData(0, 0, dom.cvOrig.width, dom.cvOrig.height);
+  // 領域マップは「重ねて表示」と「プレビュー表示の黒塗り」で共用（このフレームで1回だけ計算）。
+  // vis=null は全領域表示（黒塗りなしの高速パス）。base は無加工のまま使う（マーカー・量子化の入力）。
+  const vis = masksActive(v) ? regionViewVis(v) : null;
+  const rmapPrev = masksActive(v) && (vis || state.maskOverlay)
+    ? regionMapForFrame(v, Math.floor(t * (v.fps || v.masks.fps || 30) + 1e-6), base.width, base.height)
+    : null;
+  const blackout = (data) => { // 表示OFFの領域を黒塗り（プレビュー専用・書き出しには影響しない）
+    if (!vis || !rmapPrev) return;
+    for (let p = 0, i = 0; p < rmapPrev.length; p += 1, i += 4) {
+      if (!vis[rmapPrev[p]]) { data[i] = 0; data[i + 1] = 0; data[i + 2] = 0; }
+    }
+  };
+  // 「マスクを重ねて表示」: 元動画キャンバスに各対象の領域を色付き半透明で重畳（背景はそのまま）。
+  if (masksActive(v) && (state.maskOverlay || vis)) {
+    const ov = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
+    const cols = v.masks.layers.map((L) => L.color || [255, 60, 60]);
+    const d = ov.data;
+    if (state.maskOverlay) {
+      for (let p = 0, i = 0; p < rmapPrev.length; p += 1, i += 4) {
+        const li = rmapPrev[p]; if (!li) continue;
+        const c = cols[li - 1];
+        d[i] = (d[i] * 0.55 + c[0] * 0.45) | 0;
+        d[i + 1] = (d[i + 1] * 0.55 + c[1] * 0.45) | 0;
+        d[i + 2] = (d[i + 2] * 0.55 + c[2] * 0.45) | 0;
+      }
+    }
+    blackout(d);
+    sCtx.putImageData(ov, 0, 0);
+  }
   const proc = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
-  reduceFrame(proc.data, reps, th, v.processedCache, proc.width, proc.height, {});
+  if (masksActive(v)) reduceFrameAt(v, proc.data, t, v.fps || v.masks.fps || 30, proc.width, proc.height, {}); // 領域別パレット（現在編集中の領域はライブ状態）
+  else if (v.activeK !== 0) reduceFrame(proc.data, reps, th, v.processedCache, proc.width, proc.height, {}); // activeK=0（減色なし）は素通し
   applyFrameMerges(proc.data, proc.width, proc.height, v, t); // confirmed STEP4 merges (color + region)
+  blackout(proc.data);
   pCtx.putImageData(proc, 0, 0);
   state.reducedFrameDirty = true; // the hover loupe re-snapshots the reduced canvas on the next move
   const mask = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
-  reduceFrame(mask.data, reps, th, v.maskCache, mask.width, mask.height, { maskOnly: true });
+  if (masksActive(v)) reduceFrameAt(v, mask.data, t, v.fps || v.masks.fps || 30, mask.width, mask.height, { maskOnly: true });
+  else if (v.activeK !== 0) reduceFrame(mask.data, reps, th, v.maskCache, mask.width, mask.height, { maskOnly: true });
+  else fillBlackRGB(mask.data); // 減色なし＝はみ出し画素は存在しない
+  blackout(mask.data);
   mCtx.putImageData(mask, 0, 0);
   updateSnapMarkerFromImageData(v, base.data);
   syncPreviewSeekControls();
@@ -2960,7 +3778,10 @@ function mpDraw(side, timeOverride) {
   // (passed in), not currentTime — otherwise the per-frame region mask lands a frame off
   // the moving object and appears to drift.
   const W = r.canvas.width, H = r.canvas.height, t = (timeOverride != null ? timeOverride : mp.video.currentTime) || 0;
-  reduceFrame(img.data, mp.reps, mp.threshold, mp.cache, W, H, { flat: true });
+  const vForMasks = activeVideo();
+  const mpOff = vForMasks && vForMasks.palettes && mp.scene && vForMasks.palettes[mp.scene.paletteId] && vForMasks.palettes[mp.scene.paletteId].activeK === 0;
+  if (vForMasks && masksActive(vForMasks)) reduceFrameAt(vForMasks, img.data, t, vForMasks.fps || vForMasks.masks.fps || 30, W, H, { flat: true }); // 領域別パレットの見た目と一致させる
+  else if (!mpOff) reduceFrame(img.data, mp.reps, mp.threshold, mp.cache, W, H, { flat: true }); // 減色なしシーンは素通し
   const v = activeVideo();
   // confirmed + previewed merges, applied in order so chained re-merges resolve fully
   if (v) applyFrameMerges(img.data, W, H, v, t, true);
@@ -3106,6 +3927,9 @@ function applyMergeSpotlight(data, outW, outH, sel, timeSec) {
 }
 function toggleMergeMode() {
   const v = activeVideo(); if (!v) return;
+  // 領域マスク（マスク別パレット）使用中の統合は v1 では非対応：統合は「クリックした色が属する
+  // 1つのパレット」を前提にしており、領域ごとに別パレットの合成画面では選択が曖昧になるため。
+  if (masksActive(v)) { flashMergeHint("領域マスク使用中は色統合を使えません（領域ごとのK・色OFFはSTEP3でできます）"); return; }
   if (anyRegionBusy(v)) { flashMergeHint("いま領域を計算中です…"); return; } // don't disturb the in-flight capture
   v.mergeMode = !v.mergeMode;
   if (v.mergeMode) { mpStop("L"); mpStop("R"); } // picking requires a still frame
@@ -4036,7 +4860,7 @@ async function exportSelected() {
 
   for (const v of sel) {
     if (state.cancelled) break;
-    if (v.sceneMode) savePaletteState(v); // flush current-scene edits so per-frame lookup is current
+    if (v.sceneMode || masksActive(v)) savePaletteState(v); // flush current-scene/領域 edits so per-frame lookup is current
     try {
       if (fmt.via === "webcodecs" && supportsWebCodecs()) {
         if (state.exportMode === "fast") await exportViaPlaybackCapture(v, fmt);
@@ -4126,6 +4950,9 @@ async function exportViaPlaybackCapture(v, fmt) {
   // failing at some cut phases). The seek-based encoder is static per frame (mediaTime == painted
   // frame), so it's frame-exact at boundaries. Per-frame palette correctness > playback speed here.
   if (v.sceneMode && v.scenes && v.scenes.length > 1) return exportViaWebCodecs(v, fmt);
+  // 領域マスク使用時も同じ理由でシーク型へ: マスクはフレーム毎に変わるため、mediaTime が1フレーム
+  // 遅れて報告されると領域とパレットの対応が1フレームずれる（縁のハロー）。
+  if (masksActive(v)) return exportViaWebCodecs(v, fmt);
   const { Muxer, ArrayBufferTarget } = await import(`./vendor/webm-muxer/webm-muxer.js?v=${APP_VERSION}`);
   resetWorkVideo();
   dom.workVideo.preload = "auto";
@@ -4168,8 +4995,7 @@ async function exportViaPlaybackCapture(v, fmt) {
     ctx.drawImage(dom.workVideo, 0, 0, width, height);
     const img = ctx.getImageData(0, 0, width, height);
     const mt = Number.isFinite(mediaTimeSec) ? mediaTimeSec : dom.workVideo.currentTime;
-    const pal = paletteStateForFrame(v, mt, v.fps);
-    reduceFrame(img.data, pal.reps, pal.th, pal.cache, width, height, {});
+    reduceFrameAt(v, img.data, mt, v.fps, width, height, {}); // マスク使用時は領域別パレット
     applyFrameMerges(img.data, width, height, v, mt); // confirmed STEP4 merges (color + region)
     ctx.putImageData(img, 0, 0);
     const frame = new VideoFrame(dom.exportCanvas, { timestamp: tsUs });
@@ -4297,8 +5123,7 @@ async function exportViaWebCodecs(v, fmt) {
       await seekVideo(dom.workVideo, at);
       ctx.drawImage(dom.workVideo, 0, 0, width, height);
       const img = ctx.getImageData(0, 0, width, height);
-      const pal = paletteStateForFrame(v, at, v.fps);
-      reduceFrame(img.data, pal.reps, pal.th, pal.cache, width, height, {});
+      reduceFrameAt(v, img.data, at, v.fps, width, height, {}); // マスク使用時は領域別パレット
       applyFrameMerges(img.data, width, height, v, at); // confirmed STEP4 merges (color + region)
       ctx.putImageData(img, 0, 0);
       const frame = new VideoFrame(dom.exportCanvas, { timestamp: i * usPerFrame, duration: usPerFrame });
@@ -4357,8 +5182,7 @@ async function exportViaFFmpeg(v, fmt) {
     await seekVideo(dom.workVideo, at);
     ctx.drawImage(dom.workVideo, 0, 0, width, height);
     const img = ctx.getImageData(0, 0, width, height);
-    const pal = paletteStateForFrame(v, at, v.fps);
-    reduceFrame(img.data, pal.reps, pal.th, pal.cache, width, height, {});
+    reduceFrameAt(v, img.data, at, v.fps, width, height, {}); // マスク使用時は領域別パレット
     applyFrameMerges(img.data, width, height, v, at); // confirmed STEP4 merges (color + region)
     ctx.putImageData(img, 0, 0);
     const blob = await new Promise((res) => dom.exportCanvas.toBlob(res, "image/png"));

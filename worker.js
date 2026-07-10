@@ -27,11 +27,18 @@ function analyze(payload) {
   const settings = payload.settings || {};
   const first = new Uint8ClampedArray(payload.firstBuffer);
   const last = new Uint8ClampedArray(payload.lastBuffer);
-  const totalPixels = first.length / 4 + last.length / 4;
+  // 任意の領域マスク（1画素=1バイト、1=集計対象）。マスク別パレット分析で使う。無ければ全画素。
+  const firstMask = payload.firstMaskBuffer ? new Uint8Array(payload.firstMaskBuffer) : null;
+  const lastMask = payload.lastMaskBuffer ? new Uint8Array(payload.lastMaskBuffer) : null;
+  const masks = firstMask || lastMask ? [firstMask, lastMask] : null;
+  const totalPixels = masks
+    ? (firstMask ? firstMask.reduce((s, m) => s + (m ? 1 : 0), 0) : first.length / 4)
+      + (lastMask ? lastMask.reduce((s, m) => s + (m ? 1 : 0), 0) : last.length / 4)
+    : first.length / 4 + last.length / 4;
   const bucketBits = settings.bucketBits || DEFAULT_BUCKET_BITS;
 
   postProgress("histogram", 0.05, "Bucketing colors");
-  const buckets = buildBucketCandidates([first, last], bucketBits);
+  const buckets = buildBucketCandidates([first, last], bucketBits, masks);
   const histogram = buckets.candidates;
   const uniqueColors = histogram.length;
   if (!uniqueColors) throw new Error("No colors were available for palette analysis");
@@ -94,12 +101,15 @@ function analyze(payload) {
   };
 }
 
-function buildBucketCandidates(buffers, bucketBits) {
+function buildBucketCandidates(buffers, bucketBits, masks) {
   const shift = 8 - Math.max(1, Math.min(8, bucketBits));
   const counts = new Map();
 
-  for (const data of buffers) {
+  for (let b = 0; b < buffers.length; b += 1) {
+    const data = buffers[b];
+    const mask = masks ? masks[b] : null;
     for (let index = 0; index < data.length; index += 4) {
+      if (mask && !mask[index >> 2]) continue; // 領域外の画素は集計しない
       const r = data[index] >> shift;
       const g = data[index + 1] >> shift;
       const b = data[index + 2] >> shift;
@@ -132,16 +142,30 @@ function buildBucketCandidates(buffers, bucketBits) {
   return { candidates };
 }
 
+// 計算するKの列: 40までは全整数（従来どおり）、40超は間引きラダー（44,48,…,1024）。
+// 高Kは1回のk-meansが重いので、密に計算せず飛び飛びに用意する（STEP3のスライダーは
+// availableK の最も近い値へスナップするため、間引きでも操作感は保たれる）。
+// 実質上限は候補色数（maxCandidates=1200）。
+function clusterKList(minClusters, maxClusters) {
+  const ks = [];
+  for (let k = minClusters; k <= Math.min(40, maxClusters); k += 1) ks.push(k);
+  const LADDER = [44, 48, 52, 56, 64, 72, 80, 96, 112, 128, 144, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024];
+  for (const k of LADDER) if (k > 40 && k >= minClusters && k <= maxClusters) ks.push(k);
+  if (ks[ks.length - 1] !== maxClusters && maxClusters > 40) ks.push(maxClusters);
+  return ks;
+}
+
 function buildKMeansSnapshots(colors, weights, minClusters, maxClusters, settings) {
   const snapshots = new Map();
   const rows = [];
   let prevSse = null;
-  const totalK = maxClusters - minClusters + 1;
+  const kList = clusterKList(minClusters, maxClusters);
+  const totalK = kList.length;
   postProgress("cluster", 0.16, "Preparing k-means seeds");
   const seedCenters = initCenterSequence(colors, weights, maxClusters);
 
-  for (let k = minClusters; k <= maxClusters; k += 1) {
-    const kIndex = k - minClusters;
+  for (let kIndex = 0; kIndex < totalK; kIndex += 1) {
+    const k = kList[kIndex];
     const start = 0.20 + (kIndex / totalK) * 0.70;
     const end = 0.20 + ((kIndex + 1) / totalK) * 0.70;
     postProgress("cluster", start, `Weighted k-means: ${k} colors`);
@@ -229,23 +253,27 @@ function initCenterSequence(colors, weights, maxK) {
     if (weights[i] > weights[first]) first = i;
   }
 
+  // 最遠点貪欲。既存センターまでの最近距離を配列で増分更新する（新センター1つにつき O(n)）。
+  // 全センター総当たりの再計算（O(n·k²)）だと maxK=1024 で数億演算になり数秒詰まる。選択結果は同一。
   const centers = [colors[first].slice()];
+  const minDistSq = new Float64Array(colors.length);
+  for (let i = 0; i < colors.length; i += 1) minDistSq[i] = colorDistanceSq(colors[i], centers[0]);
   while (centers.length < maxK) {
     let bestIndex = 0;
     let bestScore = -1;
     for (let i = 0; i < colors.length; i += 1) {
-      let nearestSq = Infinity;
-      for (const center of centers) {
-        const d = colorDistanceSq(colors[i], center);
-        if (d < nearestSq) nearestSq = d;
-      }
-      const score = nearestSq * Math.sqrt(Math.max(1, weights[i]));
+      const score = minDistSq[i] * Math.sqrt(Math.max(1, weights[i]));
       if (score > bestScore) {
         bestScore = score;
         bestIndex = i;
       }
     }
-    centers.push(colors[bestIndex].slice());
+    const c = colors[bestIndex].slice();
+    centers.push(c);
+    for (let i = 0; i < colors.length; i += 1) {
+      const d = colorDistanceSq(colors[i], c);
+      if (d < minDistSq[i]) minDistSq[i] = d;
+    }
   }
   return centers;
 }
@@ -298,6 +326,11 @@ function nearestColorIndex(color, palette) {
 function selectClusterCount(rows, settings) {
   if (!rows.length) throw new Error("No cluster-count candidates were available");
   const minDistance = settings.minRepresentativeDistance || 0;
+  // 自動K（膝法）は従来レンジ（K≤40）から選ぶ: 40超の間引きラダーを膝の弦計算に混ぜると
+  // 長い平坦テールで弦の端点が動き、自動選択が変わってしまう。高Kは手動スライダー専用。
+  const allRows = rows;
+  const autoRows = rows.filter((r) => r.k <= 40);
+  if (autoRows.length >= 2) rows = autoRows;
   // Candidate Ks: palettes whose two closest reps are at least `minDistance` apart (the "merge
   // similar colors" strength) and that aren't degenerate (duplicate reps). Fall back progressively
   // so a tiny histogram still yields a choice.
@@ -335,7 +368,7 @@ function selectClusterCount(rows, settings) {
     chosen = pool[Math.min(pool.length - 1, Math.max(0, Math.round(pool.length * 0.4)))];
   }
 
-  const rankedRows = rows.slice().sort((a, b) => {
+  const rankedRows = allRows.slice().sort((a, b) => {
     if (b.relativeGap !== a.relativeGap) return b.relativeGap - a.relativeGap;
     if (b.absoluteGap !== a.absoluteGap) return b.absoluteGap - a.absoluteGap;
     return b.k - a.k;
