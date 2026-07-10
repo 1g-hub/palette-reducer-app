@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20260710-76">
+    <link rel="stylesheet" href="./styles.css?v=20260710-77">
   </head>
   <body>
     <div class="page">
@@ -365,6 +365,13 @@
                     <span id="previewTime" class="preview-time">0:00 / 0:00</span>
                   </div>
 
+                  <div id="regionEditRow" hidden>
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 0">
+                      <span class="preview-control-label" title="どの領域のパレット（色数・しきい値・色OFF）を編集するかを選びます">パレット編集</span>
+                      <div id="regionEditTabs" class="scene-tabs" style="margin:0"></div>
+                    </div>
+                  </div>
+
                   <div class="threshold-panel">
                     <div class="slider-top">
                       <span class="slider-name strong">色のしきい値を調整する</span>
@@ -594,7 +601,7 @@
     <!-- hidden work elements -->
     <video id="workVideo" muted playsinline preload="auto"></video>
     <canvas id="exportCanvas" class="offscreen"></canvas>
-    <script src="./icm.js?v=20260710-76"></script>
-    <script src="./app.js?v=20260710-76"></script>
+    <script src="./icm.js?v=20260710-77"></script>
+    <script src="./app.js?v=20260710-77"></script>
   </body>
 </html>

@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260710-76";
+const APP_VERSION = "20260710-77";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -41,7 +41,7 @@ const dom = {
   reassure: $("reassure"), transcodeNote: $("transcodeNote"), transcodeText: $("transcodeText"),
   // step3
   backToStep2: $("backToStep2"), playBtn: $("playBtn"), previewRateSelect: $("previewRateSelect"),
-  step3Tabs: $("step3Tabs"), sceneTabs: $("sceneTabs"), regionTabs: $("regionTabs"), activeName: $("activeName"),
+  step3Tabs: $("step3Tabs"), sceneTabs: $("sceneTabs"), regionTabs: $("regionTabs"), regionEditRow: $("regionEditRow"), regionEditTabs: $("regionEditTabs"), activeName: $("activeName"),
   maskJsonInput: $("maskJsonInput"), maskJsonStatus: $("maskJsonStatus"), maskJsonClear: $("maskJsonClear"),
   maskOverlayWrap: $("maskOverlayWrap"), maskOverlayToggle: $("maskOverlayToggle"),
   maskPreviewBtn: $("maskPreviewBtn"), maskPreviewBox: $("maskPreviewBox"), maskPreviewCanvas: $("maskPreviewCanvas"),
@@ -250,6 +250,7 @@ function init() {
   dom.step3Tabs.addEventListener("click", onTabClick);
   dom.sceneTabs.addEventListener("click", onSceneTabClick);
   if (dom.regionTabs) dom.regionTabs.addEventListener("click", onRegionTabClick);
+  if (dom.regionEditTabs) dom.regionEditTabs.addEventListener("click", onRegionEditTabClick);
   if (dom.maskJsonInput) dom.maskJsonInput.addEventListener("change", (e) => { const fs = [...(e.target.files || [])]; onMaskFilesPicked(fs); e.target.value = ""; });
   if (dom.maskJsonClear) dom.maskJsonClear.addEventListener("click", clearMaskJson);
   if (dom.maskOverlayToggle) dom.maskOverlayToggle.addEventListener("change", () => { state.maskOverlay = dom.maskOverlayToggle.checked; if (!state.playing) drawActiveFrame(); });
@@ -1659,30 +1660,75 @@ function closeMaskPreview() {
   mpv = null;
 }
 
-/* ---- STEP3: 領域タブ（背景／各対象のパレットを切り替えて編集） ---- */
+/* ---- STEP3: 領域チップ2種 ----
+   上（#regionTabs）＝「プレビュー表示」の複数選択: チェックした領域だけカラー表示し、外した領域は
+   3つのプレビュー（元動画/減色後/はみ出しマップ）で黒塗り。0個も可。既定は全選択。表示専用で
+   書き出しには影響しない。
+   シークバー下（#regionEditTabs）＝「パレット編集」の単一選択: どの領域のK/しきい値/色OFFを
+   編集するか（従来の領域タブの役割を移設）。 */
+function maskChips(v) {
+  const chips = [{ rk: "bg", name: "背景", color: null }];
+  for (const L of v.masks.layers) chips.push({ rk: "L" + L.id, name: L.name || ("対象" + L.id), color: L.color });
+  return chips;
+}
+function maskChipDot(c) {
+  const dotBg = c.color ? `rgb(${c.color[0]},${c.color[1]},${c.color[2]})` : "linear-gradient(135deg,#8a93a6,#cdd4e0)";
+  return `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:baseline;background:${dotBg}"></span>`;
+}
+function ensureMaskViewSel(v) {
+  if (!v.maskViewSel) v.maskViewSel = new Set(["bg", ...v.masks.layers.map((L) => "L" + L.id)]);
+  return v.maskViewSel;
+}
 function renderRegionTabs(v) {
   if (!dom.regionTabs) return;
   const active = !!(v && masksActive(v) && v.palettes);
   if (dom.maskOverlayWrap) { dom.maskOverlayWrap.hidden = !active; if (dom.maskOverlayToggle) dom.maskOverlayToggle.checked = !!state.maskOverlay; }
-  if (!active) { dom.regionTabs.hidden = true; dom.regionTabs.innerHTML = ""; return; }
-  const sceneId = v.sceneMode && v.scenes && v.scenes[v.activeScene] ? v.scenes[v.activeScene].paletteId : "only";
-  const cur = v.maskRegionSel || "bg";
-  const chips = [{ rk: "bg", name: "背景", color: null }];
-  for (const L of v.masks.layers) chips.push({ rk: "L" + L.id, name: L.name || ("対象" + L.id), color: L.color });
+  if (!active) { dom.regionTabs.hidden = true; dom.regionTabs.innerHTML = ""; renderRegionEditTabs(v); return; }
+  const sel = ensureMaskViewSel(v);
   dom.regionTabs.hidden = false;
-  dom.regionTabs.innerHTML = chips.map((c) => {
-    const exists = c.rk === "bg" || !!v.palettes[regionPaletteIdOf(sceneId, c.rk)];
-    const cls = c.rk === cur ? "scene-tab active" : "scene-tab";
-    const dotBg = c.color ? `rgb(${c.color[0]},${c.color[1]},${c.color[2]})` : "linear-gradient(135deg,#8a93a6,#cdd4e0)";
-    const dot = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:baseline;background:${dotBg}"></span>`;
-    const note = exists ? "" : `<span class="scene-time">このシーンに無し</span>`;
-    return `<button class="${cls}" data-region="${c.rk}" type="button"${exists ? "" : " disabled"}>${dot}<span class="scene-name">${esc(c.name)}</span>${note}</button>`;
+  dom.regionTabs.innerHTML = `<span class="seg-note" style="margin:0 6px 0 0;align-self:center" title="チェックした領域だけをカラー表示します（外した領域は黒塗り・書き出しには影響しません）">プレビュー表示：</span>` + maskChips(v).map((c) => {
+    const on = sel.has(c.rk);
+    const cls = on ? "scene-tab active" : "scene-tab";
+    return `<button class="${cls}" data-region="${c.rk}" type="button" style="${on ? "" : "opacity:.55"}">${maskChipDot(c)}<span class="scene-name">${on ? "✓ " : ""}${esc(c.name)}</span></button>`;
   }).join("");
+  renderRegionEditTabs(v);
 }
 function onRegionTabClick(e) {
   const btn = e.target.closest("[data-region]");
+  if (!btn) return;
+  const v = activeVideo();
+  if (!v || !masksActive(v)) return;
+  const sel = ensureMaskViewSel(v), rk = btn.dataset.region;
+  if (sel.has(rk)) sel.delete(rk); else sel.add(rk); // 0個も許可
+  renderRegionTabs(v);
+  if (!state.playing) drawActiveFrame();
+}
+function renderRegionEditTabs(v) {
+  if (!dom.regionEditTabs) return;
+  const active = !!(v && masksActive(v) && v.palettes);
+  if (dom.regionEditRow) dom.regionEditRow.hidden = !active;
+  if (!active) { dom.regionEditTabs.innerHTML = ""; return; }
+  const sceneId = v.sceneMode && v.scenes && v.scenes[v.activeScene] ? v.scenes[v.activeScene].paletteId : "only";
+  const cur = v.maskRegionSel || "bg";
+  dom.regionEditTabs.innerHTML = maskChips(v).map((c) => {
+    const exists = c.rk === "bg" || !!v.palettes[regionPaletteIdOf(sceneId, c.rk)];
+    const cls = c.rk === cur ? "scene-tab active" : "scene-tab";
+    const note = exists ? "" : `<span class="scene-time">このシーンに無し</span>`;
+    return `<button class="${cls}" data-region-edit="${c.rk}" type="button"${exists ? "" : " disabled"}>${maskChipDot(c)}<span class="scene-name">${esc(c.name)}</span>${note}</button>`;
+  }).join("");
+}
+function onRegionEditTabClick(e) {
+  const btn = e.target.closest("[data-region-edit]");
   if (!btn || btn.disabled) return;
-  selectRegion(btn.dataset.region);
+  selectRegion(btn.dataset.regionEdit);
+}
+// プレビューの黒塗り判定: regionMap の値（0=背景, i=レイヤi）→ 表示ON/OFF。全部ONなら null（高速パス）。
+function regionViewVis(v) {
+  const sel = ensureMaskViewSel(v);
+  const vis = new Uint8Array(v.masks.layers.length + 1);
+  vis[0] = sel.has("bg") ? 1 : 0;
+  v.masks.layers.forEach((L, i) => { vis[i + 1] = sel.has("L" + L.id) ? 1 : 0; });
+  return vis.every((x) => x) ? null : vis;
 }
 function selectRegion(rk) {
   const v = activeVideo();
@@ -1696,7 +1742,7 @@ function selectRegion(rk) {
   dom.vConfirm.textContent = v.confirmThreshold;
   syncThresholdDockControls(v.confirmThreshold);
   updateConfStepperBounds(v.confirmThreshold);
-  renderRegionTabs(v);
+  renderRegionEditTabs(v);
   renderKControl(v);
   renderPalette(v);
   renderMetrics(v);
@@ -2017,6 +2063,7 @@ function applyMasksToVideo(v) {
     showToast("info", `${v.name}: マスク（${m.W}×${m.H}）を動画（${v.videoWidth}×${v.videoHeight}）に合わせて伸縮して使います`);
   }
   v.masks = { name: m.name, fps: m.fps, W: m.W, H: m.H, total: m.total, layers: m.layers, frames: m.frames, framesRegion: m.framesRegion || null, _regionRuns: new Map(), _layerFrames: null };
+  v.maskViewSel = new Set(["bg", ...m.layers.map((L) => "L" + L.id)]); // プレビュー表示の複数選択（既定＝全部）
 }
 
 function stopAnalyze() {
@@ -2912,32 +2959,46 @@ function drawActiveFrame(timeOverride) {
   const mCtx = dom.cvMask.getContext("2d", { willReadFrequently: true });
   sCtx.drawImage(dom.workVideo, 0, 0, dom.cvOrig.width, dom.cvOrig.height);
   const base = sCtx.getImageData(0, 0, dom.cvOrig.width, dom.cvOrig.height);
+  // 領域マップは「重ねて表示」と「プレビュー表示の黒塗り」で共用（このフレームで1回だけ計算）。
+  // vis=null は全領域表示（黒塗りなしの高速パス）。base は無加工のまま使う（マーカー・量子化の入力）。
+  const vis = masksActive(v) ? regionViewVis(v) : null;
+  const rmapPrev = masksActive(v) && (vis || state.maskOverlay)
+    ? regionMapForFrame(v, Math.floor(t * (v.fps || v.masks.fps || 30) + 1e-6), base.width, base.height)
+    : null;
+  const blackout = (data) => { // 表示OFFの領域を黒塗り（プレビュー専用・書き出しには影響しない）
+    if (!vis || !rmapPrev) return;
+    for (let p = 0, i = 0; p < rmapPrev.length; p += 1, i += 4) {
+      if (!vis[rmapPrev[p]]) { data[i] = 0; data[i + 1] = 0; data[i + 2] = 0; }
+    }
+  };
   // 「マスクを重ねて表示」: 元動画キャンバスに各対象の領域を色付き半透明で重畳（背景はそのまま）。
-  // どの画素がどの領域として扱われているかの確認用。判定・書き出しには影響しない（base は無加工のまま使う）。
-  if (masksActive(v) && state.maskOverlay) {
-    const fpsOv = v.fps || v.masks.fps || 30;
-    const rmap = regionMapForFrame(v, Math.floor(t * fpsOv + 1e-6), base.width, base.height);
+  if (masksActive(v) && (state.maskOverlay || vis)) {
     const ov = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
     const cols = v.masks.layers.map((L) => L.color || [255, 60, 60]);
     const d = ov.data;
-    for (let p = 0, i = 0; p < rmap.length; p += 1, i += 4) {
-      const li = rmap[p]; if (!li) continue;
-      const c = cols[li - 1];
-      d[i] = (d[i] * 0.55 + c[0] * 0.45) | 0;
-      d[i + 1] = (d[i + 1] * 0.55 + c[1] * 0.45) | 0;
-      d[i + 2] = (d[i + 2] * 0.55 + c[2] * 0.45) | 0;
+    if (state.maskOverlay) {
+      for (let p = 0, i = 0; p < rmapPrev.length; p += 1, i += 4) {
+        const li = rmapPrev[p]; if (!li) continue;
+        const c = cols[li - 1];
+        d[i] = (d[i] * 0.55 + c[0] * 0.45) | 0;
+        d[i + 1] = (d[i + 1] * 0.55 + c[1] * 0.45) | 0;
+        d[i + 2] = (d[i + 2] * 0.55 + c[2] * 0.45) | 0;
+      }
     }
+    blackout(d);
     sCtx.putImageData(ov, 0, 0);
   }
   const proc = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
   if (masksActive(v)) reduceFrameAt(v, proc.data, t, v.fps || v.masks.fps || 30, proc.width, proc.height, {}); // 領域別パレット（現在編集中の領域はライブ状態）
   else reduceFrame(proc.data, reps, th, v.processedCache, proc.width, proc.height, {});
   applyFrameMerges(proc.data, proc.width, proc.height, v, t); // confirmed STEP4 merges (color + region)
+  blackout(proc.data);
   pCtx.putImageData(proc, 0, 0);
   state.reducedFrameDirty = true; // the hover loupe re-snapshots the reduced canvas on the next move
   const mask = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
   if (masksActive(v)) reduceFrameAt(v, mask.data, t, v.fps || v.masks.fps || 30, mask.width, mask.height, { maskOnly: true });
   else reduceFrame(mask.data, reps, th, v.maskCache, mask.width, mask.height, { maskOnly: true });
+  blackout(mask.data);
   mCtx.putImageData(mask, 0, 0);
   updateSnapMarkerFromImageData(v, base.data);
   syncPreviewSeekControls();
