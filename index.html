@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20260710-75">
+    <link rel="stylesheet" href="./styles.css?v=20260710-76">
   </head>
   <body>
     <div class="page">
@@ -117,6 +117,7 @@
                     <button id="maskPreviewClose" type="button" class="btn-ghost" style="margin-left:auto">閉じる</button>
                   </div>
                   <div><span id="maskPreviewInfo" class="seg-note" style="margin:4px 0 0;display:inline-block"></span></div>
+                  <p class="seg-note" style="margin:4px 0 0">※ マスクのズレを防ぐため1コマずつ確実に表示する方式です。そのため環境によって再生速度は実際より遅くなることがあります（その場合もコマ落ちはせず、全コマを順に表示します）。</p>
                 </div>
 
                 <button id="analyzeBtn" type="button" class="btn-primary block big"><span class="ic">✦</span> <span id="analyzeBtnLabel">色を分析する</span></button>
@@ -593,7 +594,7 @@
     <!-- hidden work elements -->
     <video id="workVideo" muted playsinline preload="auto"></video>
     <canvas id="exportCanvas" class="offscreen"></canvas>
-    <script src="./icm.js?v=20260710-75"></script>
-    <script src="./app.js?v=20260710-75"></script>
+    <script src="./icm.js?v=20260710-76"></script>
+    <script src="./app.js?v=20260710-76"></script>
   </body>
 </html>
