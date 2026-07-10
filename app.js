@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260710-78";
+const APP_VERSION = "20260710-79";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -1432,17 +1432,17 @@ function imageFileToRegionRuns(bmp, W, H) {
 
 async function buildMasksFromImages(pngs, manifest, srcName) {
   const sorted = pngs.slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  const hasF = sorted.some((f) => maskFrameFromName(f.name) != null);
   const multiObj = sorted.some((f) => maskObjFromName(f.name) != null);
-  let W = 0, H = 0, maxF = 0, count = 0, seq = 0;
-  const framesRegion = {}, layerSet = new Set();
+  let W = 0, H = 0, maxF = 0, count = 0;
+  const framesRegion = {}, layerSet = new Set(), seqBy = {};
   for (const file of sorted) {
     let bmp = null; try { bmp = await createImageBitmap(file); } catch (e) { continue; }
     if (!W) { W = bmp.width; H = bmp.height; }
-    let f = hasF ? maskFrameFromName(file.name) : seq;
-    if (f == null) f = seq;
-    seq += 1;
     const lid = multiObj ? (maskObjFromName(file.name) != null ? maskObjFromName(file.name) : 1) : 1;
+    // f番号なしの連番は「対象ごとに」0,1,2…と振る（全体通しで振ると、複数対象を別々の連番で
+    // 書き出したとき2つ目以降の対象の開始フレームがずれる）。名前順は数値対応ソート済み。
+    let f = maskFrameFromName(file.name);
+    if (f == null) { const k = String(lid); f = seqBy[k] = (seqBy[k] == null ? 0 : seqBy[k] + 1); }
     const runs = imageFileToRegionRuns(bmp, W, H);
     if (bmp.close) bmp.close();
     count += 1;
