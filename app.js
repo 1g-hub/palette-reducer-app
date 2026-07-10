@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260709-70";
+const APP_VERSION = "20260710-71";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -43,6 +43,7 @@ const dom = {
   backToStep2: $("backToStep2"), playBtn: $("playBtn"), previewRateSelect: $("previewRateSelect"),
   step3Tabs: $("step3Tabs"), sceneTabs: $("sceneTabs"), regionTabs: $("regionTabs"), activeName: $("activeName"),
   maskJsonInput: $("maskJsonInput"), maskJsonStatus: $("maskJsonStatus"), maskJsonClear: $("maskJsonClear"),
+  maskOverlayWrap: $("maskOverlayWrap"), maskOverlayToggle: $("maskOverlayToggle"),
   cvOrig: $("cvOrig"), cvReduced: $("cvReduced"), cvMask: $("cvMask"),
   previewSeek: $("previewSeek"), previewTime: $("previewTime"), cutMarkers: $("cutMarkers"),
   previewLargeBtn: $("previewLargeBtn"), frameBackBtn: $("frameBackBtn"), frameFwdBtn: $("frameFwdBtn"),
@@ -125,7 +126,10 @@ const EXPORT_FORMATS = [
     args: ["-c:v", "libvpx-vp9", "-b:v", "500k", ...VF_FULL("yuv420p"), ...FULLRANGE_709],
     desc: "WebMで容量を抑えたいとき向け。画質は落ちます。" },
 ];
-const DEFAULT_VALS = { ana: 540, prev: 360, anaFull: true, prevFull: true, maxc: 1200, mindist: 12, mink: 4, maxk: 40, fixed: 60, margin: 5, targetScenes: 8, subshotSec: 0, cutSensitivity: 0.18, detectStride: 3, minShotSec: 1.0 };
+// maxk 256: 40超は worker が間引きラダー（44,48,…,256）で計算。自動K（膝法）は従来どおり
+// K≤40 から選ぶので既存挙動は不変。高Kは STEP3 のスライダーで手動選択（実質上限なし——
+// 代表色は最大 maxc=1200 の候補色から選ぶため、これ以上は減色として意味を持たない）。
+const DEFAULT_VALS = { ana: 540, prev: 360, anaFull: true, prevFull: true, maxc: 1200, mindist: 12, mink: 4, maxk: 256, fixed: 60, margin: 5, targetScenes: 8, subshotSec: 0, cutSensitivity: 0.18, detectStride: 3, minShotSec: 1.0 };
 
 // 高品質(ICM): when enabled, recoloring (preview + export) uses icm.js's label-field optimization +
 // detail protection instead of nearest-color. Global (not per-scene); read at every recolor site.
@@ -136,7 +140,8 @@ const state = {
   wholeVideo: true, // true = whole-video (single palette, no scene split); false = scene-split mode
   sceneCutMode: "auto",
   sceneReview: null,
-  masksData: null, // 輪郭ラボ mainapp.json（パース済み）。分析時に各動画へ適用される
+  masksData: null, // 領域マスク（輪郭ラボJSON または ZIP/連番PNG から構築）。分析時に各動画へ適用される
+  maskOverlay: false, // STEP3「マスクを重ねて表示」
 
   icm: { ...ICM_DEFAULTS },
   videos: [],
@@ -242,8 +247,9 @@ function init() {
   dom.step3Tabs.addEventListener("click", onTabClick);
   dom.sceneTabs.addEventListener("click", onSceneTabClick);
   if (dom.regionTabs) dom.regionTabs.addEventListener("click", onRegionTabClick);
-  if (dom.maskJsonInput) dom.maskJsonInput.addEventListener("change", (e) => { const f = e.target.files && e.target.files[0]; onMaskJsonPicked(f); e.target.value = ""; });
+  if (dom.maskJsonInput) dom.maskJsonInput.addEventListener("change", (e) => { const fs = [...(e.target.files || [])]; onMaskFilesPicked(fs); e.target.value = ""; });
   if (dom.maskJsonClear) dom.maskJsonClear.addEventListener("click", clearMaskJson);
+  if (dom.maskOverlayToggle) dom.maskOverlayToggle.addEventListener("change", () => { state.maskOverlay = dom.maskOverlayToggle.checked; if (!state.playing) drawActiveFrame(); });
   dom.plotZoomIn.addEventListener("click", () => zoomPlot(1.25));
   dom.plotZoomOut.addEventListener("click", () => zoomPlot(0.8));
   dom.plotReset.addEventListener("click", resetPlotView);
@@ -1168,7 +1174,7 @@ function effectivePaletteId(v, sceneId) {
 
 // mainapp.json のパース＋検証（構造・寸法・RLE健全性の要点のみ）。throw = 不正ファイル。
 function parseMainappJson(text, fileName) {
-  const j = JSON.parse(text);
+  const j = typeof text === "string" ? JSON.parse(text) : text;
   if (j.format !== "contour-lab-mainapp" || j.version !== 1) throw new Error("形式が違います（contour-lab-mainapp v1 ではありません）");
   if (!(j.W > 0 && j.H > 0 && j.total > 0) || !Array.isArray(j.layers) || !j.layers.length || !j.frames) throw new Error("必須フィールドが不足しています");
   const N = j.W * j.H;
@@ -1188,7 +1194,7 @@ function parseMainappJson(text, fileName) {
   const perLayer = {};
   for (const L of j.layers) perLayer[L.id] = 0;
   for (const rec of Object.values(j.frames)) for (const lidS of Object.keys(rec)) if (lidS in perLayer) perLayer[lidS] += 1;
-  return { name: fileName || "", fps: j.fps || 30, W: j.W, H: j.H, total: j.total, layers: j.layers, scenes: j.scenes || [], frames: j.frames, frameCount, perLayer };
+  return { name: fileName || "", fps: j.fps || 30, W: j.W, H: j.H, total: j.total, layers: j.layers, scenes: j.scenes || [], frames: j.frames, framesRegion: null, frameCount, perLayer };
 }
 
 // 輪郭線→塗り（even-odd）。contour-lab の computeFill の忠実な移植（純関数）:
@@ -1228,8 +1234,10 @@ function maskComputeFill(lines, W, H) {
 }
 
 // フレーム f の各レイヤの「領域（線∪塗り）」RLEを遅延計算してキャッシュ（線RLE→塗り復元は1回だけ）。
+// 連番PNG直接取込（framesRegion）は最初から塗り済み領域なのでそのまま返す。
 function masksRegionRuns(v, f) {
   const m = v.masks;
+  if (m.framesRegion) return m.framesRegion[String(f)] || {};
   if (!m._regionRuns) m._regionRuns = new Map();
   const hit = m._regionRuns.get(f);
   if (hit) return hit;
@@ -1360,19 +1368,120 @@ function processPixelsRegional(data, rmap, states, maskOnly) {
   }
 }
 
-/* ---- STEP2: マスクJSON読込UI ---- */
-async function onMaskJsonPicked(file) {
-  if (!file) return;
+/* ---- STEP2: マスク読込UI（輪郭ラボJSON / ZIP / 連番PNG を直接受け付ける） ----
+   連番PNGルート: クリスタ等で描いた「白=対象・黒/透明=背景」の2値マスク画像をそのまま読む。
+   ファイル名の f##### がフレーム番号（無ければ名前順に 0,1,2,…）。L{n}/obj{n} で複数対象を
+   色分け（無ければ全部「対象1」）。ZIP はその場で展開。manifest.json があれば色/名前/fpsを反映。 */
+async function appInflateRaw(bytes) {
+  const ds = new DecompressionStream("deflate-raw");
+  const stream = new Blob([bytes]).stream().pipeThrough(ds);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+async function appUnzip(buf) {
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  let eocd = -1; for (let i = buf.length - 22; i >= 0; i--) { if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; } }
+  if (eocd < 0) throw new Error("ZIPではありません");
+  const count = dv.getUint16(eocd + 10, true); let off = dv.getUint32(eocd + 16, true); const out = [];
+  for (let n = 0; n < count; n++) {
+    if (dv.getUint32(off, true) !== 0x02014b50) break;
+    const method = dv.getUint16(off + 10, true), compSize = dv.getUint32(off + 20, true);
+    const nameLen = dv.getUint16(off + 28, true), extraLen = dv.getUint16(off + 30, true), commentLen = dv.getUint16(off + 32, true), lho = dv.getUint32(off + 42, true);
+    const name = new TextDecoder().decode(buf.subarray(off + 46, off + 46 + nameLen));
+    const lNameLen = dv.getUint16(lho + 26, true), lExtraLen = dv.getUint16(lho + 28, true), dataStart = lho + 30 + lNameLen + lExtraLen;
+    const comp = buf.subarray(dataStart, dataStart + compSize);
+    let bytes; if (method === 0) bytes = comp.slice(); else if (method === 8) bytes = await appInflateRaw(comp); else throw new Error("未対応の圧縮方式 " + method);
+    if (!name.endsWith("/")) out.push({ name, bytes });
+    off += 46 + nameLen + extraLen + commentLen;
+  }
+  return out;
+}
+const maskFrameFromName = (name) => { const m = /f(\d{3,6})/.exec(name); return m ? +m[1] : null; };
+const maskObjFromName = (name) => { const m = /(?:^|[^a-z0-9])L(\d+)[_.]/i.exec(name) || /obj(?:ect)?[_-]?(\d+)/i.exec(name); return m ? +m[1] : null; };
+
+// 画像1枚 →「マスク＝不透明かつ明るい画素」の線形RLE（白黒2値マット。輪郭ラボの取込と同じ判定）。
+let _maskCanvas = null;
+function imageFileToRegionRuns(bmp, W, H) {
+  if (!_maskCanvas || _maskCanvas.width !== W || _maskCanvas.height !== H) { _maskCanvas = document.createElement("canvas"); _maskCanvas.width = W; _maskCanvas.height = H; }
+  const ctx = _maskCanvas.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, W, H);
+  ctx.drawImage(bmp, 0, 0, W, H);
+  const d = ctx.getImageData(0, 0, W, H).data;
+  const N = W * H, runs = [];
+  let i = 0;
+  const on = (p) => { const q = p * 4; return d[q + 3] > 127 && (0.299 * d[q] + 0.587 * d[q + 1] + 0.114 * d[q + 2]) > 127; };
+  while (i < N) { if (!on(i)) { i += 1; continue; } let j = i + 1; while (j < N && on(j)) j += 1; runs.push(i, j - i); i = j; }
+  return runs;
+}
+
+async function buildMasksFromImages(pngs, manifest, srcName) {
+  const sorted = pngs.slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const hasF = sorted.some((f) => maskFrameFromName(f.name) != null);
+  const multiObj = sorted.some((f) => maskObjFromName(f.name) != null);
+  let W = 0, H = 0, maxF = 0, count = 0, seq = 0;
+  const framesRegion = {}, layerSet = new Set();
+  for (const file of sorted) {
+    let bmp = null; try { bmp = await createImageBitmap(file); } catch (e) { continue; }
+    if (!W) { W = bmp.width; H = bmp.height; }
+    let f = hasF ? maskFrameFromName(file.name) : seq;
+    if (f == null) f = seq;
+    seq += 1;
+    const lid = multiObj ? (maskObjFromName(file.name) != null ? maskObjFromName(file.name) : 1) : 1;
+    const runs = imageFileToRegionRuns(bmp, W, H);
+    if (bmp.close) bmp.close();
+    count += 1;
+    if (dom.maskJsonStatus && count % 40 === 0) { dom.maskJsonStatus.textContent = `マスク読込中… ${count}/${sorted.length}`; await new Promise((r) => setTimeout(r, 0)); }
+    if (!runs.length) continue; // 真っ黒/全透明＝そのフレームに対象なし
+    const key = String(f);
+    (framesRegion[key] = framesRegion[key] || {})[String(lid)] = runs;
+    layerSet.add(lid);
+    if (f > maxF) maxF = f;
+  }
+  if (!layerSet.size) throw new Error("有効なマスク画像がありません（対象を白、背景を黒か透明で塗ってください）");
+  const maniLayers = manifest && Array.isArray(manifest.layers) ? manifest.layers : null;
+  const DEF = [[255, 60, 60], [60, 200, 60], [80, 140, 255], [255, 180, 50], [200, 90, 230], [90, 210, 210]];
+  const lids = [...layerSet].sort((a, b) => a - b);
+  const layers = lids.map((id, i) => {
+    const m = maniLayers && maniLayers.find((l) => l.id === id);
+    return { id, name: (m && m.name) || ("対象" + id), color: (m && m.color && m.color.length ? m.color.slice() : DEF[i % DEF.length].slice()) };
+  });
+  return { name: srcName || "連番PNG", fps: (manifest && manifest.fps) || 0, W, H, total: maxF + 1, layers, frames: null, framesRegion, frameCount: Object.keys(framesRegion).length, perLayer: {} };
+}
+
+async function onMaskFilesPicked(files) {
+  if (!files || !files.length) return;
   try {
-    const text = await file.text();
-    const m = parseMainappJson(text, file.name);
+    if (dom.maskJsonStatus) dom.maskJsonStatus.textContent = "マスク読込中…";
+    const arr = [];
+    const srcName = files.length === 1 ? files[0].name : files.length + "ファイル";
+    for (const f of files) {
+      if (/\.zip$/i.test(f.name)) {
+        const entries = await appUnzip(new Uint8Array(await f.arrayBuffer()));
+        for (const e of entries) { const base = e.name.split("/").pop(); if (base) arr.push(new File([e.bytes], base, { type: /\.json$/i.test(base) ? "application/json" : "image/png" })); }
+      } else arr.push(f);
+    }
+    const jsons = arr.filter((f) => /\.json$/i.test(f.name));
+    const pngs = arr.filter((f) => /\.(png|webp|bmp)$/i.test(f.name));
+    let mainapp = null, manifest = null;
+    for (const jf of jsons) {
+      try {
+        const obj = JSON.parse(await jf.text());
+        if (obj && obj.format === "contour-lab-mainapp") mainapp = { obj, name: jf.name };
+        else if (obj && (obj.layers || obj.W)) manifest = obj;
+      } catch (e) { /* JSONでなければ無視 */ }
+    }
+    let m;
+    if (mainapp) m = parseMainappJson(mainapp.obj, mainapp.name); // 輪郭ラボの本体用JSON
+    else if (pngs.length) m = await buildMasksFromImages(pngs, manifest, srcName); // 連番PNG（クリスタ等の直接ルート）
+    else throw new Error("マスク画像（PNG）または mainapp.json が見つかりません");
     state.masksData = m;
     renderMaskJsonStatus();
     const names = m.layers.map((L) => L.name || ("対象" + L.id)).join("・");
     showToast("success", `領域マスクを読み込みました（${names} ＋ 背景 / ${m.frameCount}フレーム分）。「色を分析する」を押すと反映されます`);
   } catch (err) {
     console.error(err);
-    showToast("error", "マスクJSONを読み込めませんでした：" + (err && err.message ? err.message : String(err)));
+    renderMaskJsonStatus();
+    showToast("error", "マスクを読み込めませんでした：" + (err && err.message ? err.message : String(err)));
   }
 }
 function renderMaskJsonStatus() {
@@ -1391,7 +1500,9 @@ function clearMaskJson() {
 /* ---- STEP3: 領域タブ（背景／各対象のパレットを切り替えて編集） ---- */
 function renderRegionTabs(v) {
   if (!dom.regionTabs) return;
-  if (!v || !masksActive(v) || !v.palettes) { dom.regionTabs.hidden = true; dom.regionTabs.innerHTML = ""; return; }
+  const active = !!(v && masksActive(v) && v.palettes);
+  if (dom.maskOverlayWrap) { dom.maskOverlayWrap.hidden = !active; if (dom.maskOverlayToggle) dom.maskOverlayToggle.checked = !!state.maskOverlay; }
+  if (!active) { dom.regionTabs.hidden = true; dom.regionTabs.innerHTML = ""; return; }
   const sceneId = v.sceneMode && v.scenes && v.scenes[v.activeScene] ? v.scenes[v.activeScene].paletteId : "only";
   const cur = v.maskRegionSel || "bg";
   const chips = [{ rk: "bg", name: "背景", color: null }];
@@ -1675,10 +1786,11 @@ function runAnalysisWorkerMasked(firstImageData, lastImageData, firstMask, lastM
 function layerFramesInRange(v, lid, fLo, fHi) {
   const m = v.masks;
   if (!m._layerFrames) {
+    const src = m.framesRegion || m.frames; // 直接取込は framesRegion が正
     m._layerFrames = {};
     for (const L of m.layers) m._layerFrames[L.id] = [];
-    for (const key of Object.keys(m.frames)) {
-      const f = Number(key), rec = m.frames[key];
+    for (const key of Object.keys(src)) {
+      const f = Number(key), rec = src[key];
       for (const lidS of Object.keys(rec)) if (m._layerFrames[lidS]) m._layerFrames[lidS].push(f);
     }
     for (const k of Object.keys(m._layerFrames)) m._layerFrames[k].sort((a, b) => a - b);
@@ -1704,7 +1816,9 @@ async function analyzeSceneRegions(v, sceneId, fLo, fHi, fA0, fB0, imgA0, imgB0,
       // 出入りの瞬間の極小マスク（例: 消える直前の126px）から代表色を作ると中盤の見た目を外し、
       // 大量の「はみ出し色（マゼンタ）」が出る（実測）。輪郭RLEの合計長＝サイズの安価な代理指標。
       const lid = rk.slice(1);
-      const perim = (f) => { const rec = v.masks.frames[String(f)] || {}; const runs = rec[lid] || []; let s = 0; for (let k = 1; k < runs.length; k += 2) s += runs[k]; return s; };
+      // 大きさの代理指標: JSONルート＝輪郭RLE合計（周長）、PNG直接ルート＝領域RLE合計（面積）。どちらも大きいほど大きい。
+      const msrc = v.masks.framesRegion || v.masks.frames;
+      const perim = (f) => { const rec = msrc[String(f)] || {}; const runs = rec[lid] || []; let s = 0; for (let k = 1; k < runs.length; k += 2) s += runs[k]; return s; };
       const mid = pres.length >> 1;
       const pick = (arr) => { let best = arr[0], bp = -1; for (const f of arr) { const p = perim(f); if (p > bp) { bp = p; best = f; } } return best; };
       fa = pick(pres.slice(0, Math.max(1, mid)));
@@ -1731,10 +1845,15 @@ function applyMasksToVideo(v) {
   const m = state.masksData;
   if (!m) return;
   if (m.W !== v.videoWidth || m.H !== v.videoHeight) {
-    showToast("error", `${v.name}: マスクの解像度（${m.W}×${m.H}）が動画（${v.videoWidth}×${v.videoHeight}）と違うため、この動画には使いません`);
-    return;
+    // 縦横比が同じなら最近傍で伸縮して使う（連番PNGを半解像度で描くなどの運用を許す）。比率違いは位置がずれるので拒否。
+    const arV = v.videoWidth / Math.max(1, v.videoHeight), arM = m.W / Math.max(1, m.H);
+    if (Math.abs(arV - arM) > 0.01) {
+      showToast("error", `${v.name}: マスクの縦横比（${m.W}×${m.H}）が動画（${v.videoWidth}×${v.videoHeight}）と違うため、この動画には使いません`);
+      return;
+    }
+    showToast("info", `${v.name}: マスク（${m.W}×${m.H}）を動画（${v.videoWidth}×${v.videoHeight}）に合わせて伸縮して使います`);
   }
-  v.masks = { name: m.name, fps: m.fps, W: m.W, H: m.H, total: m.total, layers: m.layers, frames: m.frames, _regionRuns: new Map(), _layerFrames: null };
+  v.masks = { name: m.name, fps: m.fps, W: m.W, H: m.H, total: m.total, layers: m.layers, frames: m.frames, framesRegion: m.framesRegion || null, _regionRuns: new Map(), _layerFrames: null };
 }
 
 function stopAnalyze() {
@@ -2630,6 +2749,23 @@ function drawActiveFrame(timeOverride) {
   const mCtx = dom.cvMask.getContext("2d", { willReadFrequently: true });
   sCtx.drawImage(dom.workVideo, 0, 0, dom.cvOrig.width, dom.cvOrig.height);
   const base = sCtx.getImageData(0, 0, dom.cvOrig.width, dom.cvOrig.height);
+  // 「マスクを重ねて表示」: 元動画キャンバスに各対象の領域を色付き半透明で重畳（背景はそのまま）。
+  // どの画素がどの領域として扱われているかの確認用。判定・書き出しには影響しない（base は無加工のまま使う）。
+  if (masksActive(v) && state.maskOverlay) {
+    const fpsOv = v.fps || v.masks.fps || 30;
+    const rmap = regionMapForFrame(v, Math.floor(t * fpsOv + 1e-6), base.width, base.height);
+    const ov = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
+    const cols = v.masks.layers.map((L) => L.color || [255, 60, 60]);
+    const d = ov.data;
+    for (let p = 0, i = 0; p < rmap.length; p += 1, i += 4) {
+      const li = rmap[p]; if (!li) continue;
+      const c = cols[li - 1];
+      d[i] = (d[i] * 0.55 + c[0] * 0.45) | 0;
+      d[i + 1] = (d[i + 1] * 0.55 + c[1] * 0.45) | 0;
+      d[i + 2] = (d[i + 2] * 0.55 + c[2] * 0.45) | 0;
+    }
+    sCtx.putImageData(ov, 0, 0);
+  }
   const proc = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
   if (masksActive(v)) reduceFrameAt(v, proc.data, t, v.fps || v.masks.fps || 30, proc.width, proc.height, {}); // 領域別パレット（現在編集中の領域はライブ状態）
   else reduceFrame(proc.data, reps, th, v.processedCache, proc.width, proc.height, {});

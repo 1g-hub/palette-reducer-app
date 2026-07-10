@@ -142,16 +142,29 @@ function buildBucketCandidates(buffers, bucketBits, masks) {
   return { candidates };
 }
 
+// 計算するKの列: 40までは全整数（従来どおり）、40超は間引きラダー（44,48,…,256）。
+// 高Kは1回のk-meansが重いので、密に計算せず飛び飛びに用意する（STEP3のスライダーは
+// availableK の最も近い値へスナップするため、間引きでも操作感は保たれる）。
+function clusterKList(minClusters, maxClusters) {
+  const ks = [];
+  for (let k = minClusters; k <= Math.min(40, maxClusters); k += 1) ks.push(k);
+  const LADDER = [44, 48, 52, 56, 64, 72, 80, 96, 112, 128, 144, 160, 192, 224, 256];
+  for (const k of LADDER) if (k > 40 && k >= minClusters && k <= maxClusters) ks.push(k);
+  if (ks[ks.length - 1] !== maxClusters && maxClusters > 40) ks.push(maxClusters);
+  return ks;
+}
+
 function buildKMeansSnapshots(colors, weights, minClusters, maxClusters, settings) {
   const snapshots = new Map();
   const rows = [];
   let prevSse = null;
-  const totalK = maxClusters - minClusters + 1;
+  const kList = clusterKList(minClusters, maxClusters);
+  const totalK = kList.length;
   postProgress("cluster", 0.16, "Preparing k-means seeds");
   const seedCenters = initCenterSequence(colors, weights, maxClusters);
 
-  for (let k = minClusters; k <= maxClusters; k += 1) {
-    const kIndex = k - minClusters;
+  for (let kIndex = 0; kIndex < totalK; kIndex += 1) {
+    const k = kList[kIndex];
     const start = 0.20 + (kIndex / totalK) * 0.70;
     const end = 0.20 + ((kIndex + 1) / totalK) * 0.70;
     postProgress("cluster", start, `Weighted k-means: ${k} colors`);
@@ -308,6 +321,11 @@ function nearestColorIndex(color, palette) {
 function selectClusterCount(rows, settings) {
   if (!rows.length) throw new Error("No cluster-count candidates were available");
   const minDistance = settings.minRepresentativeDistance || 0;
+  // 自動K（膝法）は従来レンジ（K≤40）から選ぶ: 40超の間引きラダーを膝の弦計算に混ぜると
+  // 長い平坦テールで弦の端点が動き、自動選択が変わってしまう。高Kは手動スライダー専用。
+  const allRows = rows;
+  const autoRows = rows.filter((r) => r.k <= 40);
+  if (autoRows.length >= 2) rows = autoRows;
   // Candidate Ks: palettes whose two closest reps are at least `minDistance` apart (the "merge
   // similar colors" strength) and that aren't degenerate (duplicate reps). Fall back progressively
   // so a tiny histogram still yields a choice.
@@ -345,7 +363,7 @@ function selectClusterCount(rows, settings) {
     chosen = pool[Math.min(pool.length - 1, Math.max(0, Math.round(pool.length * 0.4)))];
   }
 
-  const rankedRows = rows.slice().sort((a, b) => {
+  const rankedRows = allRows.slice().sort((a, b) => {
     if (b.relativeGap !== a.relativeGap) return b.relativeGap - a.relativeGap;
     if (b.absoluteGap !== a.absoluteGap) return b.absoluteGap - a.absoluteGap;
     return b.k - a.k;
