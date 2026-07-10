@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260710-71";
+const APP_VERSION = "20260710-72";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -44,6 +44,8 @@ const dom = {
   step3Tabs: $("step3Tabs"), sceneTabs: $("sceneTabs"), regionTabs: $("regionTabs"), activeName: $("activeName"),
   maskJsonInput: $("maskJsonInput"), maskJsonStatus: $("maskJsonStatus"), maskJsonClear: $("maskJsonClear"),
   maskOverlayWrap: $("maskOverlayWrap"), maskOverlayToggle: $("maskOverlayToggle"),
+  maskPreviewBtn: $("maskPreviewBtn"), maskPreviewBox: $("maskPreviewBox"), maskPreviewCanvas: $("maskPreviewCanvas"),
+  maskPreviewPlay: $("maskPreviewPlay"), maskPreviewInfo: $("maskPreviewInfo"), maskPreviewClose: $("maskPreviewClose"),
   cvOrig: $("cvOrig"), cvReduced: $("cvReduced"), cvMask: $("cvMask"),
   previewSeek: $("previewSeek"), previewTime: $("previewTime"), cutMarkers: $("cutMarkers"),
   previewLargeBtn: $("previewLargeBtn"), frameBackBtn: $("frameBackBtn"), frameFwdBtn: $("frameFwdBtn"),
@@ -250,6 +252,9 @@ function init() {
   if (dom.maskJsonInput) dom.maskJsonInput.addEventListener("change", (e) => { const fs = [...(e.target.files || [])]; onMaskFilesPicked(fs); e.target.value = ""; });
   if (dom.maskJsonClear) dom.maskJsonClear.addEventListener("click", clearMaskJson);
   if (dom.maskOverlayToggle) dom.maskOverlayToggle.addEventListener("change", () => { state.maskOverlay = dom.maskOverlayToggle.checked; if (!state.playing) drawActiveFrame(); });
+  if (dom.maskPreviewBtn) dom.maskPreviewBtn.addEventListener("click", openMaskPreview);
+  if (dom.maskPreviewPlay) dom.maskPreviewPlay.addEventListener("click", toggleMaskPreviewPlay);
+  if (dom.maskPreviewClose) dom.maskPreviewClose.addEventListener("click", closeMaskPreview);
   dom.plotZoomIn.addEventListener("click", () => zoomPlot(1.25));
   dom.plotZoomOut.addEventListener("click", () => zoomPlot(0.8));
   dom.plotReset.addEventListener("click", resetPlotView);
@@ -578,6 +583,7 @@ function onModeClick(e) {
 
 function goStep(n) {
   clearPaletteHistory(); // undo history is scoped to one STEP3 session for one video
+  closeMaskPreview(); // STEP2のマスクプレビューはステップ移動で停止（専用videoを解放）
   state.step = n;
   render();
   if (n === 3) {
@@ -1487,6 +1493,14 @@ async function onMaskFilesPicked(files) {
 function renderMaskJsonStatus() {
   if (!dom.maskJsonStatus) return;
   const m = state.masksData;
+  if (dom.maskPreviewBtn) {
+    const on = !!m;
+    dom.maskPreviewBtn.disabled = !on;
+    dom.maskPreviewBtn.classList.toggle("btn-primary", on);   // 読み込むと「明るく」なる
+    dom.maskPreviewBtn.classList.toggle("btn-ghost", !on);
+    dom.maskPreviewBtn.textContent = on ? "▶ マスクプレビュー（配置を再生で確認）" : "▶ マスクプレビュー（マスクを読み込むと使えます）";
+    if (!on) closeMaskPreview();
+  }
   if (!m) { dom.maskJsonStatus.textContent = "未読込"; if (dom.maskJsonClear) dom.maskJsonClear.hidden = true; return; }
   dom.maskJsonStatus.textContent = `${m.name || "マスク"}（${m.W}×${m.H}・${m.total}f・${m.layers.length}色＋背景）`;
   if (dom.maskJsonClear) dom.maskJsonClear.hidden = false;
@@ -1495,6 +1509,77 @@ function clearMaskJson() {
   state.masksData = null;
   renderMaskJsonStatus();
   showToast("info", "領域マスクを解除しました（次の分析から反映）");
+}
+
+/* ---- STEP2: マスクプレビュー（分析前に、マスクを重ねた映像を再生して配置を確認） ----
+   専用の<video>要素を使う（分析用の workVideo と干渉しない）。各表示フレームで
+   フレーム番号 = floor(currentTime × マスクfps) の領域を色付き半透明で重畳。
+   マスクは未分析でも state.masksData から直接参照する（動画へは分析時に適用される）。 */
+let mpv = null; // { video, pv, fps, ctx, w, h, raf, lastF }
+function openMaskPreview() {
+  const m = state.masksData;
+  if (!m) return;
+  const v = state.videos[0];
+  if (!v) { showToast("info", "先に STEP1 で動画を追加してください"); return; }
+  closeMaskPreview();
+  const video = document.createElement("video");
+  video.muted = true; video.loop = true; video.playsInline = true; video.preload = "auto";
+  video.src = v.url;
+  const pv = { masks: { ...m, _regionRuns: new Map(), _layerFrames: null }, _regionMapCache: null };
+  mpv = { video, pv, fps: m.fps || 30, ctx: null, w: 0, h: 0, raf: 0, lastF: -1 };
+  dom.maskPreviewBox.hidden = false;
+  dom.maskPreviewPlay.textContent = "⏸ 一時停止";
+  dom.maskPreviewInfo.textContent = "読込中…";
+  video.addEventListener("loadedmetadata", () => {
+    if (!mpv || mpv.video !== video) return;
+    const { width, height } = scaledSize(video.videoWidth, video.videoHeight, 480);
+    dom.maskPreviewCanvas.width = width; dom.maskPreviewCanvas.height = height;
+    mpv.ctx = dom.maskPreviewCanvas.getContext("2d", { willReadFrequently: true });
+    mpv.w = width; mpv.h = height;
+    const names = m.layers.map((L) => L.name || ("対象" + L.id)).join("・");
+    dom.maskPreviewInfo.textContent = `${esc(v.name)} ＋ ${names}（${m.fps ? m.fps : 30}fps基準）`;
+    video.play().catch(() => { dom.maskPreviewPlay.textContent = "▶ 再生"; });
+    const step = () => {
+      if (!mpv || mpv.video !== video) return;
+      drawMaskPreviewFrame();
+      mpv.raf = requestAnimationFrame(step);
+    };
+    mpv.raf = requestAnimationFrame(step);
+  }, { once: true });
+  video.addEventListener("error", () => { if (mpv && mpv.video === video) dom.maskPreviewInfo.textContent = "動画を再生できませんでした"; }, { once: true });
+}
+function drawMaskPreviewFrame() {
+  const { video, ctx, w, h, pv, fps } = mpv;
+  if (!ctx || video.readyState < 2) return;
+  const f = Math.floor(video.currentTime * fps + 1e-6);
+  if (video.paused && f === mpv.lastF) return; // 停止中は再描画しない（CPU節約）
+  mpv.lastF = f;
+  ctx.drawImage(video, 0, 0, w, h);
+  const rmap = regionMapForFrame(pv, f, w, h);
+  const img = ctx.getImageData(0, 0, w, h);
+  const cols = pv.masks.layers.map((L) => L.color || [255, 60, 60]);
+  const d = img.data;
+  for (let p = 0, i = 0; p < rmap.length; p += 1, i += 4) {
+    const li = rmap[p]; if (!li) continue;
+    const c = cols[li - 1];
+    d[i] = (d[i] * 0.55 + c[0] * 0.45) | 0;
+    d[i + 1] = (d[i + 1] * 0.55 + c[1] * 0.45) | 0;
+    d[i + 2] = (d[i + 2] * 0.55 + c[2] * 0.45) | 0;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+function toggleMaskPreviewPlay() {
+  if (!mpv) return;
+  if (mpv.video.paused) { mpv.video.play().catch(() => {}); dom.maskPreviewPlay.textContent = "⏸ 一時停止"; }
+  else { mpv.video.pause(); dom.maskPreviewPlay.textContent = "▶ 再生"; }
+}
+function closeMaskPreview() {
+  if (dom.maskPreviewBox) dom.maskPreviewBox.hidden = true;
+  if (!mpv) return;
+  if (mpv.raf) cancelAnimationFrame(mpv.raf);
+  try { mpv.video.pause(); } catch (e) { /* ignore */ }
+  try { mpv.video.removeAttribute("src"); mpv.video.load(); } catch (e) { /* ignore */ }
+  mpv = null;
 }
 
 /* ---- STEP3: 領域タブ（背景／各対象のパレットを切り替えて編集） ---- */
@@ -1564,6 +1649,7 @@ function reduceFrameAt(v, data, at, fps, w, h, opts) {
 async function analyzeAll() {
   if (!hasVideos() || state.analyzing) return;
   cancelAdvancedPreview();
+  closeMaskPreview();
   state.analyzing = true;
   state.cancelled = false;
   state.exported = false;
@@ -1907,7 +1993,7 @@ function renderAnalyzingList() {
             <span class="proc-name">${esc(v.name)}${v.error ? " — " + esc(v.error) : ""}</span>
             <span class="proc-status ${statusCls}">${statusText}</span>
           </div>
-          ${phase("カット検出", "det", det)}
+          ${phase(state.wholeVideo ? "フレーム読込" : "カット検出", "det", det)}
           ${phase("パレット分析", "pal", pal)}
         </div>
       </div>`;

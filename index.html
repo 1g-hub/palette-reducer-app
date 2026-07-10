@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20260710-71">
+    <link rel="stylesheet" href="./styles.css?v=20260710-72">
   </head>
   <body>
     <div class="page">
@@ -103,6 +103,16 @@
                   <input type="file" id="maskJsonInput" accept=".json,.zip,.png,.webp,.bmp,application/json,application/zip,image/png" multiple hidden>
                   <span id="maskJsonStatus" class="seg-note" style="margin:0">未読込</span>
                   <button id="maskJsonClear" type="button" class="btn-ghost" hidden>解除</button>
+                </div>
+
+                <button id="maskPreviewBtn" type="button" class="btn-ghost block" disabled style="margin:0 0 10px">▶ マスクプレビュー（マスクを読み込むと使えます）</button>
+                <div id="maskPreviewBox" hidden style="margin:0 0 14px">
+                  <canvas id="maskPreviewCanvas" style="width:100%;display:block;border-radius:10px;background:#000"></canvas>
+                  <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+                    <button id="maskPreviewPlay" type="button" class="btn-ghost">⏸ 一時停止</button>
+                    <span id="maskPreviewInfo" class="seg-note" style="margin:0"></span>
+                    <button id="maskPreviewClose" type="button" class="btn-ghost" style="margin-left:auto">閉じる</button>
+                  </div>
                 </div>
 
                 <button id="analyzeBtn" type="button" class="btn-primary block big"><span class="ic">✦</span> <span id="analyzeBtnLabel">色を分析する</span></button>
@@ -579,7 +589,7 @@
     <!-- hidden work elements -->
     <video id="workVideo" muted playsinline preload="auto"></video>
     <canvas id="exportCanvas" class="offscreen"></canvas>
-    <script src="./icm.js?v=20260710-71"></script>
-    <script src="./app.js?v=20260710-71"></script>
+    <script src="./icm.js?v=20260710-72"></script>
+    <script src="./app.js?v=20260710-72"></script>
   </body>
 </html>
