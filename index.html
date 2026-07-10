@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20260710-73">
+    <link rel="stylesheet" href="./styles.css?v=20260710-74">
   </head>
   <body>
     <div class="page">
@@ -108,11 +108,15 @@
                 <button id="maskPreviewBtn" type="button" class="btn-ghost block" disabled style="margin:0 0 10px">▶ マスクプレビュー（マスクを読み込むと使えます）</button>
                 <div id="maskPreviewBox" hidden style="margin:0 0 14px">
                   <canvas id="maskPreviewCanvas" style="width:100%;display:block;border-radius:10px;background:#000"></canvas>
-                  <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+                  <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap">
                     <button id="maskPreviewPlay" type="button" class="btn-ghost">⏸ 一時停止</button>
-                    <span id="maskPreviewInfo" class="seg-note" style="margin:0"></span>
+                    <button id="maskPreviewBack" type="button" class="btn-ghost" title="1コマ戻す（一時停止します）">◀ コマ</button>
+                    <button id="maskPreviewFwd" type="button" class="btn-ghost" title="1コマ進める（一時停止します）">コマ ▶</button>
+                    <input id="maskPreviewSeek" type="range" min="0" max="0" step="1" value="0" style="flex:1;min-width:160px">
+                    <span id="maskPreviewTime" class="seg-note" style="margin:0;white-space:nowrap">—</span>
                     <button id="maskPreviewClose" type="button" class="btn-ghost" style="margin-left:auto">閉じる</button>
                   </div>
+                  <div><span id="maskPreviewInfo" class="seg-note" style="margin:4px 0 0;display:inline-block"></span></div>
                 </div>
 
                 <button id="analyzeBtn" type="button" class="btn-primary block big"><span class="ic">✦</span> <span id="analyzeBtnLabel">色を分析する</span></button>
@@ -589,7 +593,7 @@
     <!-- hidden work elements -->
     <video id="workVideo" muted playsinline preload="auto"></video>
     <canvas id="exportCanvas" class="offscreen"></canvas>
-    <script src="./icm.js?v=20260710-73"></script>
-    <script src="./app.js?v=20260710-73"></script>
+    <script src="./icm.js?v=20260710-74"></script>
+    <script src="./app.js?v=20260710-74"></script>
   </body>
 </html>

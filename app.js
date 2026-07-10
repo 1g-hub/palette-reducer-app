@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260710-73";
+const APP_VERSION = "20260710-74";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -46,6 +46,7 @@ const dom = {
   maskOverlayWrap: $("maskOverlayWrap"), maskOverlayToggle: $("maskOverlayToggle"),
   maskPreviewBtn: $("maskPreviewBtn"), maskPreviewBox: $("maskPreviewBox"), maskPreviewCanvas: $("maskPreviewCanvas"),
   maskPreviewPlay: $("maskPreviewPlay"), maskPreviewInfo: $("maskPreviewInfo"), maskPreviewClose: $("maskPreviewClose"),
+  maskPreviewBack: $("maskPreviewBack"), maskPreviewFwd: $("maskPreviewFwd"), maskPreviewSeek: $("maskPreviewSeek"), maskPreviewTime: $("maskPreviewTime"),
   cvOrig: $("cvOrig"), cvReduced: $("cvReduced"), cvMask: $("cvMask"),
   previewSeek: $("previewSeek"), previewTime: $("previewTime"), cutMarkers: $("cutMarkers"),
   previewLargeBtn: $("previewLargeBtn"), frameBackBtn: $("frameBackBtn"), frameFwdBtn: $("frameFwdBtn"),
@@ -255,6 +256,14 @@ function init() {
   if (dom.maskPreviewBtn) dom.maskPreviewBtn.addEventListener("click", openMaskPreview);
   if (dom.maskPreviewPlay) dom.maskPreviewPlay.addEventListener("click", toggleMaskPreviewPlay);
   if (dom.maskPreviewClose) dom.maskPreviewClose.addEventListener("click", closeMaskPreview);
+  if (dom.maskPreviewBack) dom.maskPreviewBack.addEventListener("click", () => stepMaskPreview(-1));
+  if (dom.maskPreviewFwd) dom.maskPreviewFwd.addEventListener("click", () => stepMaskPreview(1));
+  if (dom.maskPreviewSeek) {
+    dom.maskPreviewSeek.addEventListener("input", () => { if (!mpv) return; mpv.scrubbing = true; seekMaskPreviewToFrame(+dom.maskPreviewSeek.value); });
+    const endScrub = () => { if (mpv) mpv.scrubbing = false; };
+    dom.maskPreviewSeek.addEventListener("change", endScrub);
+    dom.maskPreviewSeek.addEventListener("pointerup", endScrub);
+  }
   dom.plotZoomIn.addEventListener("click", () => zoomPlot(1.25));
   dom.plotZoomOut.addEventListener("click", () => zoomPlot(0.8));
   dom.plotReset.addEventListener("click", resetPlotView);
@@ -1538,6 +1547,15 @@ function openMaskPreview() {
     mpv.w = width; mpv.h = height;
     const names = m.layers.map((L) => L.name || ("対象" + L.id)).join("・");
     dom.maskPreviewInfo.textContent = `${esc(v.name)} ＋ ${names}（${m.fps ? m.fps : 30}fps基準）`;
+    if (dom.maskPreviewSeek) { dom.maskPreviewSeek.min = "0"; dom.maskPreviewSeek.max = String(maskPreviewTotalF() - 1); dom.maskPreviewSeek.value = "0"; }
+    // 一時停止中のシーク/コマ送りは 'seeked' で確実に1枚描く（rVFC は停止中に発火しないことがある。
+    // 停止中の currentTime は表示フレームと一致するので先読みズレも無い）。
+    video.addEventListener("seeked", () => {
+      if (!mpv || mpv.video !== video) return;
+      mpv.pendingF = null; // シーク完了（コマ送り連打の基準をリセット）
+      mpv.lastF = -1; // 同一フレーム抑止を解除して必ず再描画
+      drawMaskPreviewFrame(video.currentTime);
+    });
     video.play().catch(() => { dom.maskPreviewPlay.textContent = "▶ 再生"; });
     // 同期は rVFC（実際に提示されたフレームの mediaTime）で行う。currentTime はデコード先読みで
     // 表示中フレームより先を指すため、rAF+currentTime で回すとマスクだけ先行する（ユーザ報告バグ。
@@ -1582,11 +1600,40 @@ function drawMaskPreviewFrame(t) {
     d[i + 2] = (d[i + 2] * 0.55 + c[2] * 0.45) | 0;
   }
   ctx.putImageData(img, 0, 0);
+  syncMaskPreviewSeekUI(f, at);
+}
+function maskPreviewTotalF() {
+  return mpv && mpv.video && mpv.video.duration ? Math.max(1, Math.round(mpv.video.duration * mpv.fps)) : 0;
+}
+function syncMaskPreviewSeekUI(f, at) {
+  if (!mpv) return;
+  if (dom.maskPreviewSeek && !mpv.scrubbing) dom.maskPreviewSeek.value = String(f);
+  if (dom.maskPreviewTime) dom.maskPreviewTime.textContent = formatClock(at) + "・コマ " + (f + 1) + " / " + maskPreviewTotalF();
+}
+function pauseMaskPreview() {
+  if (!mpv) return;
+  try { mpv.video.pause(); } catch (e) { /* ignore */ }
+  dom.maskPreviewPlay.textContent = "▶ 再生";
+}
+// フレーム中央へシーク（境界ちょうどのシークは前後どちらのフレームが出るか曖昧＝本体の確立ルール）
+function seekMaskPreviewToFrame(f) {
+  if (!mpv || !mpv.video.duration) return;
+  const total = maskPreviewTotalF();
+  const cf = Math.max(0, Math.min(total - 1, f));
+  pauseMaskPreview();
+  mpv.pendingF = cf; // シーク完了までコマ送りの基準に使う（連打の取りこぼし防止）
+  const at = Math.max(0.001, Math.min(mpv.video.duration - 0.001, (cf + 0.5) / mpv.fps));
+  try { mpv.video.currentTime = at; } catch (e) { /* ignore */ }
+}
+function stepMaskPreview(d) {
+  if (!mpv) return;
+  const base = mpv.pendingF != null ? mpv.pendingF : Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6);
+  seekMaskPreviewToFrame(base + d);
 }
 function toggleMaskPreviewPlay() {
   if (!mpv) return;
   if (mpv.video.paused) { mpv.video.play().catch(() => {}); dom.maskPreviewPlay.textContent = "⏸ 一時停止"; }
-  else { mpv.video.pause(); dom.maskPreviewPlay.textContent = "▶ 再生"; }
+  else { pauseMaskPreview(); }
 }
 function closeMaskPreview() {
   if (dom.maskPreviewBox) dom.maskPreviewBox.hidden = true;
