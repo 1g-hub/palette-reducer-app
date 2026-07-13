@@ -9,3 +9,4 @@
 # テスト・QA類はローカルのみ（公開リポジトリに含めない）
 qa/
 contour-lab/test/
+contour-lab/
