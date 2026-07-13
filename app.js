@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260710-80";
+const APP_VERSION = "20260713-81";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -3388,6 +3388,7 @@ async function togglePlay(loop) {
   }
   updatePlayButtons();
   const gen = (state._playGen = (state._playGen || 0) + 1);
+  if (masksActive(v)) { maskedPlayLoop(gen); return; } // マスク使用時はシーク駆動（下記）
   try { await dom.workVideo.play(); } catch (err) { stopPlay(); return; }
   // Frame-accurate playback (rVFC): draw on each presented frame and apply the region mask at that
   // frame's exact mediaTime, so merged regions stay locked to the motion. In scene mode we loop
@@ -3424,6 +3425,39 @@ async function togglePlay(loop) {
   state._previewEnded = onEnded;
   dom.workVideo.addEventListener("ended", onEnded);
   reReg();
+}
+
+/* マスク使用時の STEP3 再生はシーク駆動（動画要素は一時停止のまま1コマずつ進める）。
+   リアルタイム再生（rVFC）はコールバック時点の表示フレームと mediaTime が±1コマ競合し得るため,
+   動く輪郭帯の画素が「1コマずれた領域マップ」で隣の領域のパレットに量子化され, 一瞬マゼンタが
+   走ることがある（ユーザ報告. STEP2 マスクプレビューで実証済みの競合クラス — 画素とタイムスタンプを
+   原子的に対応づける手段は無い）. 停止中の currentTime＝表示フレームは保証されるので, シーク駆動なら
+   構成的にズレない. 書き出し・STEP2 マスクプレビューと同じ方針. 再生速度設定に合わせてペーシングし,
+   シークが追いつかない環境では出せる速度で全コマを順に表示する（コマ飛びなし）. */
+async function maskedPlayLoop(gen) {
+  const alive = () => state.playing && state._playGen === gen;
+  try { dom.workVideo.pause(); } catch (e) { /* ignore */ }
+  while (alive()) {
+    const iterStart = performance.now();
+    const v = activeVideo();
+    if (!v) { stopPlay(); return; }
+    const fps = v.fps || (v.masks && v.masks.fps) || 30;
+    const dur = dom.workVideo.duration || 0;
+    const r = v.sceneMode ? sceneRange(v, dur) : { start: 0, end: dur };
+    const fStart = Math.round(r.start * fps), fEnd = Math.round(r.end * fps) - 1;
+    let f = Math.floor((dom.workVideo.currentTime || 0) * fps + 1e-6) + 1;
+    if (f > fEnd || f < fStart) {
+      if (!state.loop && f > fEnd) { stopPlay(); return; } // ループなし＝末尾で停止
+      f = fStart;
+    }
+    const at = Math.max(0.001, Math.min(dur - 0.001, (f + 0.5) / fps)); // フレーム中央へ（境界の曖昧シーク回避）
+    try { await seekVideo(dom.workVideo, at); } catch (e) { stopPlay(); return; }
+    if (!alive()) return;
+    drawActiveFrame(); // 停止中の currentTime は表示フレームと一致＝領域マップと画素が確実に同じコマ
+    const budget = 1000 / (fps * (state.previewRate || 1));
+    const wait = Math.max(0, budget - (performance.now() - iterStart));
+    if (wait > 0) await new Promise((res) => setTimeout(res, wait));
+  }
 }
 
 function stopPlay() {
