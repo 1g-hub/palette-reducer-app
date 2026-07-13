@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260713-81";
+const APP_VERSION = "20260713-82";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -3434,9 +3434,31 @@ async function togglePlay(loop) {
    原子的に対応づける手段は無い）. 停止中の currentTime＝表示フレームは保証されるので, シーク駆動なら
    構成的にズレない. 書き出し・STEP2 マスクプレビューと同じ方針. 再生速度設定に合わせてペーシングし,
    シークが追いつかない環境では出せる速度で全コマを順に表示する（コマ飛びなし）. */
+// 再描画結果に影響する状態のシグネチャ。フレームキャッシュはこれが一致する間だけ有効
+// （K・しきい値・色OFF・領域パレット・表示選択・重畳表示・キャンバス寸法のどれかが変われば自動で作り直し）。
+function maskPreviewSig(v) {
+  const dsum = (set) => { let s = 0; if (set) for (const k of set) s = (s + k) >>> 0; return s; };
+  const parts = [dom.cvReduced.width + "x" + dom.cvReduced.height, v.curPaletteId, state.maskOverlay ? 1 : 0,
+    [...ensureMaskViewSel(v)].sort().join("|"),
+    "live", v.activeK, v.confirmThreshold, (v.disabledKeys && v.disabledKeys.size) || 0, dsum(v.disabledKeys)];
+  for (const id of Object.keys(v.palettes || {})) {
+    const st = v.palettes[id];
+    parts.push(id, st.activeK, st.confirmThreshold, (st.disabledKeys && st.disabledKeys.size) || 0, dsum(st.disabledKeys));
+  }
+  return parts.join(";");
+}
+function maskedPlaySyncUI(at, f, fps, dur, r) {
+  syncSeekElement(dom.previewSeek, r.start, r.end, at);
+  dom.previewTime.textContent = `${formatClock(at)} / ${formatClock(dur)} ・ コマ ${f + 1}`;
+  state.reducedFrameDirty = true;
+  syncLargePreview();
+}
 async function maskedPlayLoop(gen) {
   const alive = () => state.playing && state._playGen === gen;
   try { dom.workVideo.pause(); } catch (e) { /* ignore */ }
+  const toBlobP = (c) => new Promise((res) => c.toBlob(res, "image/png")); // 可逆＝再生時も画素が完全一致
+  let curF = null;   // キャッシュ再生中は動画をシークしない＝位置はループ内で自前追跡
+  let lastAt = -1;   // 停止時に動画位置を表示コマへ合わせるため
   while (alive()) {
     const iterStart = performance.now();
     const v = activeVideo();
@@ -3445,19 +3467,51 @@ async function maskedPlayLoop(gen) {
     const dur = dom.workVideo.duration || 0;
     const r = v.sceneMode ? sceneRange(v, dur) : { start: 0, end: dur };
     const fStart = Math.round(r.start * fps), fEnd = Math.round(r.end * fps) - 1;
-    let f = Math.floor((dom.workVideo.currentTime || 0) * fps + 1e-6) + 1;
+    let f = (curF != null ? curF : Math.floor((dom.workVideo.currentTime || 0) * fps + 1e-6)) + 1;
     if (f > fEnd || f < fStart) {
-      if (!state.loop && f > fEnd) { stopPlay(); return; } // ループなし＝末尾で停止
+      if (!state.loop && f > fEnd) { break; } // ループなし＝末尾で停止
       f = fStart;
     }
-    const at = Math.max(0.001, Math.min(dur - 0.001, (f + 0.5) / fps)); // フレーム中央へ（境界の曖昧シーク回避）
-    try { await seekVideo(dom.workVideo, at); } catch (e) { stopPlay(); return; }
-    if (!alive()) return;
-    drawActiveFrame(); // 停止中の currentTime は表示フレームと一致＝領域マップと画素が確実に同じコマ
+    const at = Math.max(0.001, Math.min(dur - 0.001, (f + 0.5) / fps)); // フレーム中央（境界の曖昧シーク回避）
+    const sig = maskPreviewSig(v);
+    if (!v._mpr || v._mpr.sig !== sig) v._mpr = { sig, frames: new Map(), bytes: 0 }; // 編集を検知して作り直し
+    const mpr = v._mpr;
+    const hit = mpr.frames.get(f);
+    if (hit) {
+      // 2周目以降: キャッシュ再生（シークも領域計算もなし＝デコードして描くだけ）
+      let bmps = null;
+      try { bmps = await Promise.all(hit.map((b) => createImageBitmap(b))); } catch (e) { mpr.frames.delete(f); continue; }
+      if (!alive()) { bmps.forEach((b) => b.close()); return; }
+      const cs = [dom.cvOrig, dom.cvReduced, dom.cvMask];
+      for (let i = 0; i < 3; i++) { cs[i].getContext("2d").drawImage(bmps[i], 0, 0); bmps[i].close(); }
+      curF = f; lastAt = at;
+      state._mprDbg = { f, hit: true };
+      maskedPlaySyncUI(at, f, fps, dur, r);
+    } else {
+      // 初回（またはキャッシュ未保持コマ）: 正確シーク→描画→結果をキャッシュ
+      try { await seekVideo(dom.workVideo, at); } catch (e) { stopPlay(); return; }
+      if (!alive()) return;
+      drawActiveFrame(); // 停止中の currentTime＝表示フレーム＝領域マップと同じコマ（構成的にズレない）
+      curF = f; lastAt = -1; // 実シーク済み＝動画位置が真
+      state._mprDbg = { f, hit: false };
+      if (mpr.bytes < 700 * 1024 * 1024) { // メモリ上限（可逆PNG合計 約700MBまで。超過後は都度レンダリング）
+        const blobs = await Promise.all([toBlobP(dom.cvOrig), toBlobP(dom.cvReduced), toBlobP(dom.cvMask)]);
+        if (blobs.every(Boolean) && v._mpr === mpr && mpr.sig === sig && !mpr.frames.has(f)) {
+          mpr.frames.set(f, blobs);
+          mpr.bytes += blobs.reduce((s, b) => s + b.size, 0);
+        }
+      }
+    }
     const budget = 1000 / (fps * (state.previewRate || 1));
     const wait = Math.max(0, budget - (performance.now() - iterStart));
     if (wait > 0) await new Promise((res) => setTimeout(res, wait));
   }
+  // 一時停止/末尾で抜けたとき: キャッシュ再生中なら表示コマへ実シークし, コマ送り/スクラブの基準を一致させる
+  if (lastAt >= 0) {
+    try { await seekVideo(dom.workVideo, lastAt); } catch (e) { /* ignore */ }
+    if (!state.playing || state._playGen !== gen) { /* 停止後の見た目は既にキャッシュ描画済み */ }
+  }
+  if (state.playing && state._playGen === gen) stopPlay(); // break（末尾停止）経由
 }
 
 function stopPlay() {
@@ -3860,6 +3914,9 @@ function mpTogglePlay(side) {
     try { mp.video.currentTime = mp.scene.start; } catch (e) { /* ignore */ }
   }
   mpSyncControls(side);
+  // マスク使用時はシーク駆動（STEP3と同じ理由: rVFCのリアルタイム再生は画素と mediaTime が±1コマ
+  // 競合し, 動く輪郭帯が一瞬隣領域のパレットで量子化されてマゼンタが走る）。
+  if (vb && masksActive(vb)) { mpMaskedLoop(side); return; }
   mp.video.play().catch(() => mpStop(side));
   // Frame-accurate playback: redraw on each PRESENTED frame and apply the region mask at
   // that frame's exact mediaTime, so the recolored region stays locked to the motion.
@@ -3874,6 +3931,26 @@ function mpTogglePlay(side) {
   };
   if (useRVFC) mp.video.requestVideoFrameCallback(onFrame);
   else mp.raf = requestAnimationFrame(onFrame);
+}
+// マスク使用時の統合プレーヤー再生（シーク駆動: 次コマ中央へシーク→停止中に描画→レートに合わせ待機）
+async function mpMaskedLoop(side) {
+  const mp = mergePlayers[side];
+  try { mp.video.pause(); } catch (e) { /* ignore */ }
+  const fps = await mpEnsureFps(side);
+  while (mergePlayers[side] === mp && mp.playing && mp.scene) {
+    const iterStart = performance.now();
+    const fStart = Math.round(mp.scene.start * fps), fEnd = Math.round(mp.scene.end * fps) - 1;
+    let f = Math.floor((mp.video.currentTime || 0) * fps + 1e-6) + 1;
+    if (f > fEnd || f < fStart) f = fStart; // シーン内ループ
+    const at = Math.max(0.001, (f + 0.5) / fps);
+    try { await seekVideo(mp.video, at); } catch (e) { mpStop(side); return; }
+    if (!(mergePlayers[side] === mp && mp.playing)) return;
+    mpDraw(side); // 停止中の currentTime＝表示フレーム＝領域マップと同じコマ
+    mpSyncControls(side);
+    const budget = 1000 / (fps * (mp.rate || 1));
+    const wait = Math.max(0, budget - (performance.now() - iterStart));
+    if (wait > 0) await new Promise((res) => setTimeout(res, wait));
+  }
 }
 function mpSeek(side, t) {
   const mp = mergePlayers[side]; if (!mp || !mp.scene) return;
