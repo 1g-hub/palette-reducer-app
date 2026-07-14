@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260714-87";
+const APP_VERSION = "20260714-88";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -682,7 +682,9 @@ function onListClick(e) {
 /* ---------- step2 ---------- */
 function renderStep2() {
   dom.step2Desc.textContent = "細かく調整したいときは「詳細設定」を開いてください。";
-  dom.analyzeBtnLabel.textContent = "色を分析する";
+  // マスク読み込み中は分析を開始できない（読み込み完了前に走るとマスク無しで分析されるため）
+  dom.analyzeBtnLabel.textContent = state._maskLoading ? "マスク読込中…" : "色を分析する";
+  dom.analyzeBtn.disabled = !!state._maskLoading;
   syncModeUI();
   syncSliders();
   syncAdvanced();
@@ -1470,6 +1472,10 @@ async function buildMasksFromImages(pngs, manifest, srcName) {
 
 async function onMaskFilesPicked(files) {
   if (!files || !files.length) return;
+  if (state._maskLoading) { showToast("info", "マスクを読み込み中です。完了までお待ちください"); return; }
+  state._maskLoading = true; // 読み込み中は「色を分析する」をブロック（マスク無しで分析される競合の防止）
+  dom.analyzeBtn.disabled = true;
+  dom.analyzeBtnLabel.textContent = "マスク読込中…";
   try {
     if (dom.maskJsonStatus) dom.maskJsonStatus.textContent = "マスク読込中…";
     const arr = [];
@@ -1503,6 +1509,10 @@ async function onMaskFilesPicked(files) {
     console.error(err);
     renderMaskJsonStatus();
     showToast("error", "マスクを読み込めませんでした：" + (err && err.message ? err.message : String(err)));
+  } finally {
+    state._maskLoading = false;
+    dom.analyzeBtn.disabled = false;
+    dom.analyzeBtnLabel.textContent = "色を分析する";
   }
 }
 function renderMaskJsonStatus() {
@@ -1833,6 +1843,8 @@ function reduceFrameAt(v, data, at, fps, w, h, opts) {
 
 async function analyzeAll() {
   if (!hasVideos() || state.analyzing) return;
+  // マスク読み込み中に開始すると state.masksData 未設定のまま applyMasksToVideo が走り「マスク無し分析」になる
+  if (state._maskLoading) { showToast("info", "マスクを読み込み中です。完了してから「色を分析する」を押してください"); return; }
   cancelAdvancedPreview();
   closeMaskPreview();
   state.analyzing = true;
