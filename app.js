@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260714-83";
+const APP_VERSION = "20260714-84";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -3497,6 +3497,14 @@ function maskPreviewSig(v) {
     const st = v.palettes[id];
     parts.push(id, st.activeK, st.confirmThreshold, (st.disabledKeys && st.disabledKeys.size) || 0, dsum(st.disabledKeys));
   }
+  // 色統合（確定済みグループ）もフレーム見た目に効く → ダイジェストで全キャッシュを無効化
+  let mg = 0, mgn = 0;
+  for (const g of v.merges || []) {
+    mgn += 1;
+    if (g.target) mg = (mg * 31 + ((g.target[0] << 16) | (g.target[1] << 8) | g.target[2])) >>> 0;
+    for (const m of g.members || []) { if (m && m.color) mg = (mg * 31 + ((m.color[0] << 16) | (m.color[1] << 8) | m.color[2]) + (isRegionMember(m) ? 7 : 0)) >>> 0; }
+  }
+  parts.push("mg", mgn, mg);
   return parts.join(";");
 }
 function maskedPlaySyncUI(at, f, fps, dur, r) {
@@ -4121,10 +4129,8 @@ function applyMergeSpotlight(data, outW, outH, sel, timeSec) {
 }
 function toggleMergeMode() {
   const v = activeVideo(); if (!v) return;
-  // 領域マスク（マスク別パレット）使用中の統合は v1 では非対応：統合は「クリックした色が属する
-  // 1つのパレット」を前提にしており、領域ごとに別パレットの合成画面では選択が曖昧になるため。
-  if (masksActive(v)) { flashMergeHint("領域マスク使用中は色統合を使えません（領域ごとのK・色OFFはSTEP3でできます）"); return; }
   if (anyRegionBusy(v)) { flashMergeHint("いま領域を計算中です…"); return; } // don't disturb the in-flight capture
+  if (masksActive(v)) v.regionMode = false; // マスク使用中は「色全体」統合のみ（領域選択キャプチャは非対応）
   v.mergeMode = !v.mergeMode;
   if (v.mergeMode) { mpStop("L"); mpStop("R"); } // picking requires a still frame
   else closeMergePanel(v);
@@ -4160,6 +4166,8 @@ function syncMergeModeUI(v) {
 }
 function toggleRegionMode() {
   const v = activeVideo(); if (!v || !v.mergeMode) return;
+  // 領域マスク使用中は「色全体」統合のみ（隣接領域キャプチャはマスク非対応の単一パレット前提）
+  if (masksActive(v)) { flashMergeHint("領域マスク使用中は「色全体」の統合のみ使えます"); return; }
   if (anyRegionBusy(v)) { flashMergeHint("いま領域を計算中です…"); return; }
   if (v._mergePanelOpen) { flashMergeHint("統合の確定中です。先に『統合する』か『キャンセル』を押してください"); return; }
   v.regionMode = !v.regionMode;
@@ -4194,9 +4202,23 @@ function mergePickAt(side, clientX, clientY) {
   const d = mp.pickCtx.getImageData(at.px, at.py, 1, 1).data;
   if (d[0] === 255 && d[1] === 0 && d[2] === 255) { flashMergeHint("ここは『新しい色』のため統合の対象にできません"); return; }
   if (v.regionMode) { pickRegion(side, at.px, at.py); return; }
-  const repIndex = repIndexForColor(mp.reps, d);
+  let reps = mp.reps, pid = mp.scene.paletteId;
+  if (masksActive(v)) {
+    // 領域マスク使用中：クリック画素が属する領域のパレットで解決する。mp.reps はシーン（背景）
+    // パレットのみなので、他領域の色を背景の最近色へ丸めると実在しない色が登録されてしまう。
+    const fps = v.fps || (v.masks && v.masks.fps) || 30;
+    const f = Math.floor(((mp.video && mp.video.currentTime) || 0) * fps + 1e-6);
+    const rmap = regionMapForFrame(v, f, mp.pickCanvas.width, mp.pickCanvas.height);
+    const val = rmap ? rmap[at.py * mp.pickCanvas.width + at.px] : 0;
+    let rpid = regionPaletteIdOf(mp.scene.paletteId, val > 0 ? "L" + v.masks.layers[val - 1].id : "bg");
+    if (rpid !== v.curPaletteId && !(v.palettes && v.palettes[rpid])) rpid = mp.scene.paletteId; // 領域パレット未作成→背景で代用（regionStatesFor と同じ）
+    const st = paletteRuntimeState(v, rpid);
+    if (st.off) { flashMergeHint("この領域は「減色なし」のため色が固定されず、統合の対象にできません"); return; }
+    reps = st.reps; pid = rpid;
+  }
+  const repIndex = repIndexForColor(reps, d);
   if (repIndex < 0) return;
-  toggleMergeSelection(v, side, mp.scene.paletteId, repIndex, mp.reps[repIndex].slice());
+  toggleMergeSelection(v, side, pid, repIndex, reps[repIndex].slice());
 }
 async function pickRegion(side, px, py) {
   const v = activeVideo(); const mp = mergePlayers[side];
