@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260713-82";
+const APP_VERSION = "20260714-83";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -1494,6 +1494,7 @@ async function onMaskFilesPicked(files) {
     if (mainapp) m = parseMainappJson(mainapp.obj, mainapp.name); // 輪郭ラボの本体用JSON
     else if (pngs.length) m = await buildMasksFromImages(pngs, manifest, srcName); // 連番PNG（クリスタ等の直接ルート）
     else throw new Error("マスク画像（PNG）または mainapp.json が見つかりません");
+    m._id = (state._maskDataSeq = (state._maskDataSeq || 0) + 1); // プレビューキャッシュの世代（読込ごとに更新）
     state.masksData = m;
     renderMaskJsonStatus();
     const names = m.layers.map((L) => L.name || ("対象" + L.id)).join("・");
@@ -1577,18 +1578,58 @@ function startMaskPreviewPlay() {
   dom.maskPreviewPlay.textContent = "⏸ 一時停止";
   maskPreviewAdvance();
 }
+/* STEP2プレビューのフレームキャッシュ（STEP3と同方式）: 初回描画時に完成画面を可逆PNGで保存し,
+   2周目以降はシークもマスク合成もせずデコードして描くだけ. マスクを読み込み直すと自動で無効化.
+   閉じて開き直しても再利用できるよう state 側に保持する. */
+function maskPrevSig() {
+  const m = state.masksData;
+  return (m && m._id ? m._id : 0) + ";" + dom.maskPreviewCanvas.width + "x" + dom.maskPreviewCanvas.height;
+}
+function maskPrevCache() {
+  const sig = maskPrevSig();
+  if (!state._mpvCache || state._mpvCache.sig !== sig) state._mpvCache = { sig, frames: new Map(), bytes: 0 };
+  return state._mpvCache;
+}
+function maskPrevCacheStore(f) {
+  const c = maskPrevCache();
+  if (c.bytes > 300 * 1024 * 1024 || c.frames.has(f)) return; // 上限300MB
+  const sig = c.sig;
+  dom.maskPreviewCanvas.toBlob((b) => {
+    if (b && state._mpvCache && state._mpvCache.sig === sig && !state._mpvCache.frames.has(f)) {
+      state._mpvCache.frames.set(f, b);
+      state._mpvCache.bytes += b.size;
+    }
+  }, "image/png");
+}
+async function maskPreviewDrawCached(f, blob) {
+  const cur = mpv;
+  let bmp = null;
+  try { bmp = await createImageBitmap(blob); } catch (e) { maskPrevCache().frames.delete(f); maskPreviewAdvance(); return; }
+  if (mpv !== cur || mpv.mode !== "play") { bmp.close(); return; }
+  mpv.ctx.drawImage(bmp, 0, 0);
+  bmp.close();
+  mpv.lastF = f;
+  mpv.cachedPos = f; // 要素はシークしていない＝停止時に合わせる
+  mpv._sync = { mediaTime: (f + 0.5) / mpv.fps, currentTime: mpv.video.currentTime, f };
+  mpv._dbg = { f, hit: true };
+  syncMaskPreviewSeekUI(f, (f + 0.5) / mpv.fps);
+  scheduleMaskPreviewNext();
+}
 function maskPreviewAdvance() {
   if (!mpv || mpv.mode !== "play" || !mpv.video.duration) return;
   const total = maskPreviewTotalF();
-  let f = (mpv.pendingF != null ? mpv.pendingF : Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6)) + 1;
+  const base = mpv.pendingF != null ? mpv.pendingF : (mpv.cachedPos != null ? mpv.cachedPos : Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6));
+  let f = base + 1;
   if (f >= total) { f = 0; mpv.playT0 = performance.now(); mpv.playF0 = 0; } // 先頭へループ
+  const hit = maskPrevCache().frames.get(f);
+  if (hit) { maskPreviewDrawCached(f, hit); return; } // キャッシュ再生（シークなし）
   mpv.pendingF = f;
   const at = Math.max(0.001, Math.min(mpv.video.duration - 0.001, (f + 0.5) / mpv.fps));
   try { mpv.video.currentTime = at; } catch (e) { /* ignore */ }
 }
 function scheduleMaskPreviewNext() {
   if (!mpv || mpv.mode !== "play") return;
-  const f = Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6);
+  const f = mpv.cachedPos != null ? mpv.cachedPos : Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6);
   const due = mpv.playT0 + ((f - mpv.playF0 + 1) / mpv.fps) * 1000; // 次コマの提示予定時刻（1x）
   const delay = Math.max(0, due - performance.now());
   if (mpv.playTimer) clearTimeout(mpv.playTimer);
@@ -1619,6 +1660,9 @@ function drawMaskPreviewFrame(t) {
     d[i + 2] = (d[i + 2] * 0.55 + c[2] * 0.45) | 0;
   }
   ctx.putImageData(img, 0, 0);
+  mpv.cachedPos = null; // 実シークで描いた＝要素位置が真
+  mpv._dbg = { f, hit: false };
+  maskPrevCacheStore(f); // 完成画面を非同期でキャッシュ（次周から高速再生）
   syncMaskPreviewSeekUI(f, at);
 }
 function maskPreviewTotalF() {
@@ -1634,6 +1678,14 @@ function pauseMaskPreview() {
   mpv.mode = "pause";
   if (mpv.playTimer) { clearTimeout(mpv.playTimer); mpv.playTimer = null; }
   dom.maskPreviewPlay.textContent = "▶ 再生";
+  // キャッシュ再生中は要素をシークしていないので、停止時に表示コマへ合わせる（コマ送り/スクラブの基準）
+  if (mpv.cachedPos != null && mpv.video.duration) {
+    const f = mpv.cachedPos;
+    mpv.cachedPos = null;
+    mpv.pendingF = f;
+    const at = Math.max(0.001, Math.min(mpv.video.duration - 0.001, (f + 0.5) / mpv.fps));
+    try { mpv.video.currentTime = at; } catch (e) { /* ignore */ }
+  }
 }
 // フレーム中央へシーク（境界ちょうどのシークは前後どちらのフレームが出るか曖昧＝本体の確立ルール）
 function seekMaskPreviewToFrame(f) {
@@ -3932,24 +3984,55 @@ function mpTogglePlay(side) {
   if (useRVFC) mp.video.requestVideoFrameCallback(onFrame);
   else mp.raf = requestAnimationFrame(onFrame);
 }
-// マスク使用時の統合プレーヤー再生（シーク駆動: 次コマ中央へシーク→停止中に描画→レートに合わせ待機）
+// マスク使用時の統合プレーヤー再生（シーク駆動＋フレームキャッシュ: STEP3と同方式）。
+// 初回はシーク→描画→可逆PNGで保存、2周目以降はデコードして描くだけ（シークも領域計算もなし）。
 async function mpMaskedLoop(side) {
   const mp = mergePlayers[side];
   try { mp.video.pause(); } catch (e) { /* ignore */ }
   const fps = await mpEnsureFps(side);
+  const r = mpRefs(side);
+  const toBlobP = (c) => new Promise((res) => c.toBlob(res, "image/png"));
+  let curF = null, lastAt = -1;
   while (mergePlayers[side] === mp && mp.playing && mp.scene) {
     const iterStart = performance.now();
+    const v = activeVideo();
     const fStart = Math.round(mp.scene.start * fps), fEnd = Math.round(mp.scene.end * fps) - 1;
-    let f = Math.floor((mp.video.currentTime || 0) * fps + 1e-6) + 1;
+    let f = (curF != null ? curF : Math.floor((mp.video.currentTime || 0) * fps + 1e-6)) + 1;
     if (f > fEnd || f < fStart) f = fStart; // シーン内ループ
     const at = Math.max(0.001, (f + 0.5) / fps);
-    try { await seekVideo(mp.video, at); } catch (e) { mpStop(side); return; }
-    if (!(mergePlayers[side] === mp && mp.playing)) return;
-    mpDraw(side); // 停止中の currentTime＝表示フレーム＝領域マップと同じコマ
-    mpSyncControls(side);
+    const sig = (v ? maskPreviewSig(v) : "") + ";mp" + r.canvas.width + "x" + r.canvas.height;
+    if (!mp._cache || mp._cache.sig !== sig) mp._cache = { sig, frames: new Map(), bytes: 0 }; // 編集で自動無効化
+    const hit = mp._cache.frames.get(f);
+    if (hit) {
+      let bmp = null;
+      try { bmp = await createImageBitmap(hit); } catch (e) { mp._cache.frames.delete(f); continue; }
+      if (!(mergePlayers[side] === mp && mp.playing)) { bmp.close(); return; }
+      r.canvas.getContext("2d").drawImage(bmp, 0, 0);
+      bmp.close();
+      curF = f; lastAt = at;
+      mp._dbg = { f, hit: true };
+      r.seek.value = String(Math.max(mp.scene.start, Math.min(mp.scene.end, at)));
+      r.time.textContent = `${formatClock(at)} / ${formatClock(mp.scene.end)} ・ コマ ${f + 1}`;
+    } else {
+      try { await seekVideo(mp.video, at); } catch (e) { mpStop(side); return; }
+      if (!(mergePlayers[side] === mp && mp.playing)) return;
+      mpDraw(side); // 停止中の currentTime＝表示フレーム＝領域マップと同じコマ
+      mpSyncControls(side);
+      curF = f; lastAt = -1;
+      mp._dbg = { f, hit: false };
+      if (mp._cache.bytes < 150 * 1024 * 1024) { // 上限150MB/側
+        const b = await toBlobP(r.canvas);
+        if (b && mp._cache && mp._cache.sig === sig && !mp._cache.frames.has(f)) { mp._cache.frames.set(f, b); mp._cache.bytes += b.size; }
+      }
+    }
     const budget = 1000 / (fps * (mp.rate || 1));
     const wait = Math.max(0, budget - (performance.now() - iterStart));
     if (wait > 0) await new Promise((res) => setTimeout(res, wait));
+  }
+  // 停止時: キャッシュ再生中なら表示コマへ実シークして通常状態（スクラブ/ピック基準）に合わせる
+  if (lastAt >= 0 && mergePlayers[side] === mp) {
+    try { await seekVideo(mp.video, lastAt); } catch (e) { /* ignore */ }
+    if (!mp.playing) { mpDraw(side); mpSyncControls(side); }
   }
 }
 function mpSeek(side, t) {
