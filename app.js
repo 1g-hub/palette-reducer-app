@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260714-85";
+const APP_VERSION = "20260714-86";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -4023,15 +4023,30 @@ async function mpMaskedLoop(side) {
     let f = (curF != null ? curF : Math.floor((mp.video.currentTime || 0) * fps + 1e-6)) + 1;
     if (f > fEnd || f < fStart) f = fStart; // シーン内ループ
     const at = Math.max(0.001, (f + 0.5) / fps);
-    const sig = (v ? maskPreviewSig(v) : "") + ";mp" + r.canvas.width + "x" + r.canvas.height;
+    // キャッシュには「選択スポットライト無し」の絵を保存する（選択は一時状態：焼き込むと解除後も
+    // ヒット再生で塗りが残る）。パネル開放中のプレビュー統合は画素に入るので署名に含める。
+    let pend = 0;
+    if (v && v._mergePanelOpen && v._mergePending) {
+      const p = v._mergePending; pend = 1;
+      if (p.target) pend = (pend * 31 + packedRGB(p.target)) >>> 0;
+      for (const m of p.members || []) { if (m && m.color) pend = (pend * 31 + packedRGB(m.color)) >>> 0; }
+    }
+    const sig = (v ? maskPreviewSig(v) : "") + ";mp" + r.canvas.width + "x" + r.canvas.height + ";p" + pend;
     if (!mp._cache || mp._cache.sig !== sig) mp._cache = { sig, frames: new Map(), bytes: 0 }; // 編集で自動無効化
     const hit = mp._cache.frames.get(f);
     if (hit) {
       let bmp = null;
       try { bmp = await createImageBitmap(hit); } catch (e) { mp._cache.frames.delete(f); continue; }
       if (!(mergePlayers[side] === mp && mp.playing)) { bmp.close(); return; }
-      r.canvas.getContext("2d").drawImage(bmp, 0, 0);
+      const hctx = r.canvas.getContext("2d");
+      hctx.drawImage(bmp, 0, 0);
       bmp.close();
+      // 選択スポットライトはライブ状態から重ねる（mpDraw と同条件）→ 選択/解除が即座に反映される
+      if (v && v.mergeMode && !v._mergePanelOpen && v.mergeSel && v.mergeSel.length) {
+        const img2 = hctx.getImageData(0, 0, r.canvas.width, r.canvas.height);
+        applyMergeSpotlight(img2.data, r.canvas.width, r.canvas.height, v.mergeSel, at);
+        hctx.putImageData(img2, 0, 0);
+      }
       curF = f; lastAt = at;
       mp._dbg = { f, hit: true };
       r.seek.value = String(Math.max(mp.scene.start, Math.min(mp.scene.end, at)));
@@ -4044,7 +4059,8 @@ async function mpMaskedLoop(side) {
       curF = f; lastAt = -1;
       mp._dbg = { f, hit: false };
       if (mp._cache.bytes < 150 * 1024 * 1024) { // 上限150MB/側
-        const b = await toBlobP(r.canvas);
+        // pickCanvas = mpDraw が残す「縮約＋統合済み・スポットライト前」の絵（表示キャンバスは選択塗り込み）
+        const b = mp.pickCanvas ? await toBlobP(mp.pickCanvas) : null;
         if (b && mp._cache && mp._cache.sig === sig && !mp._cache.frames.has(f)) { mp._cache.frames.set(f, b); mp._cache.bytes += b.size; }
       }
     }
