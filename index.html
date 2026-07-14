@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20260714-84">
+    <link rel="stylesheet" href="./styles.css?v=20260714-85">
   </head>
   <body>
     <div class="page">
@@ -97,7 +97,7 @@
                 </div>
                 <p class="seg-note">全編通し＝動画全体を1つの色セットにまとめます。シーン別＝カット（場面）ごとに分けて、色を統合できます。</p>
 
-                <div class="seg-label">領域マスク<span class="info" data-tip="対象ごとの領域と背景で別々のパレットを作ります（例：キャラは少ない色数・背景は多め）。読めるもの：①輪郭ラボの本体用JSON ②マスクZIP ③連番PNG（クリスタ等で描いた白黒マスク：白=対象・黒か透明=背景、ファイル名の f00000 がフレーム番号。無ければ名前順に0,1,2…。L1/L2やobj1で複数対象を色分け）。">?</span></div>
+                <div class="seg-label">領域マスク</div>
                 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0 14px">
                   <label class="btn-ghost" for="maskJsonInput" style="cursor:pointer">マスクを読み込む（JSON / ZIP / 連番PNG）</label>
                   <input type="file" id="maskJsonInput" accept=".json,.zip,.png,.webp,.bmp,application/json,application/zip,image/png" multiple hidden>
@@ -601,7 +601,7 @@
     <!-- hidden work elements -->
     <video id="workVideo" muted playsinline preload="auto"></video>
     <canvas id="exportCanvas" class="offscreen"></canvas>
-    <script src="./icm.js?v=20260714-84"></script>
-    <script src="./app.js?v=20260714-84"></script>
+    <script src="./icm.js?v=20260714-85"></script>
+    <script src="./app.js?v=20260714-85"></script>
   </body>
 </html>

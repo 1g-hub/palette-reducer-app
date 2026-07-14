@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260714-84";
+const APP_VERSION = "20260714-85";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -2829,7 +2829,22 @@ function reducedClickOff(clientX, clientY) {
   const d = dom.cvReduced.getContext("2d", { willReadFrequently: true }).getImageData(px, py, 1, 1).data;
   if (d[0] === 255 && d[1] === 0 && d[2] === 255) { showToast("info", "ここは『新しい色』のためOFFにできません"); return; }
   const key = (d[0] << 16) | (d[1] << 8) | d[2];
-  if (!v.analysis.representatives.some((c) => packedRGB(c) === key)) { showToast("info", "この色は統合後の色です。パレットから操作してください"); return; }
+  if (!v.analysis.representatives.some((c) => packedRGB(c) === key)) {
+    // マスク使用中は「別領域のパレットの色」であることが多い → どの領域の色かを調べて正確に案内
+    if (masksActive(v)) {
+      const base = String(v.curPaletteId || "only").split("@")[0];
+      for (const c of maskChips(v)) {
+        const pid2 = regionPaletteIdOf(base, c.rk);
+        if (pid2 === v.curPaletteId) continue; // いま編集中のパレット（上の完全一致で既に不一致）
+        const st = v.palettes && v.palettes[pid2];
+        if (st && repsEnabled(st.analysis.representatives, st.disabledKeys).some((cc) => packedRGB(cc) === key)) {
+          showToast("info", `この色は「${c.name}」のパレットの色です。シークバー下の領域選択で「${c.name}」に切り替えてから操作してください`); return;
+        }
+      }
+      if (regionStatesFor(v, base).some((st) => st.off)) { showToast("info", "この色は統合後の色か、「減色なし」領域の色のためOFFにできません"); return; }
+    }
+    showToast("info", "この色は統合後の色です。パレットから操作してください"); return;
+  }
   togglePaletteKey(v, key); // displayed color is an enabled rep -> this turns it OFF
 }
 
@@ -4130,7 +4145,6 @@ function applyMergeSpotlight(data, outW, outH, sel, timeSec) {
 function toggleMergeMode() {
   const v = activeVideo(); if (!v) return;
   if (anyRegionBusy(v)) { flashMergeHint("いま領域を計算中です…"); return; } // don't disturb the in-flight capture
-  if (masksActive(v)) v.regionMode = false; // マスク使用中は「色全体」統合のみ（領域選択キャプチャは非対応）
   v.mergeMode = !v.mergeMode;
   if (v.mergeMode) { mpStop("L"); mpStop("R"); } // picking requires a still frame
   else closeMergePanel(v);
@@ -4166,8 +4180,6 @@ function syncMergeModeUI(v) {
 }
 function toggleRegionMode() {
   const v = activeVideo(); if (!v || !v.mergeMode) return;
-  // 領域マスク使用中は「色全体」統合のみ（隣接領域キャプチャはマスク非対応の単一パレット前提）
-  if (masksActive(v)) { flashMergeHint("領域マスク使用中は「色全体」の統合のみ使えます"); return; }
   if (anyRegionBusy(v)) { flashMergeHint("いま領域を計算中です…"); return; }
   if (v._mergePanelOpen) { flashMergeHint("統合の確定中です。先に『統合する』か『キャンセル』を押してください"); return; }
   v.regionMode = !v.regionMode;
@@ -4201,11 +4213,13 @@ function mergePickAt(side, clientX, clientY) {
   const at = canvasPixelAt(side, clientX, clientY); if (!at) return;
   const d = mp.pickCtx.getImageData(at.px, at.py, 1, 1).data;
   if (d[0] === 255 && d[1] === 0 && d[2] === 255) { flashMergeHint("ここは『新しい色』のため統合の対象にできません"); return; }
-  if (v.regionMode) { pickRegion(side, at.px, at.py); return; }
+  // シーン全体が減色なし（マスク未使用）: 表示は素通しで色がパレットに固定されない → 統合対象外
+  if (!masksActive(v) && paletteRuntimeState(v, mp.scene.paletteId).off) { flashMergeHint("このシーンは「減色なし」のため色が固定されず、統合の対象にできません"); return; }
   let reps = mp.reps, pid = mp.scene.paletteId;
   if (masksActive(v)) {
     // 領域マスク使用中：クリック画素が属する領域のパレットで解決する。mp.reps はシーン（背景）
     // パレットのみなので、他領域の色を背景の最近色へ丸めると実在しない色が登録されてしまう。
+    // （減色なし領域のガードは色ピック・領域ピック共通なので、領域分岐より先に行う）
     const fps = v.fps || (v.masks && v.masks.fps) || 30;
     const f = Math.floor(((mp.video && mp.video.currentTime) || 0) * fps + 1e-6);
     const rmap = regionMapForFrame(v, f, mp.pickCanvas.width, mp.pickCanvas.height);
@@ -4216,6 +4230,7 @@ function mergePickAt(side, clientX, clientY) {
     if (st.off) { flashMergeHint("この領域は「減色なし」のため色が固定されず、統合の対象にできません"); return; }
     reps = st.reps; pid = rpid;
   }
+  if (v.regionMode) { pickRegion(side, at.px, at.py); return; }
   const repIndex = repIndexForColor(reps, d);
   if (repIndex < 0) return;
   toggleMergeSelection(v, side, pid, repIndex, reps[repIndex].slice());
@@ -4487,7 +4502,7 @@ function isCBytes(data, n, color) {
 // smoothing the players/export use, so the mask domain IS the apply domain. Two passes:
 // a 1x playback (fast), then a seek-fill for any frames the decoder coalesced (gap-free,
 // deterministic). Stores RLE-compressed reduced index maps (reused across picks).
-async function captureSceneFrames(mp, scene, fps, w, h, reps, threshold, onProgress, abortCheck) {
+async function captureSceneFrames(v, mp, scene, fps, w, h, reps, threshold, onProgress, abortCheck) {
   const off = document.createElement("canvas"); off.width = w; off.height = h;
   const octx = off.getContext("2d", { willReadFrequently: true });
   octx.imageSmoothingEnabled = true; // MATCH mpDraw / export drawImage (browser default = smoothed)
@@ -4509,7 +4524,10 @@ async function captureSceneFrames(mp, scene, fps, w, h, reps, threshold, onProgr
     if (aborted || fi < fStart || fi > fEnd || frames.has(fi)) return;
     try { octx.drawImage(mp.video, 0, 0, w, h); } catch (e) { return; }
     const img = octx.getImageData(0, 0, w, h);
-    reduceFrame(img.data, reps, threshold, mp.cache, w, h, { flat: true });
+    // マスク時は領域別パレットで縮約（表示・書き出しと同一）。領域マップはコマ番号 fi のもの
+    // を使うため、時刻はフレーム中心で渡す（reduceFrameAt が floor で fi に戻す）。
+    if (masksActive(v)) reduceFrameAt(v, img.data, (fi + 0.5) / fps, fps, w, h, { flat: true });
+    else reduceFrame(img.data, reps, threshold, mp.cache, w, h, { flat: true });
     const idx = new Uint8Array(n);
     for (let i = 0, p = 0; p < n; i += 4, p += 1) { const r = repIndex.get((img.data[i] << 16) | (img.data[i + 1] << 8) | img.data[i + 2]); idx[p] = r === undefined ? NEW : r; }
     const enc = rleEncodeIdx(idx, n);
@@ -4541,7 +4559,10 @@ async function captureSceneFrames(mp, scene, fps, w, h, reps, threshold, onProgr
   // few frames remain (a short seek-fill is then cheaper than another full playback pass). This
   // never does WORSE than the old single-pass + full seek-fill: a low-gap scene exits after pass 1.
   const MAXPASS = 4, SEEK_MS = 120, sceneMs = Math.max(200, (scene.end - scene.start) * 1000);
-  if (typeof mp.video.requestVideoFrameCallback === "function") {
+  // マスク時は再生グラブを使わない（rVFC の mediaTime は合成済み画素と原子的に対にならない＝
+  // 実証済みの競合。縮約が領域マップ＝コマ番号に依存するため、1コマの取り違えが境界色として
+  // キャッシュに焼き込まれる）。シーク専用なら 停止中 currentTime==表示コマ で厳密。
+  if (typeof mp.video.requestVideoFrameCallback === "function" && !masksActive(v)) {
     for (let pass = 0; pass < MAXPASS && !ac(); pass += 1) {
       const before = frames.size;
       await seekVideo(mp.video, scene.start + 1e-3).catch(() => {});
@@ -4553,7 +4574,8 @@ async function captureSceneFrames(mp, scene, fps, w, h, reps, threshold, onProgr
     }
   }
   // (2) Seek-fill the stragglers (slow: one decode-seek per frame) — gap-free regardless of decoder coalescing.
-  phase = "seek";
+  // マスク時は全コマがこの経路（＝主読込）なので、ラベルを分ける（"exact"）。
+  phase = masksActive(v) ? "exact" : "seek";
   onProgress(frames.size, total, phase);
   for (let fi = fStart; fi <= fEnd && !ac(); fi += 1) {
     if (frames.has(fi)) continue;
@@ -4607,27 +4629,46 @@ function updateMergeProgress(side, got, tot, phase) {
   const p = tot > 0 ? Math.max(0, Math.min(100, Math.round((got / tot) * 100))) : 0;
   el.style.setProperty("--p", p);
   const t = el.querySelector(".merge-progress-pct"); if (t) t.textContent = p + "%";
-  const seeking = phase === "seek", computing = phase === "compute";
-  el.classList.toggle("seeking", seeking);   // slow gap-fill phase — warm ring
+  const seeking = phase === "seek", computing = phase === "compute", exact = phase === "exact";
+  el.classList.toggle("seeking", seeking || exact);   // slow per-frame phase — warm ring
   el.classList.toggle("computing", computing); // region-compute phase — teal ring
   const l = el.querySelector(".merge-progress-label");
-  if (l) l.textContent = computing ? "🧩 領域を計算中…" : seeking ? `🧩 細部を補完中… 残り${Math.max(0, tot - got)}` : "🎞️ 映像を読み込み中…";
+  if (l) l.textContent = computing ? "🧩 領域を計算中…" : exact ? "🎞️ 1コマずつ読み込み中…（ズレ防止・このシーン初回のみ）" : seeking ? `🧩 細部を補完中… 残り${Math.max(0, tot - got)}` : "🎞️ 映像を読み込み中…";
 }
 function hideMergeProgress(side) { const el = mergeProgressEl(side); if (el) el.hidden = true; }
+// マスク時のキャプチャ用「合成色表」: シーン内 全領域パレットの有効代表色を重複なしで結合。
+// キャプチャはパレット添字（Uint8）で保存するため、全領域の色を1つの表に載せる必要がある。
+// 減色なし領域は素通し＝任意色で表に載らず、新色番兵255として保存される（＝領域選択の対象外、
+// 歩行のシード色とは一致しないので混入もしない）。
+function captureRepsFor(v, sceneId, fallbackReps) {
+  if (!masksActive(v)) return fallbackReps;
+  const seen = new Set(), out = [];
+  for (const st of regionStatesFor(v, sceneId)) {
+    if (st.off) continue;
+    for (const c of st.reps) { const k = packedRGB(c); if (!seen.has(k)) { seen.add(k); out.push(c); } }
+  }
+  return out;
+}
+// マスク時のキャプチャ内容は全領域パレットの状態（K/OFF/しきい値/減色なし）に依存する → 署名に反映
+function maskCaptureSig(v, sceneId) {
+  if (!masksActive(v)) return "nomask";
+  return regionStatesFor(v, sceneId).map((st) => (st.off ? "off" : `${st.th}:${repsSig(st.reps)}`)).join(",");
+}
 async function getSceneFrameCache(mp, scene, fps, w, h, reps, threshold, abortCheck, onProg) {
   const v = activeVideo();
+  const capReps = captureRepsFor(v, scene.paletteId, reps); // マスク時=合成色表 / 通常=シーンパレット
   // Key by scene IDENTITY (time range), not just paletteId — distinct scenes can share a
   // palette (e.g. two "first" scenes) and must NOT reuse each other's frame range/cache.
   const key = `${scene.paletteId}@${scene.start.toFixed(3)}-${scene.end.toFixed(3)}`;
-  const sig = `${key}|${threshold}|${repsSig(reps)}|${w}x${h}|${Math.round(fps)}|${icmFlatSig()}`;
+  const sig = `${key}|${threshold}|${repsSig(capReps)}|${w}x${h}|${Math.round(fps)}|${icmFlatSig()}|${maskCaptureSig(v, scene.paletteId)}`;
   v._regionFrameCache = v._regionFrameCache || {};
   const hit = v._regionFrameCache[key];
   if (hit && hit.sig === sig) { regionCacheTouch(v, key); return hit; } // reuse: no decode (also a memoized "too big" marker -> instant hint, no re-decode)
-  const cache = await captureSceneFrames(mp, scene, fps, w, h, reps, threshold,
-    (got, tot, phase) => { setMergeHint(`${phase === "seek" ? "🧩 細部を補完中…" : "🎞️ 映像を読み込み中…"} ${got}/${tot}（このシーンは初回だけ）`); if (onProg) onProg(got, tot, phase); }, abortCheck);
+  const cache = await captureSceneFrames(v, mp, scene, fps, w, h, capReps, threshold,
+    (got, tot, phase) => { setMergeHint(`${phase === "seek" ? "🧩 細部を補完中…" : phase === "exact" ? "🎞️ 1コマずつ読み込み中…" : "🎞️ 映像を読み込み中…"} ${got}/${tot}（このシーンは初回だけ）`); if (onProg) onProg(got, tot, phase); }, abortCheck);
   cache.sig = sig;
   if (!cache.aborted) regionCacheStore(v, key, cache);                          // complete cache: retain (LRU-bounded)
-  else if (cache.aborted !== "navigated") regionCacheStore(v, key, { sig, aborted: cache.aborted, bytes: 0, frames: new Map(), fps, w, h, fStart: cache.fStart, fEnd: cache.fEnd, reps }); // memoize "too big / too many colors" so a repeat click is instant (no re-decode thrash)
+  else if (cache.aborted !== "navigated") regionCacheStore(v, key, { sig, aborted: cache.aborted, bytes: 0, frames: new Map(), fps, w, h, fStart: cache.fStart, fEnd: cache.fEnd, reps: capReps }); // memoize "too big / too many colors" so a repeat click is instant (no re-decode thrash)
   return cache;
 }
 // nearest pixel that is the seed color, spiraling out from (sx,sy) — robustness for edge clicks.
@@ -5033,7 +5074,13 @@ function syncExportMode() {
   if (state.exportMode === "fast" && f.via !== "webcodecs") {
     dom.exportModeDesc.textContent = "この保存形式は高速書き出しに対応していないため、FFmpegでの書き出しになります。高速にしたい場合は「WebM（標準・速い）」を選んでください。";
   } else {
-    dom.exportModeDesc.textContent = EXPORT_MODE_DESCS[state.exportMode] || EXPORT_MODE_DESCS.safe;
+    let txt = EXPORT_MODE_DESCS[state.exportMode] || EXPORT_MODE_DESCS.safe;
+    // 高速はリアルタイム取り込みのため、フレーム毎にパレット/マスクが変わる動画では1コマの取り違えが
+    // 起こりうる → それらは自動的に正確モードで書き出す（exportViaPlaybackCapture 冒頭の迂回）。明示する。
+    if (state.exportMode === "fast" && doneVideos().some((x) => x.save && (masksActive(x) || (x.sceneMode && x.scenes && x.scenes.length > 1)))) {
+      txt += "※ 領域マスク／シーン別（複数シーン）の動画は、フレームずれを防ぐため自動的に「正確」モードで書き出します。";
+    }
+    dom.exportModeDesc.textContent = txt;
   }
 }
 
