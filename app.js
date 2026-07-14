@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260714-86";
+const APP_VERSION = "20260714-87";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -4483,10 +4483,12 @@ function regionIndexAtTime(rg, t) {
 function rleEncodeIdx(idx, n) {
   const vals = [], cnts = []; let p = 0;
   while (p < n) { const val = idx[p]; let q = p + 1; while (q < n && idx[q] === val) q += 1; vals.push(val); cnts.push(q - p); p = q; }
-  return { v: Uint8Array.from(vals), c: Uint32Array.from(cnts), bytes: vals.length * 5 };
+  // 値の幅は入力に合わせる（合成色表が255色以上のときは Uint16 添字。番兵も 65535 になる）
+  const wide = idx instanceof Uint16Array;
+  return { v: (wide ? Uint16Array : Uint8Array).from(vals), c: Uint32Array.from(cnts), bytes: vals.length * (4 + (wide ? 2 : 1)) };
 }
 function rleDecodeIdx(enc, n) {
-  const idx = new Uint8Array(n); let p = 0;
+  const idx = enc.v instanceof Uint16Array ? new Uint16Array(n) : new Uint8Array(n); let p = 0;
   for (let r = 0; r < enc.v.length; r += 1) { const c = enc.c[r]; idx.fill(enc.v[r], p, p + c); p += c; }
   return idx;
 }
@@ -4524,12 +4526,13 @@ async function captureSceneFrames(v, mp, scene, fps, w, h, reps, threshold, onPr
   octx.imageSmoothingEnabled = true; // MATCH mpDraw / export drawImage (browser default = smoothed)
   const fStart = Math.floor(scene.start * fps), fEnd = Math.floor((scene.end - 1e-3) * fps);
   const total = fEnd - fStart + 1, n = w * h;
-  // The palette-index map uses 255 as the "new color" sentinel; bail if a palette is that large
-  // (never happens with the K slider today, but avoids a silent index/sentinel collision).
-  if (reps.length >= 255) return { fps, w, h, fStart, fEnd, reps, frames: new Map(), aborted: "tooManyColors" };
+  // 添字マップの幅: 254色までは Uint8（番兵255）、それ以上（マスク時の合成色表は容易に超える）は
+  // Uint16（番兵65535）。65534色以上は起こり得ないが番兵衝突防止で中止。
+  if (reps.length >= 65534) return { fps, w, h, fStart, fEnd, reps, frames: new Map(), aborted: "tooManyColors" };
+  const WIDE = reps.length >= 255;
   const repIndex = new Map();
   for (let i = 0; i < reps.length; i += 1) repIndex.set(packedRGB(reps[i]), i);
-  const NEW = 255;
+  const NEW = WIDE ? 65535 : 255;
   const frames = new Map();
   const times = new Float64Array(Math.max(1, total)); // capture PTS per frame (index fi-fStart); used for VFR-correct apply mapping
   for (let i = 0; i < total; i += 1) times[i] = (fStart + i) / fps; // default = grid PTS (constant-fps correct)
@@ -4544,7 +4547,7 @@ async function captureSceneFrames(v, mp, scene, fps, w, h, reps, threshold, onPr
     // を使うため、時刻はフレーム中心で渡す（reduceFrameAt が floor で fi に戻す）。
     if (masksActive(v)) reduceFrameAt(v, img.data, (fi + 0.5) / fps, fps, w, h, { flat: true });
     else reduceFrame(img.data, reps, threshold, mp.cache, w, h, { flat: true });
-    const idx = new Uint8Array(n);
+    const idx = new (WIDE ? Uint16Array : Uint8Array)(n);
     for (let i = 0, p = 0; p < n; i += 4, p += 1) { const r = repIndex.get((img.data[i] << 16) | (img.data[i + 1] << 8) | img.data[i + 2]); idx[p] = r === undefined ? NEW : r; }
     const enc = rleEncodeIdx(idx, n);
     frames.set(fi, enc); bytes += enc.bytes || 0;
@@ -4605,7 +4608,7 @@ function reducedFromIndex(idx, reps, n) {
   const data = new Uint8ClampedArray(n * 4);
   for (let p = 0, i = 0; p < n; p += 1, i += 4) {
     const k = idx[p];
-    if (k === 255) { data[i] = 255; data[i + 1] = 0; data[i + 2] = 255; }
+    if (k >= reps.length) { data[i] = 255; data[i + 1] = 0; data[i + 2] = 255; } // 番兵（255/65535）は必ず reps.length 以上
     else { const c = reps[k]; data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2]; }
     data[i + 3] = 255;
   }
@@ -4676,7 +4679,7 @@ async function getSceneFrameCache(mp, scene, fps, w, h, reps, threshold, abortCh
   // Key by scene IDENTITY (time range), not just paletteId — distinct scenes can share a
   // palette (e.g. two "first" scenes) and must NOT reuse each other's frame range/cache.
   const key = `${scene.paletteId}@${scene.start.toFixed(3)}-${scene.end.toFixed(3)}`;
-  const sig = `${key}|${threshold}|${repsSig(capReps)}|${w}x${h}|${Math.round(fps)}|${icmFlatSig()}|${maskCaptureSig(v, scene.paletteId)}`;
+  const sig = `${key}|${threshold}|${repsSig(capReps)}|${w}x${h}|${Math.round(fps)}|${icmFlatSig()}|${maskCaptureSig(v, scene.paletteId)}|i16`; // |i16 = Uint16添字対応後の形式（旧 tooManyColors メモを無効化）
   v._regionFrameCache = v._regionFrameCache || {};
   const hit = v._regionFrameCache[key];
   if (hit && hit.sig === sig) { regionCacheTouch(v, key); return hit; } // reuse: no decode (also a memoized "too big" marker -> instant hint, no re-decode)
@@ -4725,9 +4728,11 @@ async function buildRegionSelection(side, px, py) {
   if (aborted()) return null; // build was cancelled while capturing; _regionBusy already cleared by abortRegionBuild
   if (cache.aborted) {
     setRegionBusy(v, side, false);
-    flashMergeHint(cache.aborted === "tooManyColors"
+    const msg = cache.aborted === "tooManyColors"
       ? "🧩 代表色が多すぎて領域選択は使えません"
-      : "🧩 この動画は長い/高精細すぎて領域選択ができません（STEP2でプレビュー解像度を下げてください）");
+      : "🧩 この動画は長い/高精細すぎて領域選択ができません（STEP2でプレビュー解像度を下げてください）";
+    flashMergeHint(msg);
+    showToast("info", msg); // ヒント行は見逃しやすい（「一瞬表示が出て何も始まらない」報告）→ トーストでも明示
     return null;
   }
   const { fStart, fEnd } = cache;
