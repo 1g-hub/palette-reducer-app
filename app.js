@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260714-88";
+const APP_VERSION = "20260715-89";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -2043,7 +2043,8 @@ function runAnalysisWorker(firstImageData, lastImageData, settings, onProgress) 
 
 // マスク付き分析: 入力の ImageData は複製して渡す（転送で元が無効化されると、同じフレームを
 // 複数領域の分析に使い回せないため）。mask は 1画素=1バイト（1=対象）、null なら全画素。
-function runAnalysisWorkerMasked(firstImageData, lastImageData, firstMask, lastMask, settings, onProgress) {
+// 領域マスク付き分析。images は可変枚数（背景=2枚、各領域=最大3枚）、masks は同じ並び（null=全画素）。
+function runAnalysisWorkerMasked(images, masks, settings, onProgress) {
   return new Promise((resolve, reject) => {
     const worker = new Worker(`./worker.js?v=${APP_VERSION}`);
     state.activeWorker = worker;
@@ -2055,12 +2056,15 @@ function runAnalysisWorkerMasked(firstImageData, lastImageData, firstMask, lastM
       else if (message.type === "error") { worker.terminate(); state.activeWorker = null; state.currentReject = null; reject(new Error(message.message)); }
     };
     worker.onerror = (event) => { worker.terminate(); state.activeWorker = null; state.currentReject = null; reject(new Error(event.message)); };
-    const fb = new Uint8ClampedArray(firstImageData.data).buffer;
-    const lb = new Uint8ClampedArray(lastImageData.data).buffer;
-    const payload = { firstBuffer: fb, lastBuffer: lb, settings };
-    const transfer = [fb, lb];
-    if (firstMask) { const b = new Uint8Array(firstMask).buffer; payload.firstMaskBuffer = b; transfer.push(b); }
-    if (lastMask) { const b = new Uint8Array(lastMask).buffer; payload.lastMaskBuffer = b; transfer.push(b); }
+    const payload = { settings, imageBuffers: [], maskBuffers: [] };
+    const transfer = [];
+    images.forEach((img, i) => {
+      const b = new Uint8ClampedArray(img.data).buffer;
+      payload.imageBuffers.push(b); transfer.push(b);
+      const m = masks[i];
+      if (m) { const mb = new Uint8Array(m).buffer; payload.maskBuffers.push(mb); transfer.push(mb); }
+      else payload.maskBuffers.push(null);
+    });
     worker.postMessage({ type: "analyze", payload }, transfer);
   });
 }
@@ -2081,41 +2085,50 @@ function layerFramesInRange(v, lid, fLo, fHi) {
   return (m._layerFrames[lid] || []).filter((f) => f >= fLo && f < fHi);
 }
 
-// 1シーン分の「背景＋各レイヤ」パレット分析。サンプルフレームは原則シーンの先頭/末尾（fA0/fB0、
-// 取得済み画像 imgA0/imgB0 を再利用）。レイヤがそこに不在なら、シーン内でそのレイヤが存在する
-// 最初/最後のフレームを追加で取得して使う。領域がシーンに全く無ければその領域パレットは作らない
-// （recolor は背景へフォールバック）。
+// 1シーン分の「背景＋各レイヤ」パレット分析。
+//  背景   : シーンの先頭/末尾の2枚（fA0/fB0、取得済み画像 imgA0/imgB0 を再利用）。
+//  各レイヤ: 最大3枚=「最初・最後・マスク最大」。最初/最後は原則シーンの先頭/末尾で、そこに
+//           マスクが無ければ「マスクが存在する最初/最後のフレーム」で代替。重複は1枚にまとめる。
+// 領域がシーンに全く無ければその領域パレットは作らない（recolor は背景へフォールバック）。
 async function analyzeSceneRegions(v, sceneId, fLo, fHi, fA0, fB0, imgA0, imgB0, fps, settings, onFrac) {
   const regions = ["bg", ...v.masks.layers.map((L) => "L" + L.id)];
   const nR = regions.length;
+  const dbg = (v._regionSampleDbg = v._regionSampleDbg || {}); // QA用: 実際に使ったサンプルフレーム番号
   for (let ri = 0; ri < nR; ri += 1) {
     throwIfCancelled();
     const rk = regions[ri];
-    let fa = fA0, fb = fB0, imgA = imgA0, imgB = imgB0;
+    // 背景: シーンの先頭/末尾の2枚（取得済み画像を再利用）。
+    let frames = [fA0, fB0];
+    const imgFor = new Map([[fA0, imgA0], [fB0, imgB0]]);
     if (rk !== "bg") {
       const pres = layerFramesInRange(v, rk.slice(1), fLo, fHi);
-      if (!pres.length) { if (onFrac) onFrac((ri + 1) / nR); continue; }
-      // サンプルは「存在フレームの先頭/末尾」ではなく、前半・後半それぞれで輪郭量が最大のフレーム。
-      // 出入りの瞬間の極小マスク（例: 消える直前の126px）から代表色を作ると中盤の見た目を外し、
-      // 大量の「はみ出し色（マゼンタ）」が出る（実測）。輪郭RLEの合計長＝サイズの安価な代理指標。
+      if (!pres.length) { if (onFrac) onFrac((ri + 1) / nR); continue; } // シーン内に領域なし → recolor は背景へフォールバック
+      // 各領域のサンプルは最大3枚=「最初・最後・最大」:
+      //  - 最初/最後は原則シーンの先頭/末尾（背景と同じ基準）。ただし端のフレームにこのマスクが
+      //    無ければ「マスクが存在する最初/最後のフレーム」で代替する。
+      //  - さらにマスクが最大のフレームを1枚加える。端の2枚が出入りの瞬間の極小マスクだと中盤の
+      //    見た目を外し、はみ出し色（マゼンタ）が大量に出るため（実測: 8.6%→0.1%）。
+      //  - 大きさの代理指標: JSONルート=輪郭RLE合計（周長）、PNG直接ルート=領域RLE合計（面積）。
       const lid = rk.slice(1);
-      // 大きさの代理指標: JSONルート＝輪郭RLE合計（周長）、PNG直接ルート＝領域RLE合計（面積）。どちらも大きいほど大きい。
       const msrc = v.masks.framesRegion || v.masks.frames;
-      const perim = (f) => { const rec = msrc[String(f)] || {}; const runs = rec[lid] || []; let s = 0; for (let k = 1; k < runs.length; k += 2) s += runs[k]; return s; };
-      const mid = pres.length >> 1;
-      const pick = (arr) => { let best = arr[0], bp = -1; for (const f of arr) { const p = perim(f); if (p > bp) { bp = p; best = f; } } return best; };
-      fa = pick(pres.slice(0, Math.max(1, mid)));
-      fb = pick(pres.slice(Math.max(0, mid)));
-      if (fb < fa) { const t2 = fa; fa = fb; fb = t2; }
-      if (fa !== fA0) { imgA = (await extractFrame(dom.workVideo, frameCenterTime(fa, fps, v.duration || 0), settings.analysisShortSide)).imageData; throwIfCancelled(); }
-      if (fb === fA0) imgB = imgA0;
-      else if (fb === fa) imgB = imgA;
-      else if (fb !== fB0) { imgB = (await extractFrame(dom.workVideo, frameCenterTime(fb, fps, v.duration || 0), settings.analysisShortSide)).imageData; throwIfCancelled(); }
+      const sizeOf = (f) => { const rec = msrc[String(f)] || {}; const runs = rec[lid] || []; let s = 0; for (let k = 1; k < runs.length; k += 2) s += runs[k]; return s; };
+      const fa = pres.includes(fA0) ? fA0 : pres[0];
+      const fb = pres.includes(fB0) ? fB0 : pres[pres.length - 1];
+      let fc = pres[0], best = -1;
+      for (const f of pres) { const s = sizeOf(f); if (s > best) { best = s; fc = f; } }
+      frames = [...new Set([fa, fb, fc])].sort((a, b) => a - b); // 重複は1枚に（例: 最大が先頭と同じ）
     }
-    const mA = regionSampleMask(v, fa, imgA.width, imgA.height, rk);
-    const mB = regionSampleMask(v, fb, imgB.width, imgB.height, rk);
-    if (rk !== "bg" && !mA && !mB) { if (onFrac) onFrac((ri + 1) / nR); continue; } // 縮小で消えるほど極小 → 背景に任せる
-    const res = await runAnalysisWorkerMasked(imgA, imgB, mA, mB, settings, (frac) => { if (onFrac) onFrac((ri + Math.max(0, Math.min(1, frac))) / nR); });
+    const imgs = [], maskArr = [], used = [];
+    for (const f of frames) {
+      let img = imgFor.get(f);
+      if (!img) { img = (await extractFrame(dom.workVideo, frameCenterTime(f, fps, v.duration || 0), settings.analysisShortSide)).imageData; throwIfCancelled(); imgFor.set(f, img); }
+      const m = regionSampleMask(v, f, img.width, img.height, rk);
+      if (rk !== "bg" && !m) continue; // 分析解像度への縮小で消えるほど極小 → このフレームは採らない（全画素が混入するため）
+      imgs.push(img); maskArr.push(m); used.push(f);
+    }
+    if (!imgs.length) { if (onFrac) onFrac((ri + 1) / nR); continue; } // 全フレームで極小 → 背景に任せる
+    dbg[regionPaletteIdOf(sceneId, rk)] = used.slice();
+    const res = await runAnalysisWorkerMasked(imgs, maskArr, settings, (frac) => { if (onFrac) onFrac((ri + Math.max(0, Math.min(1, frac))) / nR); });
     throwIfCancelled();
     v.palettes[regionPaletteIdOf(sceneId, rk)] = makePaletteState({ ...res, settings });
     if (onFrac) onFrac((ri + 1) / nR);

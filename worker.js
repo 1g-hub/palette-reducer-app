@@ -25,20 +25,23 @@ function postProgress(stage, value, message) {
 
 function analyze(payload) {
   const settings = payload.settings || {};
-  const first = new Uint8ClampedArray(payload.firstBuffer);
-  const last = new Uint8ClampedArray(payload.lastBuffer);
-  // 任意の領域マスク（1画素=1バイト、1=集計対象）。マスク別パレット分析で使う。無ければ全画素。
-  const firstMask = payload.firstMaskBuffer ? new Uint8Array(payload.firstMaskBuffer) : null;
-  const lastMask = payload.lastMaskBuffer ? new Uint8Array(payload.lastMaskBuffer) : null;
-  const masks = firstMask || lastMask ? [firstMask, lastMask] : null;
-  const totalPixels = masks
-    ? (firstMask ? firstMask.reduce((s, m) => s + (m ? 1 : 0), 0) : first.length / 4)
-      + (lastMask ? lastMask.reduce((s, m) => s + (m ? 1 : 0), 0) : last.length / 4)
-    : first.length / 4 + last.length / 4;
+  // 画像は可変枚数（imageBuffers 優先。旧来の firstBuffer/lastBuffer の2枚形式も受ける）。
+  // マスクは画像と同じ並びの任意配列（1画素=1バイト、1=集計対象、null=全画素）。
+  // マスク別パレット分析では背景=2枚（シーン先頭/末尾）、各領域=最大3枚（最初・最後・マスク最大）。
+  const bufs = payload.imageBuffers || [payload.firstBuffer, payload.lastBuffer];
+  const maskBufs = payload.maskBuffers || [payload.firstMaskBuffer, payload.lastMaskBuffer];
+  const imgs = bufs.map((b) => new Uint8ClampedArray(b));
+  const maskArr = maskBufs.map((b) => (b ? new Uint8Array(b) : null));
+  const masks = maskArr.some(Boolean) ? maskArr : null;
+  let totalPixels = 0;
+  for (let i = 0; i < imgs.length; i += 1) {
+    const m = masks ? masks[i] : null;
+    totalPixels += m ? m.reduce((s, x) => s + (x ? 1 : 0), 0) : imgs[i].length / 4;
+  }
   const bucketBits = settings.bucketBits || DEFAULT_BUCKET_BITS;
 
   postProgress("histogram", 0.05, "Bucketing colors");
-  const buckets = buildBucketCandidates([first, last], bucketBits, masks);
+  const buckets = buildBucketCandidates(imgs, bucketBits, masks);
   const histogram = buckets.candidates;
   const uniqueColors = histogram.length;
   if (!uniqueColors) throw new Error("No colors were available for palette analysis");
