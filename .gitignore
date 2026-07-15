@@ -5,3 +5,12 @@
 *.mp4
 *.webm
 *.mov
+
+# テスト・QA類はローカルのみ（公開リポジトリに含めない）
+qa/
+scratchpad/
+contour-lab/test/
+contour-lab/
+
+# 計画・検討メモはローカルのみ
+VIDEO_PREVIEW_PERFORMANCE_PROPOSAL.md
