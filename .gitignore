@@ -12,5 +12,6 @@ scratchpad/
 contour-lab/test/
 contour-lab/
 
-# 計画・検討メモはローカルのみ
+# 計画・検討メモ・修正前バックアップはローカルのみ
 VIDEO_PREVIEW_PERFORMANCE_PROPOSAL.md
+backups/
