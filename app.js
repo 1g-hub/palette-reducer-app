@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "20260715-89";
+const APP_VERSION = "20260715-92";
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -189,6 +189,8 @@ const state = {
   plotCache: null,
   toastTimer: null,
   vid: 0,
+  videoSourceSeq: 0,
+  analysisSeq: 0,
   advPreviewIdx: 0,
   advPreviewToken: 0,
   advPreviewTimer: null,
@@ -372,6 +374,7 @@ function fileKey(file) {
 
 function makeVideo(file) {
   state.vid += 1;
+  state.videoSourceSeq += 1;
   const objectUrl = URL.createObjectURL(file);
   return {
     id: "v" + state.vid,
@@ -385,6 +388,11 @@ function makeVideo(file) {
     dimsText: "—",
     durText: "—",
     videoWidth: 0, videoHeight: 0, duration: 0,
+    _sourceRevision: state.videoSourceSeq,
+    _analysisRevision: 0,
+    _paletteRevision: 0,
+    _mergeRevision: 0,
+    _maskRevision: 0,
     thumb: null,
     analysis: null,
     activeK: 0,
@@ -406,6 +414,44 @@ function makeVideo(file) {
     exportName: "",
     exportSize: 0,
   };
+}
+
+function bumpVideoRevision(v, key) {
+  if (!v) return 0;
+  v[key] = (v[key] || 0) + 1;
+  return v[key];
+}
+
+// Completed preview images are asynchronous products. Explicitly drop every owner namespace when
+// the source/analysis meaning changes; signatures remain the second line of defence against stale
+// callbacks that finish after this reset.
+function invalidateFramePreviewCaches(v) {
+  state._mpvCache = null;
+  if (!v || activeVideo() === v) state._mprCachedAt = null;
+  if (v) {
+    v._mpr = null;
+    v._regionFrameCache = null;
+    v._regionCacheOrder = [];
+  }
+  for (const side of ["L", "R"]) {
+    const mp = mergePlayers[side];
+    if (!mp || (v && mp.ownerVideo !== v)) continue;
+    mp._cache = null;
+  }
+}
+
+function invalidateAllFramePreviewCaches() {
+  state._mpvCache = null;
+  state._mprCachedAt = null;
+  for (const v of state.videos) {
+    v._mpr = null;
+    v._regionFrameCache = null;
+    v._regionCacheOrder = [];
+  }
+  for (const side of ["L", "R"]) {
+    const mp = mergePlayers[side];
+    if (mp) mp._cache = null;
+  }
 }
 
 function addFiles(fileList) {
@@ -463,8 +509,7 @@ async function makeThumbForVideo(v) {
   vid.playsInline = true;
   vid.preload = "auto";
   try {
-    vid.src = v.url;
-    vid.load();
+    loadVideoSource(vid, v.url);
     await ensureMetadata(vid);
     await seekVideo(vid, initialPreviewTime(vid));
     const w = 168;
@@ -485,8 +530,7 @@ async function makeThumbForVideo(v) {
       v.durText = formatDuration(vid.duration);
     }
   } finally {
-    vid.removeAttribute("src");
-    try { vid.load(); } catch (e) { /* ignore */ }
+    try { unloadVideoSource(vid); } catch (e) { /* ignore */ }
   }
 }
 
@@ -515,6 +559,7 @@ function clearVideos() {
 }
 
 function releaseVideo(v) {
+  invalidateFramePreviewCaches(v);
   if (v.objectUrl) URL.revokeObjectURL(v.objectUrl);
   if (v.transcoded && v.url && v.url !== v.objectUrl) URL.revokeObjectURL(v.url);
   if (v.exportUrl) URL.revokeObjectURL(v.exportUrl);
@@ -552,6 +597,11 @@ function abortRegionBuild(v, side) {
   for (const s of (side ? [side] : ["L", "R"])) {
     v._regionBuildGen[s] = (v._regionBuildGen[s] || 0) + 1;
     v._regionBusy[s] = false;
+    const mp = typeof mergePlayers !== "undefined" ? mergePlayers[s] : null;
+    if (mp && mp.ownerVideo === v && mp.video) {
+      nextVideoSeekToken(mp.video); // reject an in-flight strict capture before UI reuses this player
+      if (mp._regionSeekGen != null) mp.settled = false; // setup/play/seek must relatch before reusing capture-mutated currentTime
+    }
     hideMergeProgress(s); // drop that side's progress overlay at once
   }
 }
@@ -560,8 +610,36 @@ function cancelRegionBuild(side) {
   const v = activeVideo();
   if (!v || !regionBusy(v, side)) return;
   abortRegionBuild(v, side);
+  relatchMergePlayerAfterRegionCancel(v, side);
   flashMergeHint("🧩 領域の取得をキャンセルしました");
   syncMergeModeUI(v);
+}
+async function relatchMergePlayerAfterRegionCancel(v, side) {
+  const mp = mergePlayers[side];
+  if (!mp || mp.ownerVideo !== v || mp.cachedAt == null || activeVideo() !== v) return;
+  const at = mp.cachedAt;
+  const sourceRevision = v._sourceRevision || 0;
+  const setupGen = mp.setupGen || 0;
+  const playGen = mp.playGen || 0;
+  const scene = mp.scene;
+  const seekGen = (mp.seekGen = (mp.seekGen || 0) + 1);
+  mp.pendingSeekGen = seekGen;
+  mp._regionSeekGen = null;
+  mp.settled = false;
+  const fps = v.fps || (v.masks && v.masks.fps) || mp.fps || 30;
+  const f = Math.floor(at * fps + 1e-6);
+  try { await seekVideoFrameStrict(mp.video, at, f, fps, 5000); }
+  catch (e) {
+    if (mergePlayers[side] === mp && mp.pendingSeekGen === seekGen && (!e || e.name !== "StaleVideoSeekError")) {
+      flashMergeHint("🧩 キャンセル後の表示コマを確認できませんでした。再生またはシークで再取得してください");
+    }
+    return;
+  }
+  if (mergePlayers[side] !== mp || mp.pendingSeekGen !== seekGen || mp.playing || regionBusy(v, side)
+    || activeVideo() !== v || mp.ownerVideo !== v || (v._sourceRevision || 0) !== sourceRevision
+    || (mp.setupGen || 0) !== setupGen || (mp.playGen || 0) !== playGen || mp.scene !== scene) return;
+  if (mpDraw(side, at, seekGen)) mp.pendingSeekGen = null;
+  mpSyncControls(side);
 }
 // Drop ALL STEP4 integration state for v. Confirmed merges + region masks are tied to a specific
 // analysis (palette + reduction resolution + scene layout); whenever that analysis is rebuilt
@@ -569,6 +647,8 @@ function cancelRegionBuild(side) {
 // would paint off-palette colors at stale positions/resolutions, so they must be cleared.
 function invalidateMergeState(v) {
   if (!v) return;
+  bumpVideoRevision(v, "_mergeRevision");
+  invalidateFramePreviewCaches(v);
   abortRegionBuild(v);
   v.merges = []; v.mergeSel = []; v.mergeMode = false; v.regionMode = false;
   v._regionFrameCache = null; v._mergePending = null; v._mergePanelOpen = false;
@@ -796,8 +876,7 @@ async function runAdvancedPreview() {
   try {
     resetWorkVideo();
     dom.workVideo.preload = "auto";
-    dom.workVideo.src = v.url;
-    dom.workVideo.load();
+    loadWorkVideoSource(v);
     await ensureMetadata(dom.workVideo);
     if (token !== state.advPreviewToken) return;
     const settings = readSettings();
@@ -1194,25 +1273,25 @@ function effectivePaletteId(v, sceneId) {
 function parseMainappJson(text, fileName) {
   const j = typeof text === "string" ? JSON.parse(text) : text;
   if (j.format !== "contour-lab-mainapp" || j.version !== 1) throw new Error("形式が違います（contour-lab-mainapp v1 ではありません）");
-  if (!(j.W > 0 && j.H > 0 && j.total > 0) || !Array.isArray(j.layers) || !j.layers.length || !j.frames) throw new Error("必須フィールドが不足しています");
+  if (!Number.isSafeInteger(j.W) || j.W <= 0 || !Number.isSafeInteger(j.H) || j.H <= 0
+    || !Number.isSafeInteger(j.total) || j.total <= 0 || !Array.isArray(j.layers) || !j.layers.length || !j.frames) {
+    throw new Error("必須フィールドが不足しているか、寸法／totalが正の整数ではありません");
+  }
   const N = j.W * j.H;
+  if (!Number.isSafeInteger(N) || N <= 0) throw new Error("マスクの画素数が安全な整数範囲を超えています");
+  if (j.fps != null && (typeof j.fps !== "number" || !Number.isFinite(j.fps) || j.fps <= 0)) throw new Error("fpsが正の有限数ではありません");
   let frameCount = 0;
   for (const key of Object.keys(j.frames)) {
     const f = Number(key);
-    if (!Number.isInteger(f) || f < 0 || f >= j.total) throw new Error(`フレーム番号が不正です (${key})`);
-    const rec = j.frames[key];
-    for (const lidS of Object.keys(rec)) {
-      const runs = rec[lidS];
-      if (!Array.isArray(runs) || runs.length % 2) throw new Error(`RLEが不正です (f${key} L${lidS})`);
-      const last = runs.length ? runs[runs.length - 2] + runs[runs.length - 1] : 0;
-      if (last > N) throw new Error(`RLEが画面外を指しています (f${key} L${lidS})`);
-    }
+    if (!Number.isSafeInteger(f) || f < 0 || f >= j.total || String(f) !== key) throw new Error(`フレーム番号が不正です (${key})`);
     frameCount += 1;
   }
   const perLayer = {};
   for (const L of j.layers) perLayer[L.id] = 0;
   for (const rec of Object.values(j.frames)) for (const lidS of Object.keys(rec)) if (lidS in perLayer) perLayer[lidS] += 1;
-  return { name: fileName || "", fps: j.fps || 30, W: j.W, H: j.H, total: j.total, layers: j.layers, scenes: j.scenes || [], frames: j.frames, framesRegion: null, frameCount, perLayer };
+  const out = { name: fileName || "", fps: j.fps == null ? 30 : j.fps, W: j.W, H: j.H, total: j.total, layers: j.layers, scenes: j.scenes || [], frames: j.frames, framesRegion: null, frameCount, perLayer };
+  validateMaskDataPreflight(out);
+  return out;
 }
 
 // 輪郭線→塗り（even-odd）。contour-lab の computeFill の忠実な移植（純関数）:
@@ -1417,7 +1496,20 @@ async function appUnzip(buf) {
   }
   return out;
 }
-const maskFrameFromName = (name) => { const m = /f(\d{3,6})/.exec(name); return m ? +m[1] : null; };
+function maskFrameFromName(name) {
+  const stem = String(name || "").replace(/\.[^.]+$/, "");
+  // Keep the documented/legacy "name contains f00120" contract (e.g. maskf00120.png), while
+  // rejecting decimal/signed spellings instead of silently treating them as an unnumbered sequence.
+  const valid = /f(\d+)(?=$|[^0-9.])/i.exec(stem);
+  if (valid) {
+    const f = Number(valid[1]);
+    if (!Number.isSafeInteger(f) || f < 0) throw new Error(`フレーム番号が不正です (${name})`);
+    return f;
+  }
+  // f-001 / f001.5 / f+1 等を「番号なし連番」として左詰めしない。
+  if (/f(?=[+\-\d.])/i.test(stem)) throw new Error(`フレーム番号の書式が不正です (${name})`);
+  return null;
+}
 const maskObjFromName = (name) => { const m = /(?:^|[^a-z0-9])L(\d+)[_.]/i.exec(name) || /obj(?:ect)?[_-]?(\d+)/i.exec(name); return m ? +m[1] : null; };
 
 // 画像1枚 →「マスク＝不透明かつ明るい画素」の線形RLE（白黒2値マット。輪郭ラボの取込と同じ判定）。
@@ -1437,27 +1529,51 @@ function imageFileToRegionRuns(bmp, W, H) {
 }
 
 async function buildMasksFromImages(pngs, manifest, srcName) {
+  if (manifest && manifest.fps != null && (typeof manifest.fps !== "number" || !Number.isFinite(manifest.fps) || manifest.fps <= 0)) {
+    throw new Error("manifestのfpsが正の有限数ではありません");
+  }
+  if (manifest && manifest.total != null && (!Number.isSafeInteger(manifest.total) || manifest.total <= 0)) {
+    throw new Error("manifestのtotalが正の整数ではありません");
+  }
   const sorted = pngs.slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   const multiObj = sorted.some((f) => maskObjFromName(f.name) != null);
   let W = 0, H = 0, maxF = 0, count = 0;
-  const framesRegion = {}, layerSet = new Set(), seqBy = {};
+  const framesRegion = {}, layerSet = new Set(), seqBy = {}, seen = new Set();
   for (const file of sorted) {
-    let bmp = null; try { bmp = await createImageBitmap(file); } catch (e) { continue; }
-    if (!W) { W = bmp.width; H = bmp.height; }
-    const lid = multiObj ? (maskObjFromName(file.name) != null ? maskObjFromName(file.name) : 1) : 1;
-    // f番号なしの連番は「対象ごとに」0,1,2…と振る（全体通しで振ると、複数対象を別々の連番で
-    // 書き出したとき2つ目以降の対象の開始フレームがずれる）。名前順は数値対応ソート済み。
-    let f = maskFrameFromName(file.name);
-    if (f == null) { const k = String(lid); f = seqBy[k] = (seqBy[k] == null ? 0 : seqBy[k] + 1); }
-    const runs = imageFileToRegionRuns(bmp, W, H);
-    if (bmp.close) bmp.close();
+    let bmp = null;
+    try { bmp = await createImageBitmap(file); }
+    catch (e) { throw new Error(`${file.name} を画像として読み込めませんでした`); }
+    let lid, f, runs;
+    try {
+      if (!W) {
+        W = bmp.width; H = bmp.height;
+        if (manifest && (manifest.W != null || manifest.H != null)) {
+          if (!Number.isSafeInteger(manifest.W) || manifest.W <= 0 || !Number.isSafeInteger(manifest.H) || manifest.H <= 0) throw new Error("manifestのW/Hが正の整数ではありません");
+          if (manifest.W !== W || manifest.H !== H) throw new Error(`manifestの寸法（${manifest.W}×${manifest.H}）と画像（${W}×${H}）が一致しません`);
+        }
+      } else if (bmp.width !== W || bmp.height !== H) {
+        throw new Error(`${file.name} は ${bmp.width}×${bmp.height} ですが、先頭画像は ${W}×${H} です。自動拡縮せず読込を中止しました`);
+      }
+      lid = multiObj ? (maskObjFromName(file.name) != null ? maskObjFromName(file.name) : 1) : 1;
+      // f番号なしの連番は「対象ごとに」0,1,2…と振る（全体通しで振ると、複数対象を別々の連番で
+      // 書き出したとき2つ目以降の対象の開始フレームがずれる）。名前順は数値対応ソート済み。
+      f = maskFrameFromName(file.name);
+      if (f == null) { const k = String(lid); f = seqBy[k] = (seqBy[k] == null ? 0 : seqBy[k] + 1); }
+      if (!Number.isSafeInteger(f) || f < 0) throw new Error(`フレーム番号が不正です (${file.name})`);
+      const seenKey = `${lid}:${f}`;
+      if (seen.has(seenKey)) throw new Error(`同じ対象・フレームの画像が重複しています (${file.name}, L${lid}, f${f})`);
+      seen.add(seenKey);
+      if (f > maxF) maxF = f; // 黒／透明frameもcoverage終端として保持する
+      runs = imageFileToRegionRuns(bmp, W, H);
+    } finally {
+      if (bmp && bmp.close) bmp.close();
+    }
     count += 1;
     if (dom.maskJsonStatus && count % 40 === 0) { dom.maskJsonStatus.textContent = `マスク読込中… ${count}/${sorted.length}`; await new Promise((r) => setTimeout(r, 0)); }
     if (!runs.length) continue; // 真っ黒/全透明＝そのフレームに対象なし
     const key = String(f);
     (framesRegion[key] = framesRegion[key] || {})[String(lid)] = runs;
     layerSet.add(lid);
-    if (f > maxF) maxF = f;
   }
   if (!layerSet.size) throw new Error("有効なマスク画像がありません（対象を白、背景を黒か透明で塗ってください）");
   const maniLayers = manifest && Array.isArray(manifest.layers) ? manifest.layers : null;
@@ -1467,7 +1583,64 @@ async function buildMasksFromImages(pngs, manifest, srcName) {
     const m = maniLayers && maniLayers.find((l) => l.id === id);
     return { id, name: (m && m.name) || ("対象" + id), color: (m && m.color && m.color.length ? m.color.slice() : DEF[i % DEF.length].slice()) };
   });
-  return { name: srcName || "連番PNG", fps: (manifest && manifest.fps) || 0, W, H, total: maxF + 1, layers, frames: null, framesRegion, frameCount: Object.keys(framesRegion).length, perLayer: {} };
+  const total = manifest && manifest.total != null ? manifest.total : maxF + 1;
+  if (maxF >= total) throw new Error(`マスク画像の最大フレーム ${maxF} がmanifest total ${total} の範囲外です`);
+  const out = { name: srcName || "連番PNG", fps: manifest && manifest.fps != null ? manifest.fps : 0, W, H, total, layers, frames: null, framesRegion, frameCount: Object.keys(framesRegion).length, perLayer: {} };
+  validateMaskDataPreflight(out);
+  return out;
+}
+
+function validateLinearMaskRuns(runs, N, label) {
+  if (!Array.isArray(runs) || runs.length % 2) throw new Error(`RLEが不正です (${label})`);
+  let previousEnd = 0;
+  for (let i = 0; i < runs.length; i += 2) {
+    const start = runs[i], len = runs[i + 1], end = start + len;
+    if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(len) || len <= 0
+      || !Number.isSafeInteger(end) || end > N || start < previousEnd) {
+      throw new Error(`RLEの開始位置／長さ／順序が不正です (${label}, pair ${i / 2})`);
+    }
+    previousEnd = end;
+  }
+}
+
+function validateMaskDataPreflight(m) {
+  if (m && m._preflightResult) return m._preflightResult;
+  if (!m || !Number.isSafeInteger(m.W) || m.W <= 0 || !Number.isSafeInteger(m.H) || m.H <= 0
+    || !Number.isSafeInteger(m.total) || m.total <= 0) throw new Error("マスクの寸法／totalが正の整数ではありません");
+  const N = m.W * m.H;
+  if (!Number.isSafeInteger(N) || N <= 0) throw new Error("マスクの画素数が安全な整数範囲を超えています");
+  const fps = m.fps == null ? 0 : m.fps;
+  if (fps !== 0 && (typeof fps !== "number" || !Number.isFinite(fps) || fps <= 0)) throw new Error("マスクのfpsが正の有限数ではありません");
+  if (!Array.isArray(m.layers) || !m.layers.length) throw new Error("マスクのレイヤ情報がありません");
+  // regionMapForFrame stores 0=background and 1..255=layer ordinal in Uint8Array.
+  // Reject overflow up front; silently wrapping layer 256 to background would corrupt alignment.
+  if (m.layers.length > 255) throw new Error("マスクのレイヤ数は255以下にしてください");
+  const layerIds = new Set();
+  for (const L of m.layers) {
+    if (!L || !Number.isSafeInteger(L.id) || L.id <= 0 || layerIds.has(L.id)) throw new Error("マスクのレイヤIDが不正または重複しています");
+    if (L.color != null && (!Array.isArray(L.color) || L.color.length < 3
+      || L.color.slice(0, 3).some((x) => !Number.isSafeInteger(x) || x < 0 || x > 255))) throw new Error(`レイヤ L${L.id} の色が不正です`);
+    layerIds.add(L.id);
+  }
+  const src = m.framesRegion || m.frames || {};
+  if (!src || typeof src !== "object" || Array.isArray(src)) throw new Error("マスクのframesがオブジェクトではありません");
+  let maxFrame = -1;
+  for (const key of Object.keys(src)) {
+    const f = Number(key);
+    if (!Number.isSafeInteger(f) || f < 0 || String(f) !== key) throw new Error(`フレーム番号が不正です (${key})`);
+    if (f >= m.total) throw new Error(`フレーム番号がtotalの範囲外です (${key} >= ${m.total})`);
+    const rec = src[key];
+    if (!rec || typeof rec !== "object" || Array.isArray(rec)) throw new Error(`フレーム ${key} のレイヤ情報が不正です`);
+    for (const lidKey of Object.keys(rec)) {
+      const lid = Number(lidKey);
+      if (!Number.isSafeInteger(lid) || String(lid) !== lidKey || !layerIds.has(lid)) throw new Error(`未知または不正なレイヤIDです (f${key} L${lidKey})`);
+      validateLinearMaskRuns(rec[lidKey], N, `f${key} L${lidKey}`);
+    }
+    if (f > maxFrame) maxFrame = f;
+  }
+  const result = { maxFrame, coverageEnd: m.total };
+  try { Object.defineProperty(m, "_preflightResult", { value: result, writable: true, configurable: true }); } catch (e) { /* non-extensible test input */ }
+  return result;
 }
 
 async function onMaskFilesPicked(files) {
@@ -1492,15 +1665,28 @@ async function onMaskFilesPicked(files) {
     for (const jf of jsons) {
       try {
         const obj = JSON.parse(await jf.text());
-        if (obj && obj.format === "contour-lab-mainapp") mainapp = { obj, name: jf.name };
-        else if (obj && (obj.layers || obj.W)) manifest = obj;
-      } catch (e) { /* JSONでなければ無視 */ }
+        if (obj && obj.format === "contour-lab-mainapp") {
+          if (mainapp) throw new Error(`mainapp.jsonが複数あります (${mainapp.name}, ${jf.name})`);
+          mainapp = { obj, name: jf.name };
+        } else if (obj && typeof obj === "object" && ["layers", "W", "H", "fps", "total"].some((k) => Object.prototype.hasOwnProperty.call(obj, k))) {
+          if (manifest) throw new Error(`manifest候補が複数あります (${jf.name})`);
+          manifest = obj;
+        }
+      } catch (e) {
+        if (e && /複数あります/.test(e.message || "")) throw e;
+        throw new Error(`${jf.name} のJSONを解析できませんでした`);
+      }
     }
     let m;
     if (mainapp) m = parseMainappJson(mainapp.obj, mainapp.name); // 輪郭ラボの本体用JSON
     else if (pngs.length) m = await buildMasksFromImages(pngs, manifest, srcName); // 連番PNG（クリスタ等の直接ルート）
     else throw new Error("マスク画像（PNG）または mainapp.json が見つかりません");
+    validateMaskDataPreflight(m);
     m._id = (state._maskDataSeq = (state._maskDataSeq || 0) + 1); // プレビューキャッシュの世代（読込ごとに更新）
+    // An open STEP2 preview owns an immutable snapshot of the previous mask. Keeping it open while
+    // publishing a new mask would let old pixels acquire the new mask revision at cache-store time.
+    closeMaskPreview();
+    invalidateAllFramePreviewCaches();
     state.masksData = m;
     renderMaskJsonStatus();
     const names = m.layers.map((L) => L.name || ("対象" + L.id)).join("・");
@@ -1531,6 +1717,7 @@ function renderMaskJsonStatus() {
   if (dom.maskJsonClear) dom.maskJsonClear.hidden = false;
 }
 function clearMaskJson() {
+  invalidateAllFramePreviewCaches();
   state.masksData = null;
   renderMaskJsonStatus();
   showToast("info", "領域マスクを解除しました（次の分析から反映）");
@@ -1549,31 +1736,52 @@ function openMaskPreview() {
   closeMaskPreview();
   const video = document.createElement("video");
   video.muted = true; video.playsInline = true; video.preload = "auto";
-  video.src = v.url;
+  loadVideoSource(video, v.url);
   const pv = { masks: { ...m, _regionRuns: new Map(), _layerFrames: null }, _regionMapCache: null };
-  mpv = { video, pv, fps: m.fps || 30, ctx: null, w: 0, h: 0, lastF: -1, mode: "pause", pendingF: null, playTimer: null, playT0: 0, playF0: 0 };
+  mpv = { video, ownerVideo: v, maskData: m, pv, fps: 0, measuredFps: 0, ctx: null, w: 0, h: 0, lastF: -1, mode: "pause", pendingF: null, pendingGen: 0, playGen: 0, playTimer: null, playT0: 0, playF0: 0 };
   dom.maskPreviewBox.hidden = false;
-  dom.maskPreviewInfo.textContent = "読込中…";
-  video.addEventListener("loadedmetadata", () => {
+  dom.maskPreviewInfo.textContent = "読込中… 動画fpsを確認しています";
+  video.addEventListener("loadedmetadata", async () => {
     if (!mpv || mpv.video !== video) return;
+    const session = mpv;
+    if (!sameAspectRatio(video.videoWidth, video.videoHeight, m.W, m.H)) {
+      closeMaskPreview();
+      showToast("error", `マスクの縦横比（${m.W}×${m.H}）が動画（${video.videoWidth}×${video.videoHeight}）と違うため、位置ずれを防ぐためプレビューを開始しませんでした`);
+      return;
+    }
     const { width, height } = scaledSize(video.videoWidth, video.videoHeight, 480);
     dom.maskPreviewCanvas.width = width; dom.maskPreviewCanvas.height = height;
     mpv.ctx = dom.maskPreviewCanvas.getContext("2d", { willReadFrequently: true });
     mpv.w = width; mpv.h = height;
+    let measured = { fps: 30, sampleCount: 0 };
+    try { measured = await measureVideoFps(video, 16); } catch (e) { /* warning-only preflight; keep 30 */ }
+    if (mpv !== session || mpv.video !== video) return;
+    mpv.measuredFps = measured.fps;
+    mpv.fps = m.fps > 0 ? m.fps : measured.fps;
     const names = m.layers.map((L) => L.name || ("対象" + L.id)).join("・");
-    dom.maskPreviewInfo.textContent = `${esc(v.name)} ＋ ${names}（${m.fps ? m.fps : 30}fps基準・コマ順次再生）`;
+    const notes = [];
+    if (!m.fps) notes.push(`マスクfpsなし→動画${measured.sampleCount > 1 ? "実測" : "推定"}${formatNumber(measured.fps, 3)}fpsを使用`);
+    else if (measured.sampleCount > 1 && Math.abs(measured.fps - m.fps) > 0.05) {
+      notes.push(`⚠ マスク${formatNumber(m.fps, 3)}fps／動画実測${formatNumber(measured.fps, 3)}fps`);
+      showToast("info", `マスクのfps（${formatNumber(m.fps, 3)}）と動画の実測fps（${formatNumber(measured.fps, 3)}）が異なります。プレビューはマスクfpsを維持します。`);
+    }
+    const pf = validateMaskDataPreflight(m);
+    if (measured.sampleCount > 1) {
+      const estimatedFrames = Math.max(1, Math.round(video.duration * measured.fps));
+      if (pf.maxFrame >= estimatedFrames || pf.coverageEnd > estimatedFrames) {
+        notes.push(`⚠ マスク終端${pf.coverageEnd}f／動画推定${estimatedFrames}f`);
+        showToast("info", `マスクの終端（${pf.coverageEnd}f）が動画の推定範囲（${estimatedFrames}f）を超えています。部分マスクとして読込は継続しますが、番号を確認してください。`);
+      }
+    }
+    dom.maskPreviewInfo.textContent = `${esc(v.name)} ＋ ${names}（${formatNumber(mpv.fps, 3)}fps基準・コマ順次再生${notes.length ? "・" + notes.join("・") : ""}）`;
     if (dom.maskPreviewSeek) { dom.maskPreviewSeek.min = "0"; dom.maskPreviewSeek.max = String(maskPreviewTotalF() - 1); dom.maskPreviewSeek.value = "0"; }
-    // シーク駆動: 描画は常に 'seeked' 後（=停止中）に行う。停止中は currentTime＝表示フレームが
-    // 保証されるので、画素とマスクの対応が構成的にズレない。再生モードなら描画後に次のコマを予約。
-    video.addEventListener("seeked", () => {
-      if (!mpv || mpv.video !== video) return;
-      mpv.pendingF = null; // シーク完了（コマ送り連打の基準をリセット）
-      mpv.lastF = -1; // 同一フレーム抑止を解除して必ず再描画
-      drawMaskPreviewFrame(video.currentTime);
-      if (mpv.mode === "play") scheduleMaskPreviewNext();
-    });
-    drawMaskPreviewFrame(video.currentTime); // 1枚目
-    startMaskPreviewPlay(); // シーク駆動の連続再生を開始
+    // A persistent `seeked` handler cannot identify which rapid seek produced an event. Confirm the
+    // actually presented source PTS for this exact request before drawing or caching even frame 0.
+    const initialGen = session.playGen;
+    const ready = await requestMaskPreviewFrame(0, initialGen, false);
+    if (ready && mpv === session && session.mode === "pause" && session.playGen === initialGen) {
+      startMaskPreviewPlay(); // シーク駆動の連続再生を開始
+    }
   }, { once: true });
   video.addEventListener("error", () => { if (mpv && mpv.video === video) dom.maskPreviewInfo.textContent = "動画を再生できませんでした"; }, { once: true });
 }
@@ -1582,18 +1790,31 @@ function openMaskPreview() {
    1x へペーシングし、シークが追いつかない環境では出せる速度で全コマを順に表示（コマ飛びなし）。 */
 function startMaskPreviewPlay() {
   if (!mpv) return;
+  const gen = (mpv.playGen = (mpv.playGen || 0) + 1);
   mpv.mode = "play";
   mpv.playT0 = performance.now();
-  mpv.playF0 = Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6);
+  mpv.playF0 = mpv.cachedPos != null ? mpv.cachedPos
+    : (mpv.lastF >= 0 ? mpv.lastF : Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6));
   dom.maskPreviewPlay.textContent = "⏸ 一時停止";
-  maskPreviewAdvance();
+  maskPreviewAdvance(gen);
 }
 /* STEP2プレビューのフレームキャッシュ（STEP3と同方式）: 初回描画時に完成画面を可逆PNGで保存し,
    2周目以降はシークもマスク合成もせずデコードして描くだけ. マスクを読み込み直すと自動で無効化.
    閉じて開き直しても再利用できるよう state 側に保持する. */
-function maskPrevSig() {
-  const m = state.masksData;
-  return (m && m._id ? m._id : 0) + ";" + dom.maskPreviewCanvas.width + "x" + dom.maskPreviewCanvas.height;
+function maskPrevSig(ownerVideo, previewSession) {
+  const session = previewSession === undefined ? mpv : previewSession;
+  const m = session && session.maskData ? session.maskData : state.masksData;
+  const v = ownerVideo || (session && session.ownerVideo) || state.videos[0] || null;
+  return JSON.stringify([
+    "mask-preview-r0",
+    v ? v.id : "none",
+    v ? v.key : "none",
+    v ? v._sourceRevision || 0 : 0,
+    m && m._id ? m._id : 0,
+    session && Number.isFinite(session.fps) ? session.fps : ((m && m.fps) || 30),
+    dom.maskPreviewCanvas.width,
+    dom.maskPreviewCanvas.height,
+  ]);
 }
 function maskPrevCache() {
   const sig = maskPrevSig();
@@ -1603,19 +1824,24 @@ function maskPrevCache() {
 function maskPrevCacheStore(f) {
   const c = maskPrevCache();
   if (c.bytes > 300 * 1024 * 1024 || c.frames.has(f)) return; // 上限300MB
-  const sig = c.sig;
+  const sig = c.sig, session = mpv, ownerVideo = session && session.ownerVideo;
+  const maskData = session && session.maskData, playGen = session && session.playGen;
   dom.maskPreviewCanvas.toBlob((b) => {
-    if (b && state._mpvCache && state._mpvCache.sig === sig && !state._mpvCache.frames.has(f)) {
-      state._mpvCache.frames.set(f, b);
-      state._mpvCache.bytes += b.size;
+    if (b && mpv === session && state._mpvCache === c && c.sig === sig
+      && state.masksData === maskData && session.playGen === playGen
+      && maskPrevSig(ownerVideo, session) === sig && !c.frames.has(f)) {
+      c.frames.set(f, b);
+      c.bytes += b.size;
     }
   }, "image/png");
 }
-async function maskPreviewDrawCached(f, blob) {
-  const cur = mpv;
+async function maskPreviewDrawCached(f, blob, cache, sig, gen) {
+  const cur = mpv, ownerVideo = cur && cur.ownerVideo;
   let bmp = null;
-  try { bmp = await createImageBitmap(blob); } catch (e) { maskPrevCache().frames.delete(f); maskPreviewAdvance(); return; }
-  if (mpv !== cur || mpv.mode !== "play") { bmp.close(); return; }
+  try { bmp = await createImageBitmap(blob); }
+  catch (e) { if (state._mpvCache === cache) cache.frames.delete(f); if (mpv === cur) maskPreviewAdvance(gen); return; }
+  if (mpv !== cur || mpv.mode !== "play" || cur.playGen !== gen || state.masksData !== cur.maskData
+    || state._mpvCache !== cache || cache.sig !== sig || maskPrevSig(ownerVideo, cur) !== sig) { bmp.close(); return; }
   mpv.ctx.drawImage(bmp, 0, 0);
   bmp.close();
   mpv.lastF = f;
@@ -1623,29 +1849,67 @@ async function maskPreviewDrawCached(f, blob) {
   mpv._sync = { mediaTime: (f + 0.5) / mpv.fps, currentTime: mpv.video.currentTime, f };
   mpv._dbg = { f, hit: true };
   syncMaskPreviewSeekUI(f, (f + 0.5) / mpv.fps);
-  scheduleMaskPreviewNext();
+  scheduleMaskPreviewNext(gen);
 }
-function maskPreviewAdvance() {
-  if (!mpv || mpv.mode !== "play" || !mpv.video.duration) return;
+function maskPreviewAdvance(gen) {
+  if (!mpv || mpv.mode !== "play" || mpv.playGen !== gen || !mpv.video.duration) return;
   const total = maskPreviewTotalF();
   const base = mpv.pendingF != null ? mpv.pendingF : (mpv.cachedPos != null ? mpv.cachedPos : Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6));
   let f = base + 1;
   if (f >= total) { f = 0; mpv.playT0 = performance.now(); mpv.playF0 = 0; } // 先頭へループ
-  const hit = maskPrevCache().frames.get(f);
-  if (hit) { maskPreviewDrawCached(f, hit); return; } // キャッシュ再生（シークなし）
+  const cache = maskPrevCache();
+  const hit = cache.frames.get(f);
+  if (hit) { maskPreviewDrawCached(f, hit, cache, cache.sig, gen); return; } // キャッシュ再生（シークなし）
   mpv.pendingF = f;
-  const at = Math.max(0.001, Math.min(mpv.video.duration - 0.001, (f + 0.5) / mpv.fps));
-  try { mpv.video.currentTime = at; } catch (e) { /* ignore */ }
+  mpv.pendingGen = gen;
+  requestMaskPreviewFrame(f, gen, true);
 }
-function scheduleMaskPreviewNext() {
-  if (!mpv || mpv.mode !== "play") return;
+
+// One request owns one strict post-seek presentation latch. This is deliberately request-scoped:
+// a late `seeked` event has no request identity and can otherwise certify f2 while f1 pixels remain.
+async function requestMaskPreviewFrame(f, gen, continuePlayback) {
+  const session = mpv;
+  if (!session || !session.video.duration) return false;
+  const requestId = (session.seekRequestId = (session.seekRequestId || 0) + 1);
+  session.pendingF = f;
+  session.pendingGen = gen;
+  const at = Math.max(0.001, Math.min(session.video.duration - 0.001, (f + 0.5) / session.fps));
+  const sourceFps = session.measuredFps > 0 ? session.measuredFps : session.fps;
+  const sourceFrame = Math.floor(at * sourceFps + 1e-6);
+  try {
+    await seekVideoFrameStrict(session.video, at, sourceFrame, sourceFps, 5000);
+  } catch (error) {
+    const current = mpv === session && session.seekRequestId === requestId && session.playGen === gen;
+    if (current) session.pendingF = null;
+    if (current && (!error || error.name !== "StaleVideoSeekError")) {
+      session.playGen = (session.playGen || 0) + 1;
+      session.mode = "pause";
+      if (session.playTimer) { clearTimeout(session.playTimer); session.playTimer = null; }
+      dom.maskPreviewPlay.textContent = "▶ 再生";
+      dom.maskPreviewInfo.textContent = "提示フレームを厳密に確認できなかったため停止しました（再試行してください）";
+      showToast("error", "マスクずれを防ぐため、確認できなかったコマは表示・キャッシュしませんでした");
+    }
+    return false;
+  }
+  const expectedMode = continuePlayback ? "play" : "pause";
+  if (mpv !== session || session.seekRequestId !== requestId || session.playGen !== gen
+    || session.pendingF !== f || session.pendingGen !== gen || session.mode !== expectedMode
+    || state.masksData !== session.maskData || state.videos[0] !== session.ownerVideo) return false;
+  session.pendingF = null;
+  session.lastF = -1;
+  drawMaskPreviewFrame(at, f);
+  if (continuePlayback && mpv === session && session.mode === "play" && session.playGen === gen) scheduleMaskPreviewNext(gen);
+  return true;
+}
+function scheduleMaskPreviewNext(gen) {
+  if (!mpv || mpv.mode !== "play" || mpv.playGen !== gen) return;
   const f = mpv.cachedPos != null ? mpv.cachedPos : Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6);
   const due = mpv.playT0 + ((f - mpv.playF0 + 1) / mpv.fps) * 1000; // 次コマの提示予定時刻（1x）
   const delay = Math.max(0, due - performance.now());
   if (mpv.playTimer) clearTimeout(mpv.playTimer);
-  mpv.playTimer = setTimeout(maskPreviewAdvance, delay);
+  mpv.playTimer = setTimeout(() => maskPreviewAdvance(gen), delay);
 }
-function drawMaskPreviewFrame(t) {
+function drawMaskPreviewFrame(t, forcedFrame) {
   const { video, ctx, w, h, pv, fps } = mpv;
   if (!ctx || video.readyState < 2) return;
   // このプレビューはシーク駆動（動画は常に一時停止のまま、フレーム中央へシーク→seekedで描画）。
@@ -1653,8 +1917,8 @@ function drawMaskPreviewFrame(t) {
   // フレーム対応が構成的にズレない。※リアルタイム再生系は画素とタイムスタンプの原子性が無く、
   // rVFC(mediaTime)でもVideoFrame(timestamp)でも±1コマの競合が残ることを画素比較QAで実測済み。
   const at = t != null ? t : video.currentTime;
-  const f = Math.floor(at * fps + 1e-6);
-  if (mpv.mode !== "play" && f === mpv.lastF) return; // 停止中の同一フレームは再描画しない
+  const f = forcedFrame == null ? Math.floor(at * fps + 1e-6) : forcedFrame;
+  if (forcedFrame == null && mpv.mode !== "play" && f === mpv.lastF) return; // 非strictの補助呼出しだけ抑止
   mpv.lastF = f;
   mpv._sync = { mediaTime: at, currentTime: video.currentTime, f }; // 検証用（同期の実測）
   ctx.drawImage(video, 0, 0, w, h);
@@ -1683,18 +1947,18 @@ function syncMaskPreviewSeekUI(f, at) {
   if (dom.maskPreviewSeek && !mpv.scrubbing) dom.maskPreviewSeek.value = String(f);
   if (dom.maskPreviewTime) dom.maskPreviewTime.textContent = formatClock(at) + "・コマ " + (f + 1) + " / " + maskPreviewTotalF();
 }
-function pauseMaskPreview() {
+function pauseMaskPreview(syncVisible = true) {
   if (!mpv) return;
+  const session = mpv;
+  const hadPendingSeek = session.pendingF != null;
+  const visibleF = session.cachedPos != null ? session.cachedPos : session.lastF;
+  mpv.playGen = (mpv.playGen || 0) + 1;
   mpv.mode = "pause";
   if (mpv.playTimer) { clearTimeout(mpv.playTimer); mpv.playTimer = null; }
   dom.maskPreviewPlay.textContent = "▶ 再生";
   // キャッシュ再生中は要素をシークしていないので、停止時に表示コマへ合わせる（コマ送り/スクラブの基準）
-  if (mpv.cachedPos != null && mpv.video.duration) {
-    const f = mpv.cachedPos;
-    mpv.cachedPos = null;
-    mpv.pendingF = f;
-    const at = Math.max(0.001, Math.min(mpv.video.duration - 0.001, (f + 0.5) / mpv.fps));
-    try { mpv.video.currentTime = at; } catch (e) { /* ignore */ }
+  if (syncVisible && visibleF >= 0 && (session.cachedPos != null || hadPendingSeek) && mpv.video.duration) {
+    requestMaskPreviewFrame(visibleF, mpv.playGen, false);
   }
 }
 // フレーム中央へシーク（境界ちょうどのシークは前後どちらのフレームが出るか曖昧＝本体の確立ルール）
@@ -1702,14 +1966,15 @@ function seekMaskPreviewToFrame(f) {
   if (!mpv || !mpv.video.duration) return;
   const total = maskPreviewTotalF();
   const cf = Math.max(0, Math.min(total - 1, f));
-  pauseMaskPreview();
+  pauseMaskPreview(false);
   mpv.pendingF = cf; // シーク完了までコマ送りの基準に使う（連打の取りこぼし防止）
-  const at = Math.max(0.001, Math.min(mpv.video.duration - 0.001, (cf + 0.5) / mpv.fps));
-  try { mpv.video.currentTime = at; } catch (e) { /* ignore */ }
+  mpv.pendingGen = mpv.playGen;
+  requestMaskPreviewFrame(cf, mpv.playGen, false);
 }
 function stepMaskPreview(d) {
   if (!mpv) return;
-  const base = mpv.pendingF != null ? mpv.pendingF : Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6);
+  const base = mpv.pendingF != null ? mpv.pendingF
+    : (mpv.cachedPos != null ? mpv.cachedPos : (mpv.lastF >= 0 ? mpv.lastF : Math.floor((mpv.video.currentTime || 0) * mpv.fps + 1e-6)));
   seekMaskPreviewToFrame(base + d);
 }
 function toggleMaskPreviewPlay() {
@@ -1720,9 +1985,10 @@ function toggleMaskPreviewPlay() {
 function closeMaskPreview() {
   if (dom.maskPreviewBox) dom.maskPreviewBox.hidden = true;
   if (!mpv) return;
+  mpv.playGen = (mpv.playGen || 0) + 1;
   mpv.mode = "pause";
   if (mpv.playTimer) { clearTimeout(mpv.playTimer); mpv.playTimer = null; }
-  try { mpv.video.removeAttribute("src"); mpv.video.load(); } catch (e) { /* ignore */ }
+  try { unloadVideoSource(mpv.video); } catch (e) { /* ignore */ }
   mpv = null;
 }
 
@@ -1851,7 +2117,13 @@ async function analyzeAll() {
   state.cancelled = false;
   state.exported = false;
   state.step = 2;
-  state.videos.forEach((v) => { v.status = "pending"; v.progress = 0; v.detProgress = 0; v.palProgress = 0; v.error = null; v.awaitingSceneReview = false; v.showSceneFrameReview = false; v.sceneFramePreview = []; invalidateMergeState(v); }); // re-analysis rebuilds the palette → old merges/regions are stale
+  invalidateAllFramePreviewCaches();
+  state.videos.forEach((v) => {
+    v._analysisRevision = ++state.analysisSeq;
+    v.status = "pending"; v.progress = 0; v.detProgress = 0; v.palProgress = 0; v.error = null;
+    v.awaitingSceneReview = false; v.showSceneFrameReview = false; v.sceneFramePreview = [];
+    invalidateMergeState(v);
+  }); // re-analysis rebuilds the palette → old merges/regions are stale
   render();
   startElapsedTimer();
   const settings = readSettings();
@@ -1987,8 +2259,7 @@ function throwIfCancelled() {
 async function prepareVideoElement(v) {
   resetWorkVideo();
   dom.workVideo.preload = "auto";
-  dom.workVideo.src = v.url;
-  dom.workVideo.load();
+  loadWorkVideoSource(v);
   try {
     await ensureMetadata(dom.workVideo);
   } catch (error) {
@@ -2137,19 +2408,19 @@ async function analyzeSceneRegions(v, sceneId, fLo, fHi, fA0, fB0, imgA0, imgB0,
 
 // 分析開始時に、読み込み済みマスクをこの動画へ適用（解像度が一致する場合のみ）。
 function applyMasksToVideo(v) {
-  v.masks = null; v.maskRegionSel = "bg"; v._regionMapCache = null;
+  v.masks = null; v._maskRevision = 0; v.maskRegionSel = "bg"; v._regionMapCache = null;
   const m = state.masksData;
   if (!m) return;
   if (m.W !== v.videoWidth || m.H !== v.videoHeight) {
     // 縦横比が同じなら最近傍で伸縮して使う（連番PNGを半解像度で描くなどの運用を許す）。比率違いは位置がずれるので拒否。
-    const arV = v.videoWidth / Math.max(1, v.videoHeight), arM = m.W / Math.max(1, m.H);
-    if (Math.abs(arV - arM) > 0.01) {
+    if (!sameAspectRatio(v.videoWidth, v.videoHeight, m.W, m.H)) {
       showToast("error", `${v.name}: マスクの縦横比（${m.W}×${m.H}）が動画（${v.videoWidth}×${v.videoHeight}）と違うため、この動画には使いません`);
       return;
     }
     showToast("info", `${v.name}: マスク（${m.W}×${m.H}）を動画（${v.videoWidth}×${v.videoHeight}）に合わせて伸縮して使います`);
   }
-  v.masks = { name: m.name, fps: m.fps, W: m.W, H: m.H, total: m.total, layers: m.layers, frames: m.frames, framesRegion: m.framesRegion || null, _regionRuns: new Map(), _layerFrames: null };
+  v._maskRevision = m._id || 0;
+  v.masks = { name: m.name, fps: m.fps, W: m.W, H: m.H, total: m.total, layers: m.layers, frames: m.frames, framesRegion: m.framesRegion || null, _id: v._maskRevision, _regionRuns: new Map(), _layerFrames: null };
   v.maskViewSel = new Set(["bg", ...m.layers.map((L) => "L" + L.id)]); // プレビュー表示の複数選択（既定＝全部）
 }
 
@@ -2557,6 +2828,7 @@ function applyKValue(nk, coalesce) {
   v.activeK = nk;
   v.analysis.representatives = v.analysis.snapshotsByK[nk].representatives;
   v.disabledKeys = remapDisabledKeys(oldReps, oldDisabled, v.analysis.representatives);
+  bumpVideoRevision(v, "_paletteRevision");
   v.processedCache = new Map();
   v.maskCache = new Map();
   state.plotCache = null;
@@ -2595,6 +2867,7 @@ function applyNoReduce(coalesce) {
   if (v.activeK === 0) { renderKControl(v); return; }
   recordUndo("K", !!coalesce);
   v.activeK = 0;
+  bumpVideoRevision(v, "_paletteRevision");
   v.processedCache = new Map();
   v.maskCache = new Map();
   state.plotCache = null;
@@ -2618,6 +2891,7 @@ function resetConfirmParams() {
   }
   v.confirmThreshold = Math.round(v.analysis.threshold);
   v.disabledKeys = new Set(); // back to "all colors on"
+  bumpVideoRevision(v, "_paletteRevision");
   v.processedCache = new Map();
   v.maskCache = new Map();
   state.plotCache = null;
@@ -2671,6 +2945,7 @@ function restorePaletteSnapshot(snap) {
     else if (v.analysis.snapshotsByK && v.analysis.snapshotsByK[snap.activeK]) { v.activeK = snap.activeK; v.analysis.representatives = v.analysis.snapshotsByK[snap.activeK].representatives; }
     v.confirmThreshold = snap.confirmThreshold;
     v.disabledKeys = new Set(snap.disabled);
+    bumpVideoRevision(v, "_paletteRevision");
     v.processedCache = new Map(); v.maskCache = new Map(); state.plotCache = null;
     savePaletteState(v);
     updateSnapMarker(v);
@@ -2804,6 +3079,7 @@ function togglePaletteKey(v, key) {
     recordUndo("off", false);
     v.disabledKeys.add(key); // OFF: its pixels go to the nearest remaining color
   }
+  bumpVideoRevision(v, "_paletteRevision");
   v.processedCache = new Map(); // mapping changed -> rebuild reduction caches
   v.maskCache = new Map();
   savePaletteState(v);          // persist OFF set + fresh caches (export/STEP4 read the palette state)
@@ -2909,26 +3185,41 @@ function loadActiveIntoPreview() {
   const v = activeVideo();
   if (!v || !v.analysis) return;
   stopPlay();
+  state._mprCachedAt = null;
+  state._playStoppedGen = null;
+  const loadGen = (state._previewSeekGen = (state._previewSeekGen || 0) + 1);
+  const exactMask = masksActive(v);
+  state._previewSeekPendingGen = exactMask ? loadGen : null;
+  const sourceRevision = v._sourceRevision || 0;
+  const loadCurrent = () => state._previewSeekGen === loadGen && activeVideo() === v
+    && (v._sourceRevision || 0) === sourceRevision;
+  let verifiedAt = null;
   resetWorkVideo();
   applyPreviewRate();
   state.plotCache = null;
   dom.workVideo.preload = "auto";
-  dom.workVideo.src = v.url;
-  dom.workVideo.load();
+  loadWorkVideoSource(v);
   ensureMetadata(dom.workVideo)
     .then(() => {
+      if (!loadCurrent()) throw staleVideoSeekError();
       setPreviewCanvasSizes(v.analysis.settings.previewShortSide);
       // Seek into the active scene (small positive offset so a real frame decodes).
-      return seekVideo(dom.workVideo, previewStartTime(v));
+      const at = previewStartTime(v);
+      verifiedAt = at;
+      const fps = v.fps || (v.masks && v.masks.fps) || 30;
+      const f = Math.floor(at * fps + 1e-6);
+      return exactMask ? seekVideoFrameStrict(dom.workVideo, at, f, fps, 5000) : seekVideo(dom.workVideo, at);
     })
     .then(() => {
-      drawActiveFrame();
+      if (!loadCurrent()) return;
+      drawActiveFrame(verifiedAt, exactMask ? loadGen : undefined);
+      if (state._previewSeekPendingGen === loadGen) state._previewSeekPendingGen = null;
       updateSnapMarker(v);
       // Draw again next frames in case the first decode wasn't ready.
-      requestAnimationFrame(() => { drawActiveFrame(); updateSnapMarker(v); });
-      setTimeout(() => { if (!state.playing) { drawActiveFrame(); updateSnapMarker(v); } }, 120);
+      requestAnimationFrame(() => { if (loadCurrent() && !state.playing) { drawActiveFrame(); updateSnapMarker(v); } });
+      setTimeout(() => { if (loadCurrent() && !state.playing) { drawActiveFrame(); updateSnapMarker(v); } }, 120);
     })
-    .catch((err) => console.error(err));
+    .catch((err) => { if (!err || err.name !== "StaleVideoSeekError") console.error(err && err.message ? err.message : err); });
 }
 
 function initialPreviewTime(video) {
@@ -2955,6 +3246,7 @@ function setConfirmThreshold(value, snap) {
   }
   value = Math.max(min, Math.min(max, Math.round(value)));
   dom.sConfirm.value = value;
+  if (v.confirmThreshold !== value) bumpVideoRevision(v, "_paletteRevision");
   v.confirmThreshold = value;
   v.processedCache = new Map();
   v.maskCache = new Map();
@@ -3063,9 +3355,10 @@ function updateSnapMarkerFromImageData(v, data) {
   positionSnapMarker(v, computeNoMagentaFromData(data, v.analysis.representatives));
 }
 
-function drawActiveFrame(timeOverride) {
+function drawActiveFrame(timeOverride, seekOwnerGen) {
   const v = activeVideo();
   if (!v || !v.analysis || !dom.cvOrig.width) return;
+  if (state._previewSeekPendingGen != null && seekOwnerGen !== state._previewSeekPendingGen) return;
   // During playback, use the presented frame's exact mediaTime so the per-frame region
   // mask stays aligned with the moving image (currentTime can race ahead of the frame).
   const t = (timeOverride != null ? timeOverride : dom.workVideo.currentTime);
@@ -3198,7 +3491,8 @@ function previewLayoutShape(layout) {
 
 function syncPreviewSeekControls() {
   const duration = Number.isFinite(dom.workVideo.duration) ? dom.workVideo.duration : 0;
-  const current = Number.isFinite(dom.workVideo.currentTime) ? dom.workVideo.currentTime : 0;
+  const actual = Number.isFinite(dom.workVideo.currentTime) ? dom.workVideo.currentTime : 0;
+  const current = state._mprCachedAt != null ? state._mprCachedAt : actual;
   const text = `${formatClock(current)} / ${formatClock(duration)}`;
   const av = activeVideo();
   const r = sceneRange(av, duration); // seek bar is scoped to the active scene in scene mode
@@ -3247,10 +3541,40 @@ function setPreviewTime(time) {
     hi = Math.max(lo, r.end - 1e-3);
   }
   const target = Math.max(lo, Math.min(hi, Number(time) || 0));
-  try { dom.workVideo.currentTime = target; } catch (e) { return; }
+  const exactMask = !!(v && masksActive(v));
+  const visibleAt = state._mprCachedAt != null ? state._mprCachedAt : dom.workVideo.currentTime;
+  if (exactMask && state.playing) stopPlay();
+  state._mprCachedAt = exactMask ? visibleAt : null;
+  state._playStoppedGen = null;
+  const seekGen = (state._previewSeekGen = (state._previewSeekGen || 0) + 1);
+  if (exactMask) {
+    state._previewSeekPendingGen = seekGen;
+    const sourceRevision = v._sourceRevision || 0;
+    const maskRevision = v._maskRevision || 0;
+    const fps = v.fps || (v.masks && v.masks.fps) || 30;
+    const f = Math.floor(target * fps + 1e-6);
+    seekVideoFrameStrict(dom.workVideo, target, f, fps, 5000).then(() => {
+      if (state._previewSeekGen !== seekGen || state.playing || activeVideo() !== v
+        || (v._sourceRevision || 0) !== sourceRevision || (v._maskRevision || 0) !== maskRevision) return;
+      drawActiveFrame(target, seekGen);
+      state._mprCachedAt = null;
+      if (state._previewSeekPendingGen === seekGen) state._previewSeekPendingGen = null;
+      syncPreviewSeekControls();
+    }).catch((e) => {
+      if (state._previewSeekGen === seekGen && (!e || e.name !== "StaleVideoSeekError")) {
+        showToast("error", "マスクずれを防ぐため、確認できなかったコマは表示しませんでした");
+        syncPreviewSeekControls();
+      }
+    });
+    syncPreviewSeekControls();
+    return;
+  }
+  state._previewSeekPendingGen = null;
+  try { setVideoCurrentTime(dom.workVideo, target); } catch (e) { return; }
   syncPreviewSeekControls();
   if (!state.playing) {
     waitForVideoFrame(dom.workVideo).then(() => {
+      if (state._previewSeekGen !== seekGen) return;
       drawActiveFrame();
       syncPreviewSeekControls();
     }).catch(() => {});
@@ -3261,40 +3585,74 @@ function setPreviewTime(time) {
 // exposes time only in seconds, not frames). Plays the OFFSCREEN work video briefly while
 // muted — invisible, since the preview canvases only update on drawActiveFrame. Falls back
 // to 30 fps if rVFC is unavailable. Cached on v.fps.
-// Snap a measured frame rate to the nearest standard rate ONLY when very close (≈1.2%), so a hair of
-// measurement noise on a clean source yields the exact rate while genuine non-standard CFR (e.g. 24.4)
-// keeps its measured value. NEVER blanket-rounds to an integer — 23.976/29.97/59.94 must survive, else
+// Snap a measured frame rate to the nearest standard rate ONLY when extremely close (0.001%). A broad
+// snap can turn a genuine 24.2fps source into 24fps and, later in a long clip, certify an adjacent
+// frame under the requested ordinal. Use exact NTSC rationals rather than rounded decimal labels.
+// NEVER blanket-round to an integer — 23.976/29.97/59.94 must survive, else
 // the fps-grid scene boundaries drift off the real frames and a cut frame gets the wrong scene's palette.
 function snapFps(raw) {
   let fps = Math.max(1, Math.min(120, raw));
-  let best = fps, bestErr = 0.012;
-  for (const s of [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60]) { const e = Math.abs(fps - s) / s; if (e < bestErr) { bestErr = e; best = s; } }
+  let best = fps, bestErr = 0.00001;
+  for (const s of [24000 / 1001, 24, 25, 30000 / 1001, 30, 48, 50, 60000 / 1001, 60]) {
+    const e = Math.abs(fps - s) / s;
+    if (e < bestErr) { bestErr = e; best = s; }
+  }
   return best;
 }
 async function ensureFps(v) {
   if (v.fps) return v.fps;
-  const vid = dom.workVideo;
-  if (typeof vid.requestVideoFrameCallback !== "function") { v.fps = 30; return 30; }
-  const t0 = vid.currentTime;
+  const sourceRevision = v._sourceRevision || 0;
+  const measured = await measureVideoFps(dom.workVideo, 16);
+  if (measured.owned && dom.workVideo._paletteOwnerVideo === v
+    && dom.workVideo._paletteOwnerRevision === sourceRevision && (v._sourceRevision || 0) === sourceRevision) v.fps = measured.fps;
+  return measured.fps;
+}
+
+// Warning/preflight measurement only. A short presented-frame sample cannot prove whole-clip CFR;
+// R2's sample table remains the strict timeline authority. This helper merely replaces the old
+// unconditional 30fps assumption and restores the paused source position before returning.
+async function measureVideoFps(vid, sampleTarget) {
+  const target = Math.max(3, sampleTarget || 16);
+  if (typeof vid.requestVideoFrameCallback !== "function") return { fps: 30, sampleCount: 0, rawFps: 0, owned: true };
+  const measureToken = (vid._paletteFpsMeasureToken = (vid._paletteFpsMeasureToken || 0) + 1);
+  const ownsMeasurement = () => vid._paletteFpsMeasureToken === measureToken;
+  const t0 = vid.currentTime || 0;
   const times = [];
   await new Promise((resolve) => {
     let done = false;
-    const finish = () => { if (done) return; done = true; try { vid.pause(); } catch (e) { /* ignore */ } resolve(); };
-    const onF = (now, meta) => { times.push(meta.mediaTime); if (times.length >= 16) { finish(); return; } vid.requestVideoFrameCallback(onF); };
+    const finish = () => {
+      if (done) return;
+      done = true;
+      if (ownsMeasurement()) { try { vid.pause(); } catch (e) { /* ignore */ } }
+      resolve();
+    };
+    const onF = (now, meta) => {
+      if (done) return;
+      if (!ownsMeasurement()) { finish(); return; }
+      if (meta && Number.isFinite(meta.mediaTime)) times.push(meta.mediaTime);
+      if (times.length >= target) { finish(); return; }
+      vid.requestVideoFrameCallback(onF);
+    };
     vid.muted = true;
     vid.requestVideoFrameCallback(onF);
     vid.play().catch(finish);
-    setTimeout(finish, 2500);
+    window.setTimeout(finish, 2500);
   });
   const deltas = [];
   for (let i = 1; i < times.length; i += 1) { const d = times[i] - times[i - 1]; if (d > 0.0008) deltas.push(d); }
   deltas.sort((a, b) => a - b);
-  if (deltas.length) {
-    // Median delta (robust to a stray slow / stuttered frame during the brief measurement playback).
-    v.fps = snapFps(1 / deltas[Math.floor(deltas.length / 2)]);
-  } else v.fps = 30;
-  try { vid.currentTime = t0; } catch (e) { /* ignore */ }
-  return v.fps;
+  const rawFps = deltas.length ? 1 / deltas[Math.floor(deltas.length / 2)] : 0;
+  const fps = rawFps ? snapFps(rawFps) : 30;
+  if (ownsMeasurement()) {
+    try { await seekVideo(vid, Math.max(0, Math.min((vid.duration || 0) - 1e-3, t0)), true); }
+    catch (e) {
+      // A newer seek/play intent won. Never let an old measurement become latest-call again.
+      if (ownsMeasurement() && (!e || e.name !== "StaleVideoSeekError")) {
+        try { setVideoCurrentTime(vid, t0); } catch (e2) { /* ignore */ }
+      }
+    }
+  }
+  return { fps, rawFps, sampleCount: times.length, owned: ownsMeasurement() };
 }
 
 // Step the preview by ±1 frame. Snaps to the frame grid (CFR assumption) and lands
@@ -3302,9 +3660,20 @@ async function ensureFps(v) {
 async function stepPreviewFrame(delta) {
   const v = activeVideo();
   if (!v || !v.analysis || !Number.isFinite(dom.workVideo.duration)) return;
+  const base = state._mprCachedAt != null ? state._mprCachedAt : dom.workVideo.currentTime;
   stopPlay();
-  const base = dom.workVideo.currentTime; // capture BEFORE fps measurement moves the time
+  const exactMask = masksActive(v);
+  const seekGen = exactMask ? (state._previewSeekGen = (state._previewSeekGen || 0) + 1) : null;
+  if (exactMask) {
+    state._previewSeekPendingGen = seekGen;
+    state._mprCachedAt = base;
+  }
+  const stepGen = state._playGen || 0;
+  const sourceRevision = v._sourceRevision || 0;
   const fps = await ensureFps(v);
+  if (activeVideo() !== v || (v._sourceRevision || 0) !== sourceRevision
+    || state.playing || (state._playGen || 0) !== stepGen
+    || (exactMask && state._previewSeekPendingGen !== seekGen)) return;
   const frameDur = 1 / fps;
   const dur = dom.workVideo.duration || 0;
   const idx = Math.floor(base * fps + 1e-6);
@@ -3471,17 +3840,26 @@ async function togglePlay(loop) {
   }
   state.playing = true;
   state.loop = loop;
+  state._playStoppedGen = null;
+  state._previewSeekGen = (state._previewSeekGen || 0) + 1;
+  state._previewSeekPendingGen = null; // masked playback takes ownership with its own strict latch
+  state._playSyncSeek = null;
+  nextVideoSeekToken(dom.workVideo);
+  invalidateVideoFpsMeasurement(dom.workVideo);
   dom.workVideo.loop = loop && !v.sceneMode; // in scene mode the loop is handled per-scene in the tick
   dom.workVideo.muted = true;
   applyPreviewRate();
   const r0 = sceneRange(v, dom.workVideo.duration || 0);
-  if (dom.workVideo.ended || dom.workVideo.currentTime < r0.start || dom.workVideo.currentTime >= r0.end - 1e-3) {
-    try { dom.workVideo.currentTime = r0.start; } catch (e) { /* ignore */ }
+  const visibleAt = state._mprCachedAt != null ? state._mprCachedAt : dom.workVideo.currentTime;
+  if (dom.workVideo.ended || visibleAt < r0.start || visibleAt >= r0.end - 1e-3) {
+    state._mprCachedAt = null;
+    try { setVideoCurrentTime(dom.workVideo, r0.start); } catch (e) { /* ignore */ }
   }
   updatePlayButtons();
   const gen = (state._playGen = (state._playGen || 0) + 1);
   if (masksActive(v)) { maskedPlayLoop(gen); return; } // マスク使用時はシーク駆動（下記）
-  try { await dom.workVideo.play(); } catch (err) { stopPlay(); return; }
+  try { await dom.workVideo.play(); }
+  catch (err) { if (state.playing && state._playGen === gen) stopPlay(); return; }
   // Frame-accurate playback (rVFC): draw on each presented frame and apply the region mask at that
   // frame's exact mediaTime, so merged regions stay locked to the motion. In scene mode we loop
   // WITHIN the active scene and NEVER draw a frame outside [start,end) — so no adjacent-scene frame
@@ -3492,7 +3870,7 @@ async function togglePlay(loop) {
   if (!alive()) return;
   const reReg = () => { if (!alive()) return; if (useRVFC) dom.workVideo.requestVideoFrameCallback(onFrame); else state.rafPreview = requestAnimationFrame(onFrame); };
   const sceneNow = () => { const c = activeVideo(); return (c && c.sceneMode) ? sceneRange(c, dom.workVideo.duration || 0) : null; };
-  const loopBack = (r) => { try { dom.workVideo.currentTime = r.start; } catch (e) { /* ignore */ } if (dom.workVideo.paused) dom.workVideo.play().catch(() => {}); };
+  const loopBack = (r) => { try { setVideoCurrentTime(dom.workVideo, r.start); } catch (e) { /* ignore */ } if (dom.workVideo.paused) dom.workVideo.play().catch(() => {}); };
   function onFrame(now, meta) {
     if (!alive()) return;
     const t = meta ? meta.mediaTime : dom.workVideo.currentTime;
@@ -3526,26 +3904,65 @@ async function togglePlay(loop) {
    原子的に対応づける手段は無い）. 停止中の currentTime＝表示フレームは保証されるので, シーク駆動なら
    構成的にズレない. 書き出し・STEP2 マスクプレビューと同じ方針. 再生速度設定に合わせてペーシングし,
    シークが追いつかない環境では出せる速度で全コマを順に表示する（コマ飛びなし）. */
-// 再描画結果に影響する状態のシグネチャ。フレームキャッシュはこれが一致する間だけ有効
-// （K・しきい値・色OFF・領域パレット・表示選択・重畳表示・キャンバス寸法のどれかが変われば自動で作り直し）。
+// Cache signatures use the actual representative/OFF arrays rather than a count or 32-bit sum.
+// R0 deliberately favours unambiguous identity over a tiny per-frame hashing saving; later packet
+// revisions can cache these immutable records without weakening the store-time guard.
+function paletteVisualRecord(id, st) {
+  const analysis = st && st.analysis;
+  const reps = analysis && analysis.representatives ? analysis.representatives.map((c) => packedRGB(c)) : [];
+  const disabled = st && st.disabledKeys ? [...st.disabledKeys].sort((a, b) => a - b) : [];
+  return [id, st ? st.activeK : null, st ? st.confirmThreshold : null, reps, disabled];
+}
+function mergeMemberVisualRecord(m) {
+  if (!m) return null;
+  const color = m.color ? packedRGB(m.color) : null;
+  if (!isRegionMember(m)) return ["color", color];
+  const rg = m.region;
+  return ["region", color, rg._revision || 0, rg.paletteId || "", rg.scene ? [rg.scene.start, rg.scene.end, rg.scene.paletteId] : null,
+    rg.w || 0, rg.h || 0, rg.frameCount || 0, rg.masks ? rg.masks.size : 0];
+}
+function mergeGroupVisualRecord(g) {
+  return [g && g.id ? g.id : 0, g && g.target ? packedRGB(g.target) : null,
+    ((g && g.members) || []).map(mergeMemberVisualRecord)];
+}
+// 再描画結果に影響する状態のシグネチャ。source／analysis／mask世代に加え、実際の代表色、
+// OFF集合、ICM、確定merge、表示選択、キャンバス寸法を完全な配列として記録する。
 function maskPreviewSig(v) {
-  const dsum = (set) => { let s = 0; if (set) for (const k of set) s = (s + k) >>> 0; return s; };
-  const parts = [dom.cvReduced.width + "x" + dom.cvReduced.height, v.curPaletteId, state.maskOverlay ? 1 : 0,
-    [...ensureMaskViewSel(v)].sort().join("|"),
-    "live", v.activeK, v.confirmThreshold, (v.disabledKeys && v.disabledKeys.size) || 0, dsum(v.disabledKeys)];
-  for (const id of Object.keys(v.palettes || {})) {
-    const st = v.palettes[id];
-    parts.push(id, st.activeK, st.confirmThreshold, (st.disabledKeys && st.disabledKeys.size) || 0, dsum(st.disabledKeys));
-  }
-  // 色統合（確定済みグループ）もフレーム見た目に効く → ダイジェストで全キャッシュを無効化
-  let mg = 0, mgn = 0;
-  for (const g of v.merges || []) {
-    mgn += 1;
-    if (g.target) mg = (mg * 31 + ((g.target[0] << 16) | (g.target[1] << 8) | g.target[2])) >>> 0;
-    for (const m of g.members || []) { if (m && m.color) mg = (mg * 31 + ((m.color[0] << 16) | (m.color[1] << 8) | m.color[2]) + (isRegionMember(m) ? 7 : 0)) >>> 0; }
-  }
-  parts.push("mg", mgn, mg);
-  return parts.join(";");
+  if (!v) return "no-video";
+  const live = { analysis: v.analysis, activeK: v.activeK, confirmThreshold: v.confirmThreshold, disabledKeys: v.disabledKeys };
+  const paletteIds = [...new Set([v.curPaletteId || "live", ...Object.keys(v.palettes || {})])].sort();
+  const palettes = paletteIds.map((id) => paletteVisualRecord(id, id === v.curPaletteId || id === "live" ? live : v.palettes[id]));
+  const icm = Object.keys(state.icm || {}).sort().map((k) => [k, state.icm[k]]);
+  const m = v.masks;
+  return JSON.stringify([
+    "masked-preview-r0",
+    [v.id, v.key, v._sourceRevision || 0, v._analysisRevision || 0, v._paletteRevision || 0, v._mergeRevision || 0],
+    [v._maskRevision || (m && m._id) || 0, m ? m.W : 0, m ? m.H : 0, m ? m.fps : 0, m ? m.total : 0],
+    Number.isFinite(v.fps) ? v.fps : 0,
+    [[dom.cvOrig.width, dom.cvOrig.height], [dom.cvReduced.width, dom.cvReduced.height], [dom.cvMask.width, dom.cvMask.height]],
+    v.curPaletteId || "",
+    state.maskOverlay ? 1 : 0,
+    [...ensureMaskViewSel(v)].sort(),
+    palettes,
+    icm,
+    (v.merges || []).map(mergeGroupVisualRecord),
+  ]);
+}
+function mergePreviewSig(v, mp, refs) {
+  const pending = v && v._mergePanelOpen && v._mergePending
+    ? [v._mergePreviewRevision || 0, v._mergePending.target ? packedRGB(v._mergePending.target) : null,
+      (v._mergePending.members || []).map(mergeMemberVisualRecord)]
+    : null;
+  return JSON.stringify([
+    "merge-preview-r0",
+    maskPreviewSig(v),
+    mp && mp.scene ? [mp.scene.paletteId, mp.scene.start, mp.scene.end] : null,
+    mp && mp.reps ? mp.reps.map((c) => packedRGB(c)) : [],
+    mp ? mp.threshold : null,
+    mp && Number.isFinite(mp.fps) ? mp.fps : 0,
+    refs && refs.canvas ? [refs.canvas.width, refs.canvas.height] : [0, 0],
+    pending,
+  ]);
 }
 function maskedPlaySyncUI(at, f, fps, dur, r) {
   syncSeekElement(dom.previewSeek, r.start, r.end, at);
@@ -3554,67 +3971,113 @@ function maskedPlaySyncUI(at, f, fps, dur, r) {
   syncLargePreview();
 }
 async function maskedPlayLoop(gen) {
-  const alive = () => state.playing && state._playGen === gen;
+  const owner = activeVideo();
+  const sourceRevision = owner && owner._sourceRevision || 0;
+  const alive = () => state.playing && state._playGen === gen && activeVideo() === owner
+    && !!owner && (owner._sourceRevision || 0) === sourceRevision;
   try { dom.workVideo.pause(); } catch (e) { /* ignore */ }
   const toBlobP = (c) => new Promise((res) => c.toBlob(res, "image/png")); // 可逆＝再生時も画素が完全一致
   let curF = null;   // キャッシュ再生中は動画をシークしない＝位置はループ内で自前追跡
-  let lastAt = -1;   // 停止時に動画位置を表示コマへ合わせるため
-  while (alive()) {
-    const iterStart = performance.now();
-    const v = activeVideo();
-    if (!v) { stopPlay(); return; }
-    const fps = v.fps || (v.masks && v.masks.fps) || 30;
-    const dur = dom.workVideo.duration || 0;
-    const r = v.sceneMode ? sceneRange(v, dur) : { start: 0, end: dur };
-    const fStart = Math.round(r.start * fps), fEnd = Math.round(r.end * fps) - 1;
-    let f = (curF != null ? curF : Math.floor((dom.workVideo.currentTime || 0) * fps + 1e-6)) + 1;
-    if (f > fEnd || f < fStart) {
-      if (!state.loop && f > fEnd) { break; } // ループなし＝末尾で停止
-      f = fStart;
-    }
-    const at = Math.max(0.001, Math.min(dur - 0.001, (f + 0.5) / fps)); // フレーム中央（境界の曖昧シーク回避）
-    const sig = maskPreviewSig(v);
-    if (!v._mpr || v._mpr.sig !== sig) v._mpr = { sig, frames: new Map(), bytes: 0 }; // 編集を検知して作り直し
-    const mpr = v._mpr;
-    const hit = mpr.frames.get(f);
-    if (hit) {
-      // 2周目以降: キャッシュ再生（シークも領域計算もなし＝デコードして描くだけ）
-      let bmps = null;
-      try { bmps = await Promise.all(hit.map((b) => createImageBitmap(b))); } catch (e) { mpr.frames.delete(f); continue; }
-      if (!alive()) { bmps.forEach((b) => b.close()); return; }
-      const cs = [dom.cvOrig, dom.cvReduced, dom.cvMask];
-      for (let i = 0; i < 3; i++) { cs[i].getContext("2d").drawImage(bmps[i], 0, 0); bmps[i].close(); }
-      curF = f; lastAt = at;
-      state._mprDbg = { f, hit: true };
-      maskedPlaySyncUI(at, f, fps, dur, r);
-    } else {
-      // 初回（またはキャッシュ未保持コマ）: 正確シーク→描画→結果をキャッシュ
-      try { await seekVideo(dom.workVideo, at); } catch (e) { stopPlay(); return; }
-      if (!alive()) return;
-      drawActiveFrame(); // 停止中の currentTime＝表示フレーム＝領域マップと同じコマ（構成的にズレない）
-      curF = f; lastAt = -1; // 実シーク済み＝動画位置が真
-      state._mprDbg = { f, hit: false };
-      if (mpr.bytes < 700 * 1024 * 1024) { // メモリ上限（可逆PNG合計 約700MBまで。超過後は都度レンダリング）
-        const blobs = await Promise.all([toBlobP(dom.cvOrig), toBlobP(dom.cvReduced), toBlobP(dom.cvMask)]);
-        if (blobs.every(Boolean) && v._mpr === mpr && mpr.sig === sig && !mpr.frames.has(f)) {
-          mpr.frames.set(f, blobs);
-          mpr.bytes += blobs.reduce((s, b) => s + b.size, 0);
+  if (state._mprCachedAt == null) state._mprCachedAt = dom.workVideo.currentTime || 0; // visible canvas before an in-flight miss
+  try {
+    while (alive()) {
+      const iterStart = performance.now();
+      const v = owner;
+      const fps = v.fps || (v.masks && v.masks.fps) || 30;
+      const dur = dom.workVideo.duration || 0;
+      const r = v.sceneMode ? sceneRange(v, dur) : { start: 0, end: dur };
+      const fStart = Math.round(r.start * fps), fEnd = Math.round(r.end * fps) - 1;
+      const baseAt = state._mprCachedAt != null ? state._mprCachedAt : dom.workVideo.currentTime;
+      let f = (curF != null ? curF : Math.floor((baseAt || 0) * fps + 1e-6)) + 1;
+      if (f > fEnd || f < fStart) {
+        if (!state.loop && f > fEnd) break; // ループなし＝末尾で停止
+        f = fStart;
+      }
+      const at = Math.max(0.001, Math.min(dur - 0.001, (f + 0.5) / fps)); // フレーム中央（境界の曖昧シーク回避）
+      const sig = maskPreviewSig(v);
+      if (!v._mpr || v._mpr.sig !== sig) v._mpr = { sig, frames: new Map(), bytes: 0 }; // 編集を検知して作り直し
+      const mpr = v._mpr;
+      const hit = mpr.frames.get(f);
+      if (hit) {
+        let bmps = null;
+        try { bmps = await Promise.all(hit.map((b) => createImageBitmap(b))); }
+        catch (e) { if (v._mpr === mpr) mpr.frames.delete(f); if (!alive()) break; continue; }
+        if (!alive() || v._mpr !== mpr || maskPreviewSig(v) !== sig) {
+          bmps.forEach((b) => b.close());
+          if (!alive()) break;
+          continue;
+        }
+        const cs = [dom.cvOrig, dom.cvReduced, dom.cvMask];
+        for (let i = 0; i < 3; i += 1) { cs[i].getContext("2d").drawImage(bmps[i], 0, 0); bmps[i].close(); }
+        curF = f;
+        state._mprCachedAt = at;
+        state._mprDbg = { f, hit: true };
+        maskedPlaySyncUI(at, f, fps, dur, r);
+      } else {
+        // Completed PNGs are admitted only after a strict presented-frame latch for this ordinal.
+        if (state._mprCachedAt == null) state._mprCachedAt = curF != null ? (curF + 0.5) / fps : (dom.workVideo.currentTime || 0);
+        const frameSeekGen = (state._previewSeekGen = (state._previewSeekGen || 0) + 1);
+        state._previewSeekPendingGen = frameSeekGen;
+        try { await seekVideoFrameStrict(dom.workVideo, at, f, fps, 5000); }
+        catch (e) { if (alive()) stopPlay(); break; }
+        if (!alive() || state._previewSeekPendingGen !== frameSeekGen) break;
+        drawActiveFrame(at, frameSeekGen);
+        if (state._previewSeekPendingGen === frameSeekGen) state._previewSeekPendingGen = null;
+        curF = f;
+        state._mprCachedAt = null; // 実シーク済み＝動画位置が真
+        syncPreviewSeekControls();
+        state._mprDbg = { f, hit: false };
+        if (mpr.bytes < 700 * 1024 * 1024) {
+          const blobs = await Promise.all([toBlobP(dom.cvOrig), toBlobP(dom.cvReduced), toBlobP(dom.cvMask)]);
+          if (blobs.every(Boolean) && alive() && v._mpr === mpr && mpr.sig === sig
+            && maskPreviewSig(v) === sig && !mpr.frames.has(f)) {
+            mpr.frames.set(f, blobs);
+            mpr.bytes += blobs.reduce((s, b) => s + b.size, 0);
+          }
         }
       }
+      const budget = 1000 / (fps * (state.previewRate || 1));
+      const wait = Math.max(0, budget - (performance.now() - iterStart));
+      if (wait > 0) await new Promise((res) => setTimeout(res, wait));
     }
-    const budget = 1000 / (fps * (state.previewRate || 1));
-    const wait = Math.max(0, budget - (performance.now() - iterStart));
-    if (wait > 0) await new Promise((res) => setTimeout(res, wait));
+  } finally {
+    if (state.playing && state._playGen === gen) stopPlay(); // scene end / current-loop failure
+    const syncAt = state._mprCachedAt;
+    const fps = owner ? (owner.fps || (owner.masks && owner.masks.fps) || 30) : 30;
+    if (syncAt != null && !state.playing && state._playStoppedGen === gen && activeVideo() === owner
+      && owner && (owner._sourceRevision || 0) === sourceRevision) {
+      const syncF = Math.floor(syncAt * fps + 1e-6);
+      const syncSeek = state._playSyncSeek && state._playSyncSeek.playGen === gen
+        ? state._playSyncSeek.seekGen : (state._previewSeekGen = (state._previewSeekGen || 0) + 1);
+      state._previewSeekPendingGen = syncSeek;
+      try { await seekVideoFrameStrict(dom.workVideo, syncAt, syncF, fps, 5000); } catch (e) { return; }
+      if (!state.playing && state._playStoppedGen === gen && activeVideo() === owner
+        && (owner._sourceRevision || 0) === sourceRevision && state._previewSeekPendingGen === syncSeek) {
+        drawActiveFrame(syncAt, syncSeek); // apply any palette/view edits made while stop-sync was pending
+        state._mprCachedAt = null;
+        state._playStoppedGen = null;
+        state._playSyncSeek = null;
+        state._previewSeekPendingGen = null;
+        syncPreviewSeekControls();
+      }
+    }
   }
-  // 一時停止/末尾で抜けたとき: キャッシュ再生中なら表示コマへ実シークし, コマ送り/スクラブの基準を一致させる
-  if (lastAt >= 0) {
-    try { await seekVideo(dom.workVideo, lastAt); } catch (e) { /* ignore */ }
-    if (!state.playing || state._playGen !== gen) { /* 停止後の見た目は既にキャッシュ描画済み */ }
-  }
-  if (state.playing && state._playGen === gen) stopPlay(); // break（末尾停止）経由
 }
 
 function stopPlay() {
+  const stoppedGen = state._playGen || 0;
+  const wasPlaying = !!state.playing;
+  state._playStoppedGen = wasPlaying ? stoppedGen : null;
+  if (wasPlaying && state._mprCachedAt != null) {
+    const seekGen = (state._previewSeekGen = (state._previewSeekGen || 0) + 1);
+    state._previewSeekPendingGen = seekGen;
+    state._playSyncSeek = { playGen: stoppedGen, seekGen };
+    nextVideoSeekToken(dom.workVideo);
+  } else if (!wasPlaying) {
+    state._previewSeekPendingGen = null;
+    state._playSyncSeek = null;
+    nextVideoSeekToken(dom.workVideo);
+  }
   state.playing = false;
   state.loop = false;
   state._playGen = (state._playGen || 0) + 1; // invalidate any pending rVFC / raf / ended callbacks
@@ -3933,34 +4396,62 @@ function setupMergePlayer(side) {
   if (!mp) {
     const video = document.createElement("video");
     video.muted = true; video.playsInline = true; video.preload = "auto";
-    mp = mergePlayers[side] = { side, video, raf: null, playing: false, fps: 0, rate: 1, cache: new Map() };
+    mp = mergePlayers[side] = { side, video, raf: null, playing: false, playGen: 0, setupGen: 0, ready: false, fps: 0, rate: 1, cache: new Map() };
   }
-  mpStop(side);
+  const previouslySettled = !mp.playing && mp.settled === true && mp.pendingSeekGen == null;
+  mpStop(side, false);
+  const setupGen = (mp.setupGen = (mp.setupGen || 0) + 1);
+  mp.seekGen = (mp.seekGen || 0) + 1;
+  mp.pendingSeekGen = null;
+  mp._regionSeekGen = null;
+  mp.ready = false;
+  mp.settled = false;
+  mp.cachedAt = null;
   const sceneIdx = side === "L" ? (v.mergeSceneL || 0) : (v.mergeSceneR || 0);
   const pal = mergeScenePalette(v, sceneIdx);
   const palDisabled = (v.palettes[pal.scene.paletteId] || {}).disabledKeys; // STEP3 OFF clusters carry into STEP4's reduction
   const prev = mp.scene;
-  const sameScene = !!prev && prev.paletteId === pal.scene.paletteId && prev.start === pal.scene.start && prev.end === pal.scene.end;
+  const ownerChanged = mp.ownerVideo !== v || mp.sourceRevision !== (v._sourceRevision || 0);
+  const sameScene = !ownerChanged && !!prev && prev.paletteId === pal.scene.paletteId && prev.start === pal.scene.start && prev.end === pal.scene.end;
   mp.scene = pal.scene; mp.reps = repsEnabled(pal.reps, palDisabled); mp.threshold = pal.threshold; mp.cache = new Map();
   r.rate.value = String(mp.rate || 1);
-  const srcChanged = mp.video.src !== v.url;
-  if (srcChanged) { mp.video.src = v.url; mp.video.load(); }
+  const srcChanged = ownerChanged || mp.video.src !== v.url;
+  if (srcChanged) {
+    mp._cache = null;
+    mp.fps = 0;
+    mp.ownerVideo = v;
+    mp.sourceRevision = v._sourceRevision || 0;
+    loadVideoSource(mp.video, v.url);
+  }
+  const setupCurrent = () => mergePlayers[side] === mp && mp.setupGen === setupGen && activeVideo() === v
+    && mp.ownerVideo === v && mp.sourceRevision === (v._sourceRevision || 0);
+  let verifiedAt = null;
   ensureMetadata(mp.video).then(() => {
+    if (!setupCurrent()) throw staleVideoSeekError();
     const sz = scaledSize(mp.video.videoWidth, mp.video.videoHeight, v.analysis.settings.previewShortSide);
     if (r.canvas.width !== sz.width || r.canvas.height !== sz.height) { r.canvas.width = sz.width; r.canvas.height = sz.height; }
     const t = mp.video.currentTime;
     // No-op re-entry (same scene, src unchanged, playhead already inside the scene): keep the decoded
     // frame and just redraw — skip the ~250ms seek/relatch. Same <video>, same floor index, no pixel change.
-    if (sameScene && !srcChanged && t >= mp.scene.start && t < mp.scene.end) return null;
-    return seekVideo(mp.video, Math.min(Math.max(0, mp.scene.end - 0.05), mp.scene.start + 0.04));
-  }).then(() => mpDraw(side)).catch((e) => console.error(e));
+    if (sameScene && !srcChanged && previouslySettled && t >= mp.scene.start && t < mp.scene.end) { verifiedAt = t; return null; }
+    const fps = v.fps || (v.masks && v.masks.fps) || 30;
+    const f = Math.max(0, Math.floor(mp.scene.start * fps + 1e-6));
+    const at = Math.min(Math.max(0, mp.scene.end - 1e-3), (f + 0.5) / fps);
+    verifiedAt = at;
+    return masksActive(v) ? seekVideoFrameStrict(mp.video, at, f, fps, 5000) : seekVideo(mp.video, at);
+  }).then(() => {
+    if (!setupCurrent()) return;
+    mp.ready = true;
+    if (!mpDraw(side, verifiedAt)) mp.ready = false;
+  }).catch((e) => { if (setupCurrent() && (!e || e.name !== "StaleVideoSeekError")) console.error(e); });
 }
-function mpDraw(side, timeOverride) {
-  const mp = mergePlayers[side]; if (!mp || !mp.scene) return;
+function mpDraw(side, timeOverride, seekOwnerGen) {
+  const mp = mergePlayers[side]; if (!mp || !mp.scene) return false;
+  if (mp.pendingSeekGen != null && seekOwnerGen !== mp.pendingSeekGen) return false;
   const r = mpRefs(side);
-  if (!r.canvas.width) return;
+  if (!r.canvas.width) return false;
   const ctx = r.canvas.getContext("2d", { willReadFrequently: true });
-  try { ctx.drawImage(mp.video, 0, 0, r.canvas.width, r.canvas.height); } catch (e) { return; }
+  try { ctx.drawImage(mp.video, 0, 0, r.canvas.width, r.canvas.height); } catch (e) { return false; }
   const img = ctx.getImageData(0, 0, r.canvas.width, r.canvas.height);
   // During playback, the mask must be looked up by the PRESENTED frame's exact mediaTime
   // (passed in), not currentTime — otherwise the per-frame region mask lands a frame off
@@ -3984,12 +4475,15 @@ function mpDraw(side, timeOverride) {
   mp.frameDirty = true;
   if (v && v.mergeMode && !v._mergePanelOpen && v.mergeSel && v.mergeSel.length) applyMergeSpotlight(img.data, W, H, v.mergeSel, t);
   ctx.putImageData(img, 0, 0);
+  mp.cachedAt = null; // successful draw now owns the real video position
+  mp.settled = true;
   mpSyncControls(side);
+  return true;
 }
 function mpSyncControls(side) {
   const mp = mergePlayers[side]; if (!mp || !mp.scene) return;
   const r = mpRefs(side);
-  const cur = mp.video.currentTime || 0;
+  const cur = mp.cachedAt != null ? mp.cachedAt : (mp.video.currentTime || 0);
   r.seek.min = String(mp.scene.start);
   r.seek.max = String(Math.max(mp.scene.start, mp.scene.end));
   r.seek.value = String(Math.max(mp.scene.start, Math.min(mp.scene.end, cur)));
@@ -3997,35 +4491,63 @@ function mpSyncControls(side) {
   r.time.textContent = `${formatClock(cur)} / ${formatClock(mp.scene.end)}${frame}`;
   r.play.textContent = mp.playing ? "⏸" : "▶";
 }
-function mpStop(side) {
+function mpStop(side, syncCached = true) {
   const mp = mergePlayers[side]; if (!mp) return;
+  const stoppedGen = mp.playGen || 0;
+  const wasPlaying = !!mp.playing;
+  mp._syncStoppedGen = syncCached && wasPlaying ? stoppedGen : null;
+  if (syncCached && wasPlaying && mp.cachedAt != null) {
+    const seekGen = (mp.seekGen = (mp.seekGen || 0) + 1);
+    mp.pendingSeekGen = seekGen;
+    mp._syncSeek = { playGen: stoppedGen, seekGen };
+    nextVideoSeekToken(mp.video);
+  } else if (!syncCached) {
+    mp.pendingSeekGen = null;
+    mp._syncSeek = null;
+    nextVideoSeekToken(mp.video);
+  }
+  mp.playGen = (mp.playGen || 0) + 1;
   mp.playing = false;
   if (mp.raf) { cancelAnimationFrame(mp.raf); mp.raf = null; }
   try { if (mp.video && !mp.video.paused) mp.video.pause(); } catch (e) { /* ignore */ }
   mpSyncControls(side);
 }
 function mpTogglePlay(side) {
-  const mp = mergePlayers[side]; if (!mp || !mp.scene) return;
+  const mp = mergePlayers[side]; if (!mp || !mp.scene || !mp.ready) return;
   const vb = activeVideo(); if (vb && regionBusy(vb, side)) return; // don't fight THIS side's region capture for the video (the other side stays free)
   if (mp.playing) { mpStop(side); return; }
+  const gen = (mp.playGen = (mp.playGen || 0) + 1);
+  mp.seekGen = (mp.seekGen || 0) + 1;
+  mp.pendingSeekGen = null;
+  mp._syncSeek = null;
+  mp._regionSeekGen = null;
+  mp.settled = false;
+  nextVideoSeekToken(mp.video);
+  mp._syncStoppedGen = null; // prevent a delayed stop-sync from an older loop seeking this player
   mp.playing = true;
+  invalidateVideoFpsMeasurement(mp.video);
   try { mp.video.playbackRate = mp.rate || 1; } catch (e) { /* ignore */ }
-  if (mp.video.currentTime < mp.scene.start || mp.video.currentTime >= mp.scene.end - 1e-3) {
-    try { mp.video.currentTime = mp.scene.start; } catch (e) { /* ignore */ }
+  const visibleAt = mp.cachedAt != null ? mp.cachedAt : mp.video.currentTime;
+  if (visibleAt < mp.scene.start || visibleAt >= mp.scene.end - 1e-3) {
+    mp.cachedAt = null;
+    try { setVideoCurrentTime(mp.video, mp.scene.start); } catch (e) { /* ignore */ }
   }
   mpSyncControls(side);
   // マスク使用時はシーク駆動（STEP3と同じ理由: rVFCのリアルタイム再生は画素と mediaTime が±1コマ
   // 競合し, 動く輪郭帯が一瞬隣領域のパレットで量子化されてマゼンタが走る）。
-  if (vb && masksActive(vb)) { mpMaskedLoop(side); return; }
-  mp.video.play().catch(() => mpStop(side));
+  if (vb && masksActive(vb)) { mpMaskedLoop(side, gen); return; }
+  mp.video.play().catch(() => {
+    if (mergePlayers[side] === mp && mp.playGen === gen && mp.playing) mpStop(side);
+  });
   // Frame-accurate playback: redraw on each PRESENTED frame and apply the region mask at
   // that frame's exact mediaTime, so the recolored region stays locked to the motion.
   const useRVFC = typeof mp.video.requestVideoFrameCallback === "function";
   const onFrame = (now, meta) => {
-    if (!mp.playing || mp.video.paused) { mpStop(side); return; }
+    if (mergePlayers[side] !== mp || mp.playGen !== gen || !mp.playing || mp.video.paused) return;
     const t = meta ? meta.mediaTime : mp.video.currentTime;
-    if (t >= mp.scene.end - 1e-3) { try { mp.video.currentTime = mp.scene.start; } catch (e) { /* ignore */ } } // loop within scene
+    if (t >= mp.scene.end - 1e-3) { try { setVideoCurrentTime(mp.video, mp.scene.start); } catch (e) { /* ignore */ } } // loop within scene
     mpDraw(side, meta ? meta.mediaTime : undefined);
+    if (mp.playGen !== gen || !mp.playing) return;
     if (useRVFC) mp.video.requestVideoFrameCallback(onFrame);
     else mp.raf = requestAnimationFrame(onFrame);
   };
@@ -4034,111 +4556,210 @@ function mpTogglePlay(side) {
 }
 // マスク使用時の統合プレーヤー再生（シーク駆動＋フレームキャッシュ: STEP3と同方式）。
 // 初回はシーク→描画→可逆PNGで保存、2周目以降はデコードして描くだけ（シークも領域計算もなし）。
-async function mpMaskedLoop(side) {
+async function mpMaskedLoop(side, gen) {
   const mp = mergePlayers[side];
-  try { mp.video.pause(); } catch (e) { /* ignore */ }
-  const fps = await mpEnsureFps(side);
+  if (!mp) return;
+  const owner = mp.ownerVideo;
+  const sourceRevision = owner && owner._sourceRevision || 0;
+  const setupGen = mp.setupGen || 0;
+  const scene = mp.scene;
+  const alive = () => mergePlayers[side] === mp && mp.playGen === gen && mp.playing && mp.ready
+    && mp.setupGen === setupGen && mp.scene === scene && activeVideo() === owner
+    && !!owner && (owner._sourceRevision || 0) === sourceRevision;
+  if (mp.cachedAt == null) mp.cachedAt = mp.video.currentTime || 0; // canvas position while a miss seek is in flight
   const r = mpRefs(side);
   const toBlobP = (c) => new Promise((res) => c.toBlob(res, "image/png"));
-  let curF = null, lastAt = -1;
-  while (mergePlayers[side] === mp && mp.playing && mp.scene) {
-    const iterStart = performance.now();
-    const v = activeVideo();
-    const fStart = Math.round(mp.scene.start * fps), fEnd = Math.round(mp.scene.end * fps) - 1;
-    let f = (curF != null ? curF : Math.floor((mp.video.currentTime || 0) * fps + 1e-6)) + 1;
-    if (f > fEnd || f < fStart) f = fStart; // シーン内ループ
-    const at = Math.max(0.001, (f + 0.5) / fps);
-    // キャッシュには「選択スポットライト無し」の絵を保存する（選択は一時状態：焼き込むと解除後も
-    // ヒット再生で塗りが残る）。パネル開放中のプレビュー統合は画素に入るので署名に含める。
-    let pend = 0;
-    if (v && v._mergePanelOpen && v._mergePending) {
-      const p = v._mergePending; pend = 1;
-      if (p.target) pend = (pend * 31 + packedRGB(p.target)) >>> 0;
-      for (const m of p.members || []) { if (m && m.color) pend = (pend * 31 + packedRGB(m.color)) >>> 0; }
-    }
-    const sig = (v ? maskPreviewSig(v) : "") + ";mp" + r.canvas.width + "x" + r.canvas.height + ";p" + pend;
-    if (!mp._cache || mp._cache.sig !== sig) mp._cache = { sig, frames: new Map(), bytes: 0 }; // 編集で自動無効化
-    const hit = mp._cache.frames.get(f);
-    if (hit) {
-      let bmp = null;
-      try { bmp = await createImageBitmap(hit); } catch (e) { mp._cache.frames.delete(f); continue; }
-      if (!(mergePlayers[side] === mp && mp.playing)) { bmp.close(); return; }
-      const hctx = r.canvas.getContext("2d");
-      hctx.drawImage(bmp, 0, 0);
-      bmp.close();
-      // 選択スポットライトはライブ状態から重ねる（mpDraw と同条件）→ 選択/解除が即座に反映される
-      if (v && v.mergeMode && !v._mergePanelOpen && v.mergeSel && v.mergeSel.length) {
-        const img2 = hctx.getImageData(0, 0, r.canvas.width, r.canvas.height);
-        applyMergeSpotlight(img2.data, r.canvas.width, r.canvas.height, v.mergeSel, at);
-        hctx.putImageData(img2, 0, 0);
+  let fps = owner ? (owner.fps || (owner.masks && owner.masks.fps) || 30) : 30;
+  let curF = null;
+  try {
+    try { mp.video.pause(); } catch (e) { /* ignore */ }
+    fps = await mpEnsureFps(side);
+    if (!alive()) return;
+    while (alive()) {
+      const iterStart = performance.now();
+      const v = owner;
+      const fStart = Math.round(scene.start * fps), fEnd = Math.round(scene.end * fps) - 1;
+      const baseAt = mp.cachedAt != null ? mp.cachedAt : mp.video.currentTime;
+      let f = (curF != null ? curF : Math.floor((baseAt || 0) * fps + 1e-6)) + 1;
+      if (f > fEnd || f < fStart) f = fStart; // シーン内ループ
+      const at = Math.max(0.001, (f + 0.5) / fps);
+      const sig = mergePreviewSig(v, mp, r);
+      if (!mp._cache || mp._cache.sig !== sig) mp._cache = { sig, frames: new Map(), bytes: 0 };
+      const frameCache = mp._cache;
+      const hit = frameCache.frames.get(f);
+      if (hit) {
+        let bmp = null;
+        try { bmp = await createImageBitmap(hit); }
+        catch (e) { if (mp._cache === frameCache) frameCache.frames.delete(f); if (!alive()) break; continue; }
+        if (!alive() || mp._cache !== frameCache || mergePreviewSig(v, mp, r) !== sig) {
+          bmp.close();
+          if (!alive()) break;
+          continue;
+        }
+        const hctx = r.canvas.getContext("2d");
+        hctx.drawImage(bmp, 0, 0);
+        if (mp.pickCtx) mp.pickCtx.drawImage(bmp, 0, 0);
+        bmp.close();
+        if (v.mergeMode && !v._mergePanelOpen && v.mergeSel && v.mergeSel.length) {
+          const img2 = hctx.getImageData(0, 0, r.canvas.width, r.canvas.height);
+          applyMergeSpotlight(img2.data, r.canvas.width, r.canvas.height, v.mergeSel, at);
+          hctx.putImageData(img2, 0, 0);
+        }
+        curF = f;
+        mp.cachedAt = at;
+        mp.settled = false;
+        mp._dbg = { f, hit: true };
+        mpSyncControls(side);
+      } else {
+        if (mp.cachedAt == null) mp.cachedAt = curF != null ? (curF + 0.5) / fps : (mp.video.currentTime || 0);
+        const frameSeekGen = (mp.seekGen = (mp.seekGen || 0) + 1);
+        mp.pendingSeekGen = frameSeekGen;
+        mp.settled = false;
+        try { await seekVideoFrameStrict(mp.video, at, f, fps, 5000); }
+        catch (e) { if (alive()) mpStop(side); break; }
+        if (!alive() || mp.pendingSeekGen !== frameSeekGen) break;
+        if (!mpDraw(side, at, frameSeekGen)) { if (alive()) mpStop(side); break; }
+        if (mp.pendingSeekGen === frameSeekGen) mp.pendingSeekGen = null;
+        curF = f;
+        mp.cachedAt = null;
+        mp._dbg = { f, hit: false };
+        if (frameCache.bytes < 150 * 1024 * 1024) {
+          const b = mp.pickCanvas ? await toBlobP(mp.pickCanvas) : null;
+          if (b && alive() && mp._cache === frameCache && frameCache.sig === sig
+            && mergePreviewSig(v, mp, r) === sig && !frameCache.frames.has(f)) {
+            frameCache.frames.set(f, b);
+            frameCache.bytes += b.size;
+          }
+        }
       }
-      curF = f; lastAt = at;
-      mp._dbg = { f, hit: true };
-      r.seek.value = String(Math.max(mp.scene.start, Math.min(mp.scene.end, at)));
-      r.time.textContent = `${formatClock(at)} / ${formatClock(mp.scene.end)} ・ コマ ${f + 1}`;
-    } else {
-      try { await seekVideo(mp.video, at); } catch (e) { mpStop(side); return; }
-      if (!(mergePlayers[side] === mp && mp.playing)) return;
-      mpDraw(side); // 停止中の currentTime＝表示フレーム＝領域マップと同じコマ
-      mpSyncControls(side);
-      curF = f; lastAt = -1;
-      mp._dbg = { f, hit: false };
-      if (mp._cache.bytes < 150 * 1024 * 1024) { // 上限150MB/側
-        // pickCanvas = mpDraw が残す「縮約＋統合済み・スポットライト前」の絵（表示キャンバスは選択塗り込み）
-        const b = mp.pickCanvas ? await toBlobP(mp.pickCanvas) : null;
-        if (b && mp._cache && mp._cache.sig === sig && !mp._cache.frames.has(f)) { mp._cache.frames.set(f, b); mp._cache.bytes += b.size; }
+      const budget = 1000 / (fps * (mp.rate || 1));
+      const wait = Math.max(0, budget - (performance.now() - iterStart));
+      if (wait > 0) await new Promise((res) => setTimeout(res, wait));
+    }
+  } finally {
+    if (alive()) mpStop(side);
+    const syncAt = mp.cachedAt;
+    if (syncAt != null && mergePlayers[side] === mp && !mp.playing && mp._syncStoppedGen === gen
+      && mp.ready && mp.setupGen === setupGen && mp.scene === scene && activeVideo() === owner
+      && owner && (owner._sourceRevision || 0) === sourceRevision) {
+      const syncF = Math.floor(syncAt * fps + 1e-6);
+      const syncSeek = mp._syncSeek && mp._syncSeek.playGen === gen ? mp._syncSeek.seekGen : (mp.seekGen = (mp.seekGen || 0) + 1);
+      mp.pendingSeekGen = syncSeek;
+      try { await seekVideoFrameStrict(mp.video, syncAt, syncF, fps, 5000); } catch (e) { return; }
+      if (mergePlayers[side] === mp && !mp.playing && mp._syncStoppedGen === gen && mp.ready
+        && mp.setupGen === setupGen && mp.scene === scene && activeVideo() === owner
+        && (owner._sourceRevision || 0) === sourceRevision && mp.pendingSeekGen === syncSeek) {
+        mp._syncStoppedGen = null;
+        mp._syncSeek = null;
+        if (mpDraw(side, syncAt, syncSeek)) mp.pendingSeekGen = null;
+        mpSyncControls(side);
       }
     }
-    const budget = 1000 / (fps * (mp.rate || 1));
-    const wait = Math.max(0, budget - (performance.now() - iterStart));
-    if (wait > 0) await new Promise((res) => setTimeout(res, wait));
-  }
-  // 停止時: キャッシュ再生中なら表示コマへ実シークして通常状態（スクラブ/ピック基準）に合わせる
-  if (lastAt >= 0 && mergePlayers[side] === mp) {
-    try { await seekVideo(mp.video, lastAt); } catch (e) { /* ignore */ }
-    if (!mp.playing) { mpDraw(side); mpSyncControls(side); }
   }
 }
 function mpSeek(side, t) {
-  const mp = mergePlayers[side]; if (!mp || !mp.scene) return;
+  const mp = mergePlayers[side]; if (!mp || !mp.scene || !mp.ready) return;
   const vb = activeVideo(); if (vb && regionBusy(vb, side)) return; // this side's region capture owns its video right now
   const target = Math.max(mp.scene.start, Math.min(Math.max(mp.scene.start, mp.scene.end - 1e-3), Number(t) || 0));
-  try { mp.video.currentTime = target; } catch (e) { return; }
-  if (!mp.playing) waitForVideoFrame(mp.video).then(() => mpDraw(side)).catch(() => {});
-  else mpSyncControls(side);
+  const exactMask = !!(vb && masksActive(vb));
+  const visibleAt = mp.cachedAt != null ? mp.cachedAt : mp.video.currentTime;
+  if (exactMask && mp.playing) mpStop(side, false);
+  mp.cachedAt = exactMask ? visibleAt : null;
+  const seekGen = (mp.seekGen = (mp.seekGen || 0) + 1);
+  mp.pendingSeekGen = seekGen;
+  mp._regionSeekGen = null;
+  mp.settled = false;
+  if (exactMask) {
+    const owner = mp.ownerVideo;
+    const sourceRevision = owner && owner._sourceRevision || 0;
+    const setupGen = mp.setupGen || 0;
+    const scene = mp.scene;
+    const fps = owner.fps || (owner.masks && owner.masks.fps) || mp.fps || 30;
+    const f = Math.floor(target * fps + 1e-6);
+    seekVideoFrameStrict(mp.video, target, f, fps, 5000).then(() => {
+      if (mergePlayers[side] !== mp || mp.seekGen !== seekGen || mp.playing || !mp.ready
+        || mp.setupGen !== setupGen || mp.scene !== scene || activeVideo() !== owner
+        || (owner._sourceRevision || 0) !== sourceRevision) return;
+      if (mpDraw(side, target, seekGen) && mp.pendingSeekGen === seekGen) mp.pendingSeekGen = null;
+      mpSyncControls(side);
+    }).catch((e) => {
+      if (mergePlayers[side] === mp && mp.seekGen === seekGen && (!e || e.name !== "StaleVideoSeekError")) {
+        flashMergeHint("提示フレームを厳密に確認できなかったため、直前のコマを維持しました");
+        mpSyncControls(side);
+      }
+    });
+    mpSyncControls(side);
+    return;
+  }
+  try { setVideoCurrentTime(mp.video, target); } catch (e) { if (mp.pendingSeekGen === seekGen) mp.pendingSeekGen = null; return; }
+  if (!mp.playing) waitForVideoFrame(mp.video).then(() => {
+    if (mp.seekGen !== seekGen) return;
+    if (mpDraw(side, undefined, seekGen) && mp.pendingSeekGen === seekGen) mp.pendingSeekGen = null;
+  }).catch(() => {});
+  else { if (mp.pendingSeekGen === seekGen) mp.pendingSeekGen = null; mpSyncControls(side); }
 }
 async function mpEnsureFps(side) {
   const mp = mergePlayers[side]; if (!mp) return 30;
-  if (mp.fps) return mp.fps;
-  // fps is a property of the VIDEO, not the player — measure once and share across L/R so the region
-  // cache sig (which rounds fps) is identical for both players → whole-video loads frames ONCE.
   const shared = activeVideo();
-  if (shared && shared._mpFps) { mp.fps = shared._mpFps; return mp.fps; }
+  // One source has one authoritative timeline rate. STEP3 reduction, both STEP4 players and mask
+  // ordinal lookup must never publish independent short-sample answers.
+  if (shared && shared.fps) { mp.fps = shared.fps; shared._mpFps = shared.fps; return mp.fps; }
+  if (shared && shared._mpFps) { shared.fps = shared._mpFps; mp.fps = shared.fps; return mp.fps; }
+  if (mp.fps) { if (shared) { shared.fps = mp.fps; shared._mpFps = mp.fps; } return mp.fps; }
+  const ownerRevision = shared && shared._sourceRevision || 0;
+  const ownerGen = mp.playGen || 0;
+  const setupGen = mp.setupGen || 0;
+  const stillOwner = () => mergePlayers[side] === mp && activeVideo() === shared && mp.ownerVideo === shared
+    && (shared && shared._sourceRevision || 0) === ownerRevision && (mp.playGen || 0) === ownerGen
+    && (mp.setupGen || 0) === setupGen;
   const vid = mp.video;
   if (typeof vid.requestVideoFrameCallback !== "function") { mp.fps = 30; if (shared) shared._mpFps = 30; return 30; }
-  const base = vid.currentTime; const times = [];
+  const times = [];
   await new Promise((res) => {
-    let done = false; const fin = () => { if (done) return; done = true; try { vid.pause(); } catch (e) { /* ignore */ } res(); };
-    const onF = (n, meta) => { times.push(meta.mediaTime); if (times.length >= 6) { fin(); return; } vid.requestVideoFrameCallback(onF); };
+    let done = false;
+    const fin = () => { if (done) return; done = true; if (stillOwner()) { try { vid.pause(); } catch (e) { /* ignore */ } } res(); };
+    const onF = (n, meta) => {
+      if (!stillOwner()) { fin(); return; }
+      if (meta && Number.isFinite(meta.mediaTime)) times.push(meta.mediaTime);
+      if (times.length >= 6) { fin(); return; }
+      vid.requestVideoFrameCallback(onF);
+    };
     vid.muted = true; vid.requestVideoFrameCallback(onF); vid.play().catch(fin); setTimeout(fin, 1500);
   });
   const d = []; for (let i = 1; i < times.length; i += 1) { const x = times[i] - times[i - 1]; if (x > 0.0008) d.push(x); }
   d.sort((a, b) => a - b);
-  mp.fps = d.length ? snapFps(1 / d[Math.floor(d.length / 2)]) : 30; // no integer rounding — non-standard CFR (23.976/29.97/24.4) must survive so region-mask frame indices stay aligned
-  if (shared) shared._mpFps = mp.fps; // share with the other player
-  try { vid.currentTime = base; } catch (e) { /* ignore */ }
+  const measuredFps = d.length ? snapFps(1 / d[Math.floor(d.length / 2)]) : 30;
+  // The shared player object is reused across videos. An old measurement may finish after source
+  // replacement; return its local result to the old caller, but never publish it into the new owner.
+  if (!stillOwner()) return measuredFps;
+  mp.fps = shared && shared.fps ? shared.fps : measuredFps;
+  if (shared) { shared.fps = mp.fps; shared._mpFps = mp.fps; }
+  // Do not restore currentTime here: every caller owns an explicit next strict seek, while a delayed
+  // restore can rewind a newer play/step intent. The visible position remains in mp.cachedAt.
   return mp.fps;
 }
 async function mpStep(side, delta) {
-  const mp = mergePlayers[side]; if (!mp || !mp.scene) return;
+  const mp = mergePlayers[side]; if (!mp || !mp.scene || !mp.ready) return;
   const vb = activeVideo(); if (vb && regionBusy(vb, side)) return;
-  mpStop(side);
-  const base = mp.video.currentTime;
+  const base = mp.cachedAt != null ? mp.cachedAt : mp.video.currentTime;
+  const owner = mp.ownerVideo;
+  const sourceRevision = owner && owner._sourceRevision || 0;
+  const setupGen = mp.setupGen || 0;
+  const scene = mp.scene;
+  mpStop(side, false);
+  mp.cachedAt = base;
+  const seekGen = (mp.seekGen = (mp.seekGen || 0) + 1);
+  mp.pendingSeekGen = seekGen;
+  mp.settled = false;
+  const stepGen = mp.playGen || 0;
   const fps = await mpEnsureFps(side);
+  if (mergePlayers[side] !== mp || mp.playGen !== stepGen || mp.playing || !mp.ready
+    || mp.setupGen !== setupGen || mp.scene !== scene || activeVideo() !== owner
+    || !owner || (owner._sourceRevision || 0) !== sourceRevision || mp.pendingSeekGen !== seekGen) return;
   const idx = Math.floor(base * fps + 1e-6);
   mpSeek(side, (idx + delta + 0.5) / fps);
 }
-function stopMergePlayers() { mpStop("L"); mpStop("R"); }
+function stopMergePlayers() { mpStop("L", false); mpStop("R", false); }
 
 /* ---- STEP4 integration mode (phase 3): pick representative colors on the stopped
    reduced video, see them spotlit across both scenes, and collect a removable
@@ -4190,7 +4811,7 @@ function toggleMergeMode() {
   if (v.mergeMode) { mpStop("L"); mpStop("R"); } // picking requires a still frame
   else closeMergePanel(v);
   syncMergeModeUI(v);
-  ["L", "R"].forEach((s) => { const mp = mergePlayers[s]; if (mp && !mp.playing && !regionBusy(v, s)) mpDraw(s); }); // don't redraw a side mid-region-capture (would jump its frame off the capture position)
+  ["L", "R"].forEach((s) => { const mp = mergePlayers[s]; if (mp && mp.ready && !mp.playing && !regionBusy(v, s)) mpDraw(s); }); // don't redraw a side mid-region-capture (would jump its frame off the capture position)
 }
 // A merge needs at least two DIFFERENT color codes — selecting the same color (even via
 // two swatches / two regions) has no valid target, so the merge action stays hidden.
@@ -4248,7 +4869,7 @@ function repIndexForColor(reps, d) {
 function mergePickAt(side, clientX, clientY) {
   const v = activeVideo(); if (!v || !v.mergeMode) return;
   if (v._mergePanelOpen) { flashMergeHint("統合の確定中です。先に『統合する』か『キャンセル』を押してください"); return; } // the panel is a snapshot of the selection — don't let a pick/region build change it under the open panel (would be dropped or silently folded in)
-  const mp = mergePlayers[side]; if (!mp || !mp.scene || !mp.pickCtx) return;
+  const mp = mergePlayers[side]; if (!mp || !mp.scene || !mp.pickCtx || !mp.ready || mp.pendingSeekGen != null) return;
   if (mp.playing) { flashMergeHint("⏸ 再生を止めてからクリックしてください"); return; }
   if (regionBusy(v, side)) { flashMergeHint("いまこの側で領域を計算中です…"); return; } // the OTHER side can still pick/build in parallel
   const at = canvasPixelAt(side, clientX, clientY); if (!at) return;
@@ -4262,7 +4883,8 @@ function mergePickAt(side, clientX, clientY) {
     // パレットのみなので、他領域の色を背景の最近色へ丸めると実在しない色が登録されてしまう。
     // （減色なし領域のガードは色ピック・領域ピック共通なので、領域分岐より先に行う）
     const fps = v.fps || (v.masks && v.masks.fps) || 30;
-    const f = Math.floor(((mp.video && mp.video.currentTime) || 0) * fps + 1e-6);
+    const visibleAt = mp.cachedAt != null ? mp.cachedAt : ((mp.video && mp.video.currentTime) || 0);
+    const f = Math.floor(visibleAt * fps + 1e-6);
     const rmap = regionMapForFrame(v, f, mp.pickCanvas.width, mp.pickCanvas.height);
     const val = rmap ? rmap[at.py * mp.pickCanvas.width + at.px] : 0;
     let rpid = regionPaletteIdOf(mp.scene.paletteId, val > 0 ? "L" + v.masks.layers[val - 1].id : "bg");
@@ -4281,6 +4903,7 @@ async function pickRegion(side, px, py) {
   try {
     const region = await buildRegionSelection(side, px, py);
     if (!region) { if (v) syncMergeModeUI(v); return; } // not found -> no chip added (hint already shown)
+    region._revision = (v._regionSelectionRevision = (v._regionSelectionRevision || 0) + 1);
     const repIndex = repIndexForColor(mp.reps, region.color);
     v.mergeSel = v.mergeSel || [];
     v.mergeSel.push({ id: (v._selSeq = (v._selSeq || 0) + 1), side, paletteId: region.paletteId, repIndex, color: region.color.slice(), kind: "region", region });
@@ -4300,7 +4923,7 @@ function toggleMergeSelection(v, side, paletteId, repIndex, color) {
 function refreshMergeSelection(v) {
   renderMergeChips(v);
   dom.mergeActionRow.hidden = !(v.mergeMode && mergeHasDistinctColors(v));
-  ["L", "R"].forEach((s) => { const mp = mergePlayers[s]; if (mp && !mp.playing && !regionBusy(v, s)) mpDraw(s); }); // don't redraw a side mid-region-capture (would jump its frame off the capture position)
+  ["L", "R"].forEach((s) => { const mp = mergePlayers[s]; if (mp && mp.ready && !mp.playing && !regionBusy(v, s)) mpDraw(s); }); // don't redraw a side mid-region-capture (would jump its frame off the capture position)
 }
 function renderMergeChips(v) {
   const sel = (v && v.mergeSel) || [];
@@ -4334,7 +4957,7 @@ function mergeLoupeMove(side, clientX, clientY) {
   const v = activeVideo();
   const mp = mergePlayers[side];
   const loupe = side === "L" ? dom.mergeLoupeL : dom.mergeLoupeR;
-  if (!v || !v.mergeMode || !mp || !mp.pickCanvas || mp.playing || regionBusy(v, side)) { loupe.hidden = true; return; } // no loupe while this side is region-capturing (would overwrite the progress overlay/hint)
+  if (!v || !v.mergeMode || !mp || !mp.pickCanvas || !mp.ready || mp.pendingSeekGen != null || mp.playing || regionBusy(v, side)) { loupe.hidden = true; return; } // no loupe while this side is region-capturing (would overwrite the progress overlay/hint)
   const at = canvasPixelAt(side, clientX, clientY); if (!at) { loupe.hidden = true; return; }
   if (mp.frameDirty || !mp.loupeUrl) { mp.loupeUrl = mp.pickCanvas.toDataURL(); mp.frameDirty = false; }
   const cw = mp.pickCanvas.width, chh = mp.pickCanvas.height;
@@ -4504,15 +5127,29 @@ function regionIndexAtTime(rg, t) {
   while (lo <= hi) { const mid = (lo + hi) >> 1; if (times[mid] <= t + 1e-6) { ans = mid; lo = mid + 1; } else hi = mid - 1; }
   return rg.fStart + ans;
 }
-// run-length codec for cached index maps (reduced frames are flat -> compresses ~100x)
+// Adaptive codec for cached index maps. Flat reduced frames usually favor RLE, but a many-color
+// frame can approach one run per pixel; use raw typed indices once RLE cannot beat raw bytes.
 function rleEncodeIdx(idx, n) {
-  const vals = [], cnts = []; let p = 0;
-  while (p < n) { const val = idx[p]; let q = p + 1; while (q < n && idx[q] === val) q += 1; vals.push(val); cnts.push(q - p); p = q; }
   // 値の幅は入力に合わせる（合成色表が255色以上のときは Uint16 添字。番兵も 65535 になる）
   const wide = idx instanceof Uint16Array;
-  return { v: (wide ? Uint16Array : Uint8Array).from(vals), c: Uint32Array.from(cnts), bytes: vals.length * (4 + (wide ? 2 : 1)) };
+  const bpe = wide ? 2 : 1;
+  const rawBytes = n * bpe;
+  const raw = () => ({ raw: idx.slice(0, n), bytes: rawBytes }); // own the cache bytes; never alias scratch idx
+  if (n <= 0) return raw();
+  const vals = [], cnts = []; let p = 0;
+  while (p < n) {
+    const val = idx[p]; let q = p + 1;
+    while (q < n && idx[q] === val) q += 1;
+    vals.push(val); cnts.push(q - p); p = q;
+    // Run count only grows, so once RLE is not smaller it can never become the winning format.
+    // Return early to avoid building huge temporary JS arrays for high-detail/many-color frames.
+    if (vals.length * (4 + bpe) >= rawBytes) return raw();
+  }
+  return { v: (wide ? Uint16Array : Uint8Array).from(vals), c: Uint32Array.from(cnts), bytes: vals.length * (4 + bpe) };
 }
 function rleDecodeIdx(enc, n) {
+  // Current consumers are read-only; returning the owned raw payload avoids another full-frame copy.
+  if (enc.raw instanceof Uint16Array || enc.raw instanceof Uint8Array) return enc.raw;
   const idx = enc.v instanceof Uint16Array ? new Uint16Array(n) : new Uint8Array(n); let p = 0;
   for (let r = 0; r < enc.v.length; r += 1) { const c = enc.c[r]; idx.fill(enc.v[r], p, p + c); p += c; }
   return idx;
@@ -4544,8 +5181,14 @@ function isCBytes(data, n, color) {
 // Decode the scene ONCE at the OUTPUT (preview/apply/export) resolution, with the SAME
 // smoothing the players/export use, so the mask domain IS the apply domain. Two passes:
 // a 1x playback (fast), then a seek-fill for any frames the decoder coalesced (gap-free,
-// deterministic). Stores RLE-compressed reduced index maps (reused across picks).
+// deterministic). Stores the smaller of RLE/raw reduced index maps (reused across picks).
 async function captureSceneFrames(v, mp, scene, fps, w, h, reps, threshold, onProgress, abortCheck) {
+  const capturePlayGen = mp.playGen || 0;
+  const captureSetupGen = mp.setupGen || 0;
+  const sourceRevision = v._sourceRevision || 0;
+  const captureOwnsVideo = () => mp.ownerVideo === v && activeVideo() === v
+    && (v._sourceRevision || 0) === sourceRevision && (mp.playGen || 0) === capturePlayGen
+    && (mp.setupGen || 0) === captureSetupGen;
   const off = document.createElement("canvas"); off.width = w; off.height = h;
   const octx = off.getContext("2d", { willReadFrequently: true });
   octx.imageSmoothingEnabled = true; // MATCH mpDraw / export drawImage (browser default = smoothed)
@@ -4562,29 +5205,41 @@ async function captureSceneFrames(v, mp, scene, fps, w, h, reps, threshold, onPr
   const times = new Float64Array(Math.max(1, total)); // capture PTS per frame (index fi-fStart); used for VFR-correct apply mapping
   for (let i = 0; i < total; i += 1) times[i] = (fStart + i) / fps; // default = grid PTS (constant-fps correct)
   const BUDGET = 640 * 1024 * 1024; // hard cap on transient cache bytes -> never OOM the tab
-  let bytes = 0, aborted = false, phase = "play"; // "play" = fast playback grab, "seek" = slow gap fill
+  let bytes = 0, aborted = false, abortedDetail = "", phase = "play"; // "play" = fast playback grab, "seek" = slow gap fill
   const ac = () => { if (!aborted && abortCheck && abortCheck()) aborted = "navigated"; return !!aborted; }; // navigated away / re-analyzed mid-capture -> stop the decode
   const grabInto = (fi, t) => {
-    if (aborted || fi < fStart || fi > fEnd || frames.has(fi)) return;
-    try { octx.drawImage(mp.video, 0, 0, w, h); } catch (e) { return; }
-    const img = octx.getImageData(0, 0, w, h);
-    // マスク時は領域別パレットで縮約（表示・書き出しと同一）。領域マップはコマ番号 fi のもの
-    // を使うため、時刻はフレーム中心で渡す（reduceFrameAt が floor で fi に戻す）。
-    if (masksActive(v)) reduceFrameAt(v, img.data, (fi + 0.5) / fps, fps, w, h, { flat: true });
-    else reduceFrame(img.data, reps, threshold, mp.cache, w, h, { flat: true });
-    const idx = new (WIDE ? Uint16Array : Uint8Array)(n);
-    for (let i = 0, p = 0; p < n; i += 4, p += 1) { const r = repIndex.get((img.data[i] << 16) | (img.data[i + 1] << 8) | img.data[i + 2]); idx[p] = r === undefined ? NEW : r; }
-    const enc = rleEncodeIdx(idx, n);
-    frames.set(fi, enc); bytes += enc.bytes || 0;
-    if (Number.isFinite(t)) times[fi - fStart] = t; // real presented PTS (rVFC) so the apply mapping is exact on VFR sources
-    if (bytes > BUDGET) aborted = "tooBig"; // stop before exhausting memory (long/native/noisy scenes)
-    onProgress(frames.size, total, phase);
+    if (aborted || fi < fStart || fi > fEnd) return false;
+    if (frames.has(fi)) return true;
+    try {
+      octx.drawImage(mp.video, 0, 0, w, h);
+      const img = octx.getImageData(0, 0, w, h);
+      // マスク時は領域別パレットで縮約（表示・書き出しと同一）。領域マップはコマ番号 fi のもの
+      // を使うため、時刻はフレーム中心で渡す（reduceFrameAt が floor で fi に戻す）。
+      if (masksActive(v)) reduceFrameAt(v, img.data, (fi + 0.5) / fps, fps, w, h, { flat: true });
+      else reduceFrame(img.data, reps, threshold, mp.cache, w, h, { flat: true });
+      const idx = new (WIDE ? Uint16Array : Uint8Array)(n);
+      for (let i = 0, p = 0; p < n; i += 4, p += 1) { const r = repIndex.get((img.data[i] << 16) | (img.data[i + 1] << 8) | img.data[i + 2]); idx[p] = r === undefined ? NEW : r; }
+      const enc = rleEncodeIdx(idx, n);
+      frames.set(fi, enc); bytes += enc.bytes || 0;
+      if (Number.isFinite(t)) times[fi - fStart] = t; // real presented PTS (rVFC) so the apply mapping is exact on VFR sources
+      if (bytes > BUDGET) aborted = "tooBig"; // stop before exhausting memory (long/native/noisy scenes)
+      onProgress(frames.size, total, phase);
+      return true;
+    } catch (e) {
+      return false;
+    }
   };
   // One playback pass: play the scene once and grab every PRESENTED frame (same <video>, same
   // drawImage, same floor index — identical bytes to the seek path, so the mask domain is unchanged).
   const playPass = () => new Promise((resolve) => {
     let finished = false;
-    const finish = () => { if (finished) return; finished = true; try { mp.video.pause(); } catch (e) { /* ignore */ } window.clearTimeout(safety); resolve(); };
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      if (captureOwnsVideo()) { try { mp.video.pause(); } catch (e) { /* ignore */ } }
+      window.clearTimeout(safety);
+      resolve();
+    };
     const onFrame = (now, meta) => {
       if (finished || ac()) { finish(); return; }
       const t = meta ? meta.mediaTime : mp.video.currentTime;
@@ -4609,7 +5264,8 @@ async function captureSceneFrames(v, mp, scene, fps, w, h, reps, threshold, onPr
   if (typeof mp.video.requestVideoFrameCallback === "function" && !masksActive(v)) {
     for (let pass = 0; pass < MAXPASS && !ac(); pass += 1) {
       const before = frames.size;
-      await seekVideo(mp.video, scene.start + 1e-3).catch(() => {});
+      try { await seekVideo(mp.video, scene.start + 1e-3); }
+      catch (e) { break; } // exact seek-fill below remains authoritative
       await playPass();
       const remaining = total - frames.size, added = frames.size - before;
       // Stop replaying once seek-filling the rest is CHEAPER than another playback pass (cost-based,
@@ -4623,11 +5279,32 @@ async function captureSceneFrames(v, mp, scene, fps, w, h, reps, threshold, onPr
   onProgress(frames.size, total, phase);
   for (let fi = fStart; fi <= fEnd && !ac(); fi += 1) {
     if (frames.has(fi)) continue;
-    await seekVideo(mp.video, Math.min(scene.end - 1e-3, (fi + 0.25) / fps)).catch(() => {});
-    grabInto(fi, fi / fps); // gap fill: grid PTS (keeps constant-fps mapping identical to floor)
+    const target = Math.min(scene.end - 1e-3, (fi + 0.5) / fps);
+    let captured = false, lastError = null;
+    for (let attempt = 0; attempt < 2 && !ac(); attempt += 1) {
+      try {
+        if (attempt > 0) {
+          const neighbor = fi < fEnd ? fi + 1 : Math.max(fStart, fi - 1);
+          const neighborAt = Math.min(scene.end - 1e-3, (neighbor + 0.5) / fps);
+          await seekVideo(mp.video, neighborAt, false); // force a fresh presentation before retrying the target
+        }
+        const confirmed = await seekVideoFrameStrict(mp.video, target, fi, fps);
+        if (ac()) break;
+        captured = grabInto(fi, confirmed.mediaTime);
+        if (captured) break;
+        lastError = new Error(`Could not capture pixels for frame ${fi}`);
+      } catch (e) { lastError = e; }
+    }
+    if (!captured && !ac()) {
+      aborted = "seekFailed";
+      abortedDetail = lastError && lastError.message ? lastError.message : String(lastError || "unknown seek failure");
+      break;
+    }
   }
-  try { mp.video.playbackRate = mp.rate || 1; } catch (e) { /* ignore */ }
-  return { fps, w, h, fStart, fEnd, reps, frames, times, bytes, aborted };
+  if (!aborted && frames.size !== total) aborted = "incomplete";
+  if (captureOwnsVideo()) { try { mp.video.playbackRate = mp.rate || 1; } catch (e) { /* ignore */ } }
+  return { fps, w, h, fStart, fEnd, reps, frames, times, bytes, expectedFrames: total,
+    complete: !aborted && frames.size === total, aborted, abortedDetail: typeof abortedDetail === "string" ? abortedDetail : "" };
 }
 function reducedFromIndex(idx, reps, n) {
   const data = new Uint8ClampedArray(n * 4);
@@ -4639,7 +5316,6 @@ function reducedFromIndex(idx, reps, n) {
   }
   return data;
 }
-function repsSig(reps) { let h = reps.length; for (const c of reps) h = (Math.imul(h, 31) + packedRGB(c)) >>> 0; return h; }
 // STEP4 captures region frames with FLAT ICM when 高品質 is ON, so the frame cache must invalidate when
 // the ICM reduction (or its flat-relevant params) changes — flat mode ignores detail/recompose.
 function icmFlatSig() { const i = state.icm; return i.enabled ? `icm:${i.beta},${i.edgeSigma},${i.icmIters},${i.labelSmooth}` : "near"; }
@@ -4694,9 +5370,36 @@ function captureRepsFor(v, sceneId, fallbackReps) {
   return out;
 }
 // マスク時のキャプチャ内容は全領域パレットの状態（K/OFF/しきい値/減色なし）に依存する → 署名に反映
-function maskCaptureSig(v, sceneId) {
-  if (!masksActive(v)) return "nomask";
-  return regionStatesFor(v, sceneId).map((st) => (st.off ? "off" : `${st.th}:${repsSig(st.reps)}`)).join(",");
+function maskCaptureRecord(v, sceneId) {
+  if (!masksActive(v)) return ["nomask"];
+  return regionStatesFor(v, sceneId).map((st) => [st.off ? 1 : 0, st.th, st.reps.map((c) => packedRGB(c))]);
+}
+function regionFrameCacheSignature(v, scene, fps, w, h, capReps, threshold) {
+  return JSON.stringify([
+    "region-frame-r0b-i16",
+    [v.id, v.key, v._sourceRevision || 0, v._analysisRevision || 0, v._paletteRevision || 0, v._maskRevision || 0],
+    [scene.paletteId, scene.start, scene.end],
+    fps,
+    w,
+    h,
+    threshold,
+    capReps.map((c) => packedRGB(c)),
+    icmFlatSig(),
+    maskCaptureRecord(v, scene.paletteId),
+  ]);
+}
+function regionFrameCacheComplete(entry) {
+  if (!entry || entry.aborted || !entry.frames) return false;
+  const expected = Number.isSafeInteger(entry.expectedFrames)
+    ? entry.expectedFrames
+    : (Number.isSafeInteger(entry.fStart) && Number.isSafeInteger(entry.fEnd) ? entry.fEnd - entry.fStart + 1 : -1);
+  if (expected < 0 || entry.frames.size !== expected || !Number.isSafeInteger(entry.fStart) || !Number.isSafeInteger(entry.fEnd)) return false;
+  for (let fi = entry.fStart; fi <= entry.fEnd; fi += 1) if (!entry.frames.has(fi)) return false;
+  return true;
+}
+function regionCacheDelete(v, key) {
+  if (v._regionFrameCache) delete v._regionFrameCache[key];
+  if (v._regionCacheOrder) v._regionCacheOrder = v._regionCacheOrder.filter((k) => k !== key);
 }
 async function getSceneFrameCache(mp, scene, fps, w, h, reps, threshold, abortCheck, onProg) {
   const v = activeVideo();
@@ -4704,15 +5407,35 @@ async function getSceneFrameCache(mp, scene, fps, w, h, reps, threshold, abortCh
   // Key by scene IDENTITY (time range), not just paletteId — distinct scenes can share a
   // palette (e.g. two "first" scenes) and must NOT reuse each other's frame range/cache.
   const key = `${scene.paletteId}@${scene.start.toFixed(3)}-${scene.end.toFixed(3)}`;
-  const sig = `${key}|${threshold}|${repsSig(capReps)}|${w}x${h}|${Math.round(fps)}|${icmFlatSig()}|${maskCaptureSig(v, scene.paletteId)}|i16`; // |i16 = Uint16添字対応後の形式（旧 tooManyColors メモを無効化）
+  const sig = regionFrameCacheSignature(v, scene, fps, w, h, capReps, threshold);
   v._regionFrameCache = v._regionFrameCache || {};
+  const cacheNamespace = v._regionFrameCache; // ABA guard: invalidation may replace this object mid-capture
   const hit = v._regionFrameCache[key];
-  if (hit && hit.sig === sig) { regionCacheTouch(v, key); return hit; } // reuse: no decode (also a memoized "too big" marker -> instant hint, no re-decode)
+  const permanentFailure = hit && (hit.aborted === "tooBig" || hit.aborted === "tooManyColors");
+  if (hit && hit.sig === sig && (regionFrameCacheComplete(hit) || permanentFailure)) {
+    regionCacheTouch(v, key);
+    return hit;
+  }
+  if (hit) regionCacheDelete(v, key); // partial/old entries are never treated as an empty region
   const cache = await captureSceneFrames(v, mp, scene, fps, w, h, capReps, threshold,
     (got, tot, phase) => { setMergeHint(`${phase === "seek" ? "🧩 細部を補完中…" : phase === "exact" ? "🎞️ 1コマずつ読み込み中…" : "🎞️ 映像を読み込み中…"} ${got}/${tot}（このシーンは初回だけ）`); if (onProg) onProg(got, tot, phase); }, abortCheck);
   cache.sig = sig;
-  if (!cache.aborted) regionCacheStore(v, key, cache);                          // complete cache: retain (LRU-bounded)
-  else if (cache.aborted !== "navigated") regionCacheStore(v, key, { sig, aborted: cache.aborted, bytes: 0, frames: new Map(), fps, w, h, fStart: cache.fStart, fEnd: cache.fEnd, reps: capReps }); // memoize "too big / too many colors" so a repeat click is instant (no re-decode thrash)
+  const currentSig = activeVideo() === v ? regionFrameCacheSignature(v, scene, fps, w, h, capReps, threshold) : "different-owner";
+  // Recheck the live owner/signature/namespace for EVERY result, including permanent-failure markers.
+  // Otherwise a delayed old tooBig marker can overwrite a newer complete entry after invalidation.
+  const currentOwner = !(abortCheck && abortCheck()) && currentSig === sig && v._regionFrameCache === cacheNamespace;
+  if (!currentOwner) cache.aborted = "stale";
+  if (!cache.aborted && !regionFrameCacheComplete(cache)) cache.aborted = "incomplete";
+  cache.complete = !cache.aborted && regionFrameCacheComplete(cache);
+  const newer = cacheNamespace[key];
+  if (currentOwner && newer && newer !== hit && newer.sig === sig && regionFrameCacheComplete(newer)) return newer;
+  if (newer && newer !== hit) cache.aborted = "stale"; // a concurrent/newer writer owns this slot
+  cache.complete = !cache.aborted && regionFrameCacheComplete(cache);
+  if (cache.complete) regionCacheStore(v, key, cache); // commit only after full coverage + current signature recheck
+  else if (cache.aborted === "tooBig" || cache.aborted === "tooManyColors") {
+    regionCacheStore(v, key, { sig, aborted: cache.aborted, complete: false, bytes: 0, frames: new Map(), fps, w, h,
+      fStart: cache.fStart, fEnd: cache.fEnd, expectedFrames: cache.expectedFrames, reps: capReps });
+  } // seekFailed/incomplete/stale/navigated stay transient so the next click can retry
   return cache;
 }
 // nearest pixel that is the seed color, spiraling out from (sx,sy) — robustness for edge clicks.
@@ -4734,11 +5457,18 @@ function nearestIsC(isCbytes, w, h, sx, sy, R) {
 // Per-frame masks are stored RLE; the flood/propagation is chunked to keep the UI responsive.
 async function buildRegionSelection(side, px, py) {
   const v = activeVideo(); const mp = mergePlayers[side];
-  if (!v || !mp || !mp.scene || !mp.pickCtx) return null;
+  if (!v || !mp || !mp.scene || !mp.pickCtx || !mp.ready || mp.pendingSeekGen != null) return null;
   const scene = mp.scene, reps = mp.reps, threshold = mp.threshold;
+  const setupGen = mp.setupGen || 0;
+  const sourceRevision = v._sourceRevision || 0;
   const w = mp.pickCanvas.width, h = mp.pickCanvas.height, n = w * h; // 1:1 with display/apply/export
   const sx = Math.max(0, Math.min(w - 1, px | 0)), sy = Math.max(0, Math.min(h - 1, py | 0));
-  const restoreT = mp.video.currentTime;
+  const restoreT = mp.cachedAt != null ? mp.cachedAt : mp.video.currentTime;
+  const buildSeekGen = (mp.seekGen = (mp.seekGen || 0) + 1);
+  mp.pendingSeekGen = buildSeekGen;
+  mp._regionSeekGen = buildSeekGen;
+  mp.cachedAt = restoreT;
+  mp.settled = false;
   setRegionBusy(v, side, true); // set BEFORE any await so a 2nd click on THIS side can't launch a concurrent build (the other side is independent)
   v._regionBuildGen = v._regionBuildGen || { L: 0, R: 0 };
   const myGen = (v._regionBuildGen[side] = (v._regionBuildGen[side] || 0) + 1); // this side's build identity; abortRegionBuild(v, side) bumps it
@@ -4748,16 +5478,45 @@ async function buildRegionSelection(side, px, py) {
   const vForReduce = { merges: (v.merges || []).slice() };
   showMergeProgress(side); // circular progress over the frozen frame (covers fps measure + capture; instant cache hit just flashes off)
   const fps = await mpEnsureFps(side);
+  if (aborted() || activeVideo() !== v || mergePlayers[side] !== mp || mp.ownerVideo !== v) {
+    setRegionBusy(v, side, false);
+    return null;
+  }
   const cache = await getSceneFrameCache(mp, scene, fps, w, h, reps, threshold, aborted, (got, tot, phase) => updateMergeProgress(side, got, tot, phase));
-  await seekVideo(mp.video, restoreT).catch(() => {}); // overlay stays up for the compute phase below; pickRegion's finally hides it
-  if (aborted()) return null; // build was cancelled while capturing; _regionBusy already cleared by abortRegionBuild
+  const canRestore = () => !aborted() && activeVideo() === v && mergePlayers[side] === mp && mp.ownerVideo === v
+    && (v._sourceRevision || 0) === sourceRevision && (mp.setupGen || 0) === setupGen && mp.scene === scene && !mp.playing;
+  let restoreFailed = false, restored = false;
+  if (canRestore()) {
+    const restoreGen = mp.playGen || 0;
+    const restoreF = Math.floor(restoreT * fps + 1e-6);
+    try {
+      await seekVideoFrameStrict(mp.video, restoreT, restoreF, fps, 5000);
+      restored = canRestore() && (mp.playGen || 0) === restoreGen && mp.pendingSeekGen === buildSeekGen;
+    }
+    catch (e) { if (canRestore() && (mp.playGen || 0) === restoreGen && (!e || e.name !== "StaleVideoSeekError")) restoreFailed = true; }
+  }
+  if (!canRestore()) return null; // cancellation/new playback owns the element; never launch a late restore
+  if (!restored) restoreFailed = true;
+  if (restoreFailed) {
+    setRegionBusy(v, side, false);
+    flashMergeHint("🧩 表示コマを厳密に復元できなかったため領域選択を中止しました。もう一度お試しください");
+    return null;
+  }
+  mp.cachedAt = null;
+  mp.pendingSeekGen = null;
+  mp._regionSeekGen = null;
+  mp.settled = true; // frozen Canvas and restored video now refer to the same strictly latched frame
+  mpSyncControls(side);
   if (cache.aborted) {
     setRegionBusy(v, side, false);
-    const msg = cache.aborted === "tooManyColors"
-      ? "🧩 代表色が多すぎて領域選択は使えません"
-      : "🧩 この動画は長い/高精細すぎて領域選択ができません（STEP2でプレビュー解像度を下げてください）";
+    let msg;
+    if (cache.aborted === "tooManyColors") msg = "🧩 代表色が多すぎて領域選択は使えません";
+    else if (cache.aborted === "tooBig") msg = "🧩 この動画は長い/高精細すぎて領域選択ができません（STEP2でプレビュー解像度を下げてください）";
+    else if (cache.aborted === "seekFailed" || cache.aborted === "incomplete") msg = "🧩 映像のコマ取得に失敗したため領域選択を中止しました。未完了cacheは保存していません。もう一度お試しください";
+    else if (cache.aborted === "stale") msg = "🧩 処理中にパレット等が変更されたため領域選択を中止しました。もう一度選択してください";
+    else msg = "🧩 領域選択を完了できませんでした。未完了cacheは保存していません";
     flashMergeHint(msg);
-    showToast("info", msg); // ヒント行は見逃しやすい（「一瞬表示が出て何も始まらない」報告）→ トーストでも明示
+    showToast(cache.aborted === "tooBig" || cache.aborted === "tooManyColors" ? "info" : "error", msg); // ヒント行は見逃しやすい → トーストでも明示
     return null;
   }
   const { fStart, fEnd } = cache;
@@ -4942,7 +5701,7 @@ function attachCmpDrag() {
   window.addEventListener("mouseup", () => { drag = false; });
 }
 function redrawMergeAll(v) {
-  ["L", "R"].forEach((s) => { const mp = mergePlayers[s]; if (mp && !mp.playing && !regionBusy(v, s)) mpDraw(s); }); // don't redraw a side mid-region-capture (would jump its frame off the capture position)
+  ["L", "R"].forEach((s) => { const mp = mergePlayers[s]; if (mp && mp.ready && !mp.playing && !regionBusy(v, s)) mpDraw(s); }); // don't redraw a side mid-region-capture (would jump its frame off the capture position)
   if (v && v._mergePanelOpen) drawMergeCompare(v);
 }
 function renderMergeTargets(v) {
@@ -4957,6 +5716,7 @@ function memberFromSel(s) {
   return isRegionMember(s) ? { kind: "region", color: s.color.slice(), region: s.region } : { kind: "color", color: s.color.slice() };
 }
 function setPendingTarget(v, color) {
+  bumpVideoRevision(v, "_mergePreviewRevision");
   v._mergePending = { target: color.slice(), members: (v.mergeSel || []).filter((s) => !sameColor(s.color, color)).map(memberFromSel) };
   renderMergeTargets(v);
   redrawMergeAll(v);
@@ -4977,7 +5737,7 @@ function openMergePanel() {
   dom.mergePanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 function closeMergePanel(v) {
-  if (v) { v._mergePanelOpen = false; v._mergePending = null; }
+  if (v) { bumpVideoRevision(v, "_mergePreviewRevision"); v._mergePanelOpen = false; v._mergePending = null; }
   dom.mergePanel.hidden = true;
 }
 function cancelMergePanel() {
@@ -4997,6 +5757,7 @@ function confirmMerge() {
   const p = v._mergePending;
   v.merges = v.merges || [];
   v.merges.push({ id: (v._mergeSeq = (v._mergeSeq || 0) + 1), target: p.target.slice(), members: p.members.map((m) => (m.kind === "region" ? { kind: "region", color: m.color.slice(), region: m.region } : { kind: "color", color: m.color.slice() })) });
+  bumpVideoRevision(v, "_mergeRevision");
   v.mergeSel = [];
   closeMergePanel(v);
   syncMergeModeUI(v);     // clears chips, hides action row
@@ -5009,6 +5770,7 @@ function onMergeGroupDel(e) {
   if (anyRegionBusy(v)) { flashMergeHint("いま領域を計算中です…"); return; } // also: the confirm() dialog would block the build's yields
   if (!window.confirm("この統合を解除しますか？")) return;
   v.merges.splice(Number(btn.dataset.mergeDel), 1);
+  bumpVideoRevision(v, "_mergeRevision");
   renderMergeGroups(v);
   redrawMergeAll(v);
 }
@@ -5265,8 +6027,7 @@ async function exportViaPlaybackCapture(v, fmt) {
   const { Muxer, ArrayBufferTarget } = await import(`./vendor/webm-muxer/webm-muxer.js?v=${APP_VERSION}`);
   resetWorkVideo();
   dom.workVideo.preload = "auto";
-  dom.workVideo.src = v.url;
-  dom.workVideo.load();
+  loadWorkVideoSource(v);
   await ensureMetadata(dom.workVideo);
   const { width, height } = scaledSize(dom.workVideo.videoWidth, dom.workVideo.videoHeight, v.analysis.settings.previewShortSide);
   dom.exportCanvas.width = width;
@@ -5342,7 +6103,7 @@ async function exportViaPlaybackCapture(v, fmt) {
         if (dom.workVideo.ended || dom.workVideo.paused) { finish(); return; }
         requestAnimationFrame(onRAF);
       };
-      dom.workVideo.currentTime = 0;
+      setVideoCurrentTime(dom.workVideo, 0);
       dom.workVideo.play().then(() => {
         if (useRVFC) dom.workVideo.requestVideoFrameCallback(onRVFC);
         else requestAnimationFrame(onRAF);
@@ -5387,8 +6148,7 @@ async function exportViaWebCodecs(v, fmt) {
   const { Muxer, ArrayBufferTarget } = await import(`./vendor/webm-muxer/webm-muxer.js?v=${APP_VERSION}`);
   resetWorkVideo();
   dom.workVideo.preload = "auto";
-  dom.workVideo.src = v.url;
-  dom.workVideo.load();
+  loadWorkVideoSource(v);
   await ensureMetadata(dom.workVideo);
   const { width, height } = scaledSize(dom.workVideo.videoWidth, dom.workVideo.videoHeight, v.analysis.settings.previewShortSide);
   dom.exportCanvas.width = width;
@@ -5468,8 +6228,7 @@ async function exportViaFFmpeg(v, fmt) {
   const ffmpeg = await getFFmpeg();
   resetWorkVideo();
   dom.workVideo.preload = "auto";
-  dom.workVideo.src = v.url;
-  dom.workVideo.load();
+  loadWorkVideoSource(v);
   await ensureMetadata(dom.workVideo);
   const { width, height } = scaledSize(dom.workVideo.videoWidth, dom.workVideo.videoHeight, v.analysis.settings.previewShortSide);
   dom.exportCanvas.width = width;
@@ -5562,8 +6321,7 @@ function restart() {
 
 function resetWorkVideo() {
   dom.workVideo.pause();
-  dom.workVideo.removeAttribute("src");
-  dom.workVideo.load();
+  unloadVideoSource(dom.workVideo);
   try { dom.workVideo.playbackRate = state.previewRate || 1; } catch (e) { /* ignore */ }
 }
 
@@ -5592,10 +6350,13 @@ async function transcodeVideo(v, originalError) {
     const convertedUrl = URL.createObjectURL(convertedBlob);
     const oldUrl = v.url;
     v.url = convertedUrl;
+    v._sourceRevision = ++state.videoSourceSeq;
+    v.fps = 0;
+    v._mpFps = 0;
+    invalidateFramePreviewCaches(v);
     resetWorkVideo();
     dom.workVideo.preload = "metadata";
-    dom.workVideo.src = v.url;
-    dom.workVideo.load();
+    loadWorkVideoSource(v);
     if (oldUrl && oldUrl === v.objectUrl) { /* keep objectUrl ref for cleanup */ }
     await deleteFFmpegFile(ffmpeg, inputName);
     await deleteFFmpegFile(ffmpeg, outputName);
@@ -5675,6 +6436,13 @@ function scaledSize(width, height, shortSide) {
   return { width: ev(width), height: ev(height) };
 }
 
+// Mask scaling is safe only when both integer dimensions describe exactly the same ratio.
+// A floating tolerance can accept a subtly stretched mask, which accumulates visible edge drift.
+function sameAspectRatio(widthA, heightA, widthB, heightB) {
+  if (![widthA, heightA, widthB, heightB].every((x) => Number.isSafeInteger(x) && x > 0)) return false;
+  return BigInt(widthA) * BigInt(heightB) === BigInt(widthB) * BigInt(heightA);
+}
+
 function processPixels(data, representatives, threshold, cache, maskOnly) {
   const thresholdSq = threshold * threshold;
   for (let index = 0; index < data.length; index += 4) {
@@ -5736,7 +6504,7 @@ function ensureMetadata(video) {
     video.addEventListener("canplay", onLoaded, { once: true });
     video.addEventListener("durationchange", onLoaded, { once: true });
     video.addEventListener("error", onError, { once: true });
-    video.load();
+    reloadVideo(video);
   });
 }
 
@@ -5753,18 +6521,66 @@ function mediaErrorMessage(video) {
   return `${label} (code ${error.code})${extra}`;
 }
 
-function seekVideo(video, time, waitForFrame = true) {
+function nextVideoSeekToken(video) {
+  video._paletteSeekToken = (video._paletteSeekToken || 0) + 1;
+  return video._paletteSeekToken;
+}
+function invalidateVideoFpsMeasurement(video) {
+  if (video) video._paletteFpsMeasureToken = (video._paletteFpsMeasureToken || 0) + 1;
+}
+function reloadVideo(video) {
+  nextVideoSeekToken(video);
+  invalidateVideoFpsMeasurement(video);
+  video.load();
+}
+function loadVideoSource(video, src) {
+  nextVideoSeekToken(video);
+  invalidateVideoFpsMeasurement(video);
+  video.src = src;
+  video.load();
+}
+function loadWorkVideoSource(v) {
+  dom.workVideo._paletteOwnerVideo = v;
+  dom.workVideo._paletteOwnerRevision = v ? (v._sourceRevision || 0) : 0;
+  loadVideoSource(dom.workVideo, v.url);
+}
+function unloadVideoSource(video) {
+  nextVideoSeekToken(video);
+  invalidateVideoFpsMeasurement(video);
+  video.removeAttribute("src");
+  video._paletteOwnerVideo = null;
+  video._paletteOwnerRevision = 0;
+  video.load();
+}
+function currentVideoSeek(video, token) { return video._paletteSeekToken === token; }
+function staleVideoSeekError() { const e = new Error("Video seek was superseded by a newer request"); e.name = "StaleVideoSeekError"; return e; }
+function setVideoCurrentTime(video, time) {
+  invalidateVideoFpsMeasurement(video);
+  nextVideoSeekToken(video); // direct UI/playback assignments supersede every awaited seek on this element
+  video.currentTime = time;
+}
+
+function seekVideo(video, time, waitForFrame = true, timeoutMs = 30000) {
+  const token = nextVideoSeekToken(video);
   if (Math.abs(video.currentTime - time) < 0.001 && video.readyState >= 2) {
-    return waitForFrame ? waitForVideoFrame(video) : Promise.resolve();
+    const ready = waitForFrame ? waitForVideoFrame(video) : Promise.resolve();
+    return ready.then(() => { if (!currentVideoSeek(video, token)) throw staleVideoSeekError(); });
   }
   return new Promise((resolve, reject) => {
-    const timeout = window.setTimeout(() => { cleanup(); reject(new Error(`Timed out while seeking video to ${formatNumber(time, 3)}s`)); }, 30000);
-    const onSeeked = () => {
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
       cleanup();
-      if (waitForFrame) waitForVideoFrame(video).then(resolve);
-      else resolve();
+      if (error) reject(error); else resolve();
     };
-    const onError = () => { cleanup(); reject(new Error("Video seek failed")); };
+    const timeout = window.setTimeout(() => finish(new Error(`Timed out while seeking video to ${formatNumber(time, 3)}s`)), timeoutMs);
+    const onSeeked = () => {
+      if (!currentVideoSeek(video, token)) { finish(staleVideoSeekError()); return; }
+      if (waitForFrame) waitForVideoFrame(video).then(() => finish(currentVideoSeek(video, token) ? null : staleVideoSeekError()));
+      else finish(null);
+    };
+    const onError = () => finish(currentVideoSeek(video, token) ? new Error("Video seek failed") : staleVideoSeekError());
     const cleanup = () => { window.clearTimeout(timeout); video.removeEventListener("seeked", onSeeked); video.removeEventListener("error", onError); };
     video.addEventListener("seeked", onSeeked, { once: true });
     video.addEventListener("error", onError, { once: true });
@@ -5795,6 +6611,110 @@ function waitForVideoFrame(video) {
       return;
     }
     requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
+}
+
+// Completion/cache paths must distinguish a real presented-frame callback from the soft 250ms UI
+// timeout above. Register the latch BEFORE assigning currentTime: on a paused video Chrome can emit
+// the presentation callback before `seeked`, and registering afterwards loses it. A rounded fps such
+// as 23.976 also differs slightly from 24000/1001, so compare PTS with a sub-frame tolerance instead
+// of flooring `mediaTime * fps` at a brittle boundary. A previous/next frame remains a full frame
+// away and is rejected.
+function strictPresentedFrame(meta, expectedFrame, fps) {
+  if (!meta || !Number.isFinite(meta.mediaTime) || !Number.isFinite(fps) || fps <= 0) return null;
+  const expectedPts = expectedFrame / fps;
+  const ptsTolerance = Math.max(0.001, 0.1 / fps);
+  if (Math.abs(meta.mediaTime - expectedPts) > ptsTolerance) return null;
+  return { mediaTime: meta.mediaTime, actualFrame: Math.round(meta.mediaTime * fps) };
+}
+
+function seekVideoFrameStrict(video, time, expectedFrame, fps, timeoutMs = 2500) {
+  if (typeof video.requestVideoFrameCallback !== "function") return Promise.reject(new Error("Strict frame latch is not supported by this browser"));
+  const priorToken = video._paletteSeekToken || 0;
+  const alreadyAtTarget = Math.abs(video.currentTime - time) < 0.001 && video.readyState >= 2;
+  const certified = video._paletteStrictCertification;
+  if (alreadyAtTarget && video.paused && certified && certified.seekToken === priorToken
+    && certified.expectedFrame === expectedFrame && Math.abs(certified.fps - fps) < 1e-9
+    && Math.abs(certified.time - time) < 0.001) {
+    invalidateVideoFpsMeasurement(video);
+    const token = nextVideoSeekToken(video);
+    const value = { mediaTime: certified.mediaTime, actualFrame: certified.actualFrame };
+    video._paletteStrictCertification = { ...certified, seekToken: token };
+    return Promise.resolve(value); // no intervening seek/play intent: the paused certified pixels are still authoritative
+  }
+  if (alreadyAtTarget) {
+    // Some decoders emit no fresh rVFC for a no-op currentTime assignment. Move to a bounded
+    // neighbour first, then register the target latch before seeking back; never wait 5s and guess.
+    const maxTime = Number.isFinite(video.duration) ? Math.max(0, video.duration - 0.001) : (expectedFrame + 1.5) / fps;
+    const forward = Math.min(maxTime, (expectedFrame + 1.5) / fps); // centre of the NEXT ordinal
+    const backward = Math.max(0, (expectedFrame - 0.5) / fps);      // centre of the PREVIOUS ordinal
+    const neighbor = Math.floor(forward * fps + 1e-6) !== expectedFrame ? forward : backward;
+    if (Math.abs(neighbor - time) > 0.002) {
+      invalidateVideoFpsMeasurement(video);
+      return seekVideo(video, neighbor, false, Math.min(1500, timeoutMs))
+        .then(() => seekVideoFrameStrict(video, time, expectedFrame, fps, timeoutMs));
+    }
+  }
+  invalidateVideoFpsMeasurement(video); // a strict draw request supersedes any warning-only fps sampling/restoration
+  const token = nextVideoSeekToken(video);
+  return new Promise((resolve, reject) => {
+    let done = false, seeked = false, matched = null, callbackId = null;
+    const seekTolerance = Math.max(0.002, 0.45 / Math.max(1, fps));
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      video.removeEventListener("seeked", onSeeked);
+      video.removeEventListener("error", onError);
+      if (callbackId != null && typeof video.cancelVideoFrameCallback === "function") {
+        try { video.cancelVideoFrameCallback(callbackId); } catch (e) { /* ignore */ }
+      }
+    };
+    const finish = (error, value) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      if (error) reject(error);
+      else {
+        video._paletteStrictCertification = { seekToken: token, time, expectedFrame, fps,
+          mediaTime: value.mediaTime, actualFrame: value.actualFrame };
+        resolve(value);
+      }
+    };
+    const maybeFinish = () => {
+      if (!seeked || !matched || done) return;
+      if (!currentVideoSeek(video, token)) { finish(staleVideoSeekError()); return; }
+      if (Math.abs(video.currentTime - time) > seekTolerance) {
+        finish(new Error(`Seek landed at ${formatNumber(video.currentTime, 4)}s instead of ${formatNumber(time, 4)}s`));
+        return;
+      }
+      finish(null, matched);
+    };
+    const requestLatch = () => {
+      if (done) return;
+      callbackId = video.requestVideoFrameCallback((now, meta) => {
+        callbackId = null;
+        if (done) return;
+        if (!currentVideoSeek(video, token)) { finish(staleVideoSeekError()); return; }
+        const confirmed = strictPresentedFrame(meta, expectedFrame, fps);
+        if (confirmed) { matched = confirmed; maybeFinish(); }
+        else requestLatch(); // an old frame may be presented while the seek is still in flight
+      });
+    };
+    const onSeeked = () => {
+      if (!currentVideoSeek(video, token)) { finish(staleVideoSeekError()); return; }
+      seeked = true; maybeFinish();
+    };
+    const onError = () => finish(currentVideoSeek(video, token) ? new Error("Video seek failed") : staleVideoSeekError());
+    const timer = window.setTimeout(() => finish(new Error(`Timed out while confirming presented frame ${expectedFrame}`)), timeoutMs);
+    video.addEventListener("seeked", onSeeked, { once: true });
+    video.addEventListener("error", onError, { once: true });
+    requestLatch();
+    try {
+      // Treat an already-decoded no-op position as seek-complete, but still require a fresh matching
+      // presentation callback. The caller's bounded neighbor retry handles browsers that emit none.
+      if (Math.abs(video.currentTime - time) < 0.001 && video.readyState >= 2) seeked = true;
+      video.currentTime = time;
+      maybeFinish();
+    } catch (error) { finish(error); }
   });
 }
 
